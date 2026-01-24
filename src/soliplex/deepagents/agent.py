@@ -19,12 +19,14 @@ if typing.TYPE_CHECKING:
 # Conditional import for pydantic-deep
 try:
     from pydantic_deep import DeepAgentDeps
+    from pydantic_deep import LocalBackend
     from pydantic_deep import StateBackend
 
     PYDANTIC_DEEP_AVAILABLE = True
 except ImportError:
     PYDANTIC_DEEP_AVAILABLE = False
     DeepAgentDeps = None
+    LocalBackend = None
     StateBackend = None
 
 
@@ -72,7 +74,17 @@ class SoliplexDeepAgent:
     def __post_init__(self):
         _check_pydantic_deep_available()
         if self._deep_deps is None:
-            self._deep_deps = DeepAgentDeps(backend=StateBackend())
+            backend = self._create_backend()
+            self._deep_deps = DeepAgentDeps(backend=backend)
+
+    def _create_backend(self):
+        """Create the appropriate backend based on agent config."""
+        backend_kind = getattr(self.agent_config, "backend_kind", "state")
+        backend_root = getattr(self.agent_config, "backend_root", None)
+
+        if backend_kind == "filesystem" and backend_root:
+            return LocalBackend(root_dir=backend_root)
+        return StateBackend()
 
     def _convert_deps(
         self,

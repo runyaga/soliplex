@@ -63,6 +63,8 @@ class DeepAgentConfig:
 
     id: str
     model_name: str = None
+    retries: int = 3
+    model_settings: typing.Any = None  # pydantic_ai.settings.ModelSettings
 
     # System prompt (inline or file path starting with './')
     system_prompt: dataclasses.InitVar[str] = None
@@ -74,6 +76,10 @@ class DeepAgentConfig:
     include_filesystem: bool = True
     include_subagents: bool = True
     include_skills: bool = False
+    include_execute: bool = None  # None = auto-determine based on backend
+
+    # Subagent nesting configuration
+    max_nesting_depth: int = 0  # 0 = subagents can't spawn sub-subagents
 
     # Backend configuration
     backend_kind: str = "state"  # "state", "filesystem", "composite"
@@ -127,6 +133,30 @@ class DeepAgentConfig:
         try:
             config["_installation_config"] = installation_config
             config["_config_path"] = config_path
+
+            # Get installation-level deep_agents config
+            deep_agents_config = getattr(
+                installation_config, "deep_agents", None
+            ) or {}
+
+            # Apply installation-level defaults for backend if not set in room
+            if "backend_kind" not in config:
+                config["backend_kind"] = deep_agents_config.get(
+                    "default_backend_kind", "state"
+                )
+
+            # Set backend_root from installation config if not explicitly set
+            if "backend_root" not in config:
+                state_root = deep_agents_config.get("state_root")
+                if state_root:
+                    # Each room gets its own subdirectory under state_root
+                    # Agent id is "room-{room_id}", strip the prefix
+                    agent_id = config.get("id", "unknown")
+                    if agent_id.startswith("room-"):
+                        room_id = agent_id[5:]  # Strip "room-" prefix
+                    else:
+                        room_id = agent_id
+                    config["backend_root"] = f"{state_root}/{room_id}"
 
             # Handle system_prompt as inline text or file path
             if "system_prompt" in config:
@@ -223,6 +253,7 @@ class DeepAgentConfig:
             "include_filesystem": self.include_filesystem,
             "include_subagents": self.include_subagents,
             "include_skills": self.include_skills,
+            "include_execute": self.include_execute,
             "backend_kind": self.backend_kind,
             "backend_root": self.backend_root,
             "subagents": [sa.to_dict() for sa in self.subagents],

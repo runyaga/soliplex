@@ -1,0 +1,55 @@
+id: "deep"
+name: "Autonomous AI Assistant"
+description: "AI agent with planning, files, and subagents (requires deepagents dependency)"
+suggestions:
+- "Create a Python calculator module with add, subtract, multiply, divide functions."
+- "Plan and implement a simple REST API with FastAPI."
+- "Analyze this codebase and suggest improvements."
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Feature toggles
+  include_todo: true
+  include_filesystem: true
+  include_subagents: true
+  include_skills: false
+
+  # Backend (in-memory for MVP)
+  backend_kind: "state"
+
+  # Subagents
+  subagents:
+    - name: "code-reviewer"
+      description: "Reviews code for quality, security, and best practices"
+      instructions: |
+        You are an expert code reviewer. When reviewing code:
+
+        1. Check for security vulnerabilities
+        2. Look for performance issues
+        3. Verify proper error handling
+        4. Assess code readability
+
+        Provide specific, actionable feedback.
+
+    - name: "test-writer"
+      description: "Generates pytest test cases for Python code"
+      instructions: |
+        You are a testing expert. Generate comprehensive tests:
+
+        - Unit tests for individual functions
+        - Edge cases and error conditions
+        - Use pytest fixtures and parametrize
+        - Include docstrings explaining each test
+
+  # Require approval for code execution (currently not implemented)
+  interrupt_on:
+    execute: true
+
+# Soliplex tools work alongside deep agent
+tools:
+  - tool_name: "soliplex.tools.get_current_datetime"
+
+allow_mcp: false

@@ -14,6 +14,8 @@ from soliplex import agui
 from soliplex import config
 from soliplex import mcp_client
 from soliplex import models
+from soliplex.deepagents import config as deep_config
+from soliplex.deepagents import factory as deep_factory
 
 ToolConfigMap = dict[str, typing.Any]
 
@@ -99,7 +101,7 @@ def _get_default_agent_from_configs(
 
 
 def get_agent_from_configs(
-    agent_config: config.AgentConfig,
+    agent_config: config.AgentConfig | deep_config.DeepAgentConfig,
     tool_configs: ToolConfigMap,
     mcp_client_toolset_configs: config.MCP_ClientToolsetConfigMap,
 ) -> SoliplexAgent:
@@ -108,6 +110,13 @@ def get_agent_from_configs(
     if agent_config.id not in _agent_cache:
         if agent_config.kind == "default":
             agent = _get_default_agent_from_configs(
+                agent_config,
+                tool_configs,
+                mcp_client_toolset_configs,
+            )
+
+        elif agent_config.kind == "deep":
+            agent = deep_factory.create_deep_agent_from_config(
                 agent_config,
                 tool_configs,
                 mcp_client_toolset_configs,

@@ -63,6 +63,9 @@ tui = [
     "textual-serve",
     "typer",
 ]
+deepagents = [
+    "pydantic-deep >= 0.1.0",
+]
 
 [tool.pytest.ini_options]
 pythonpath = "."

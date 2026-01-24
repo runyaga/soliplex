@@ -236,3 +236,37 @@ def test_get_agent_from_configs_w_hit():
         found = agents.get_agent_from_configs(a_config, [], {})
 
     assert found is expected
+
+
+@mock.patch("soliplex.deepagents.factory.create_deep_agent_from_config")
+def test_get_agent_from_configs_wo_hit_w_deep_kind(mock_create_deep_agent):
+    from soliplex.deepagents import config as deep_config
+
+    agent_config = mock.create_autospec(deep_config.DeepAgentConfig)
+    agent_config.kind = "deep"
+    agent_config.id = ROOM_ID
+
+    tool_config = mock.create_autospec(config.ToolConfig)
+    tool_configs = {"test_tool": tool_config}
+
+    mcpcts = mock.create_autospec(config.MCP_ClientToolsetConfig)
+    mcpcts_configs = {"test_mcpcts": mcpcts}
+
+    with (
+        mock.patch.dict("soliplex.agents._agent_cache", clear=True) as cache,
+    ):
+        found = agents.get_agent_from_configs(
+            agent_config,
+            tool_configs=tool_configs,
+            mcp_client_toolset_configs=mcpcts_configs,
+        )
+
+        assert cache[ROOM_ID] is found
+
+    assert found is mock_create_deep_agent.return_value
+
+    mock_create_deep_agent.assert_called_once_with(
+        agent_config,
+        tool_configs,
+        mcpcts_configs,
+    )

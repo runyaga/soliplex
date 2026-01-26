@@ -5,6 +5,9 @@ the max_nesting_depth parameter which allows subagents to spawn
 sub-subagents.
 
 All other types/classes are imported from the pip-installed pydantic-deep.
+
+This module also patches pydantic_ai.Agent to add the _register_toolset
+method required by subagents-pydantic-ai (which expects an older/forked API).
 """
 
 from __future__ import annotations
@@ -40,6 +43,27 @@ from subagents_pydantic_ai import get_subagent_system_prompt
 
 if TYPE_CHECKING:
     from pydantic_ai.toolsets import AbstractToolset
+
+
+# -----------------------------------------------------------------------------
+# Monkeypatch: Add _register_toolset to Agent
+#
+# The subagents-pydantic-ai library expects Agent to have a _register_toolset
+# method, which was present in a forked version of pydantic-ai but not in the
+# official release. We patch it here to append toolsets to _user_toolsets.
+# -----------------------------------------------------------------------------
+def _register_toolset(self: Agent[Any, Any], toolset: Any) -> None:
+    """Register a toolset with this agent at runtime.
+
+    This is a compatibility shim for subagents-pydantic-ai which expects
+    the _register_toolset method. It appends the toolset to _user_toolsets.
+    """
+    self._user_toolsets.append(toolset)
+
+
+if not hasattr(Agent, "_register_toolset"):
+    Agent._register_toolset = _register_toolset  # type: ignore[attr-defined]
+
 
 OutputDataT = TypeVar("OutputDataT")
 

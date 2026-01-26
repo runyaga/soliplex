@@ -180,17 +180,16 @@ environment:
   #   value: "http://localhost:11434"
   #------------------------------------------------------------------------
 
-  - name: "OLLAMA_BASE_URL"
-    value: "http://bizon:11434"
+  # Pull OLLAMA_BASE_URL from environment (set in .env or shell)
+  - "OLLAMA_BASE_URL"
 
   #------------------------------------------------------------------------
   # Docker host for remote code execution sandbox
   #
-  # Set to ssh://hostname for remote Docker execution
+  # Set DOCKER_HOST in .env for remote Docker (e.g., ssh://hostname)
   # Requires: uv sync --group sandbox
   #------------------------------------------------------------------------
-  - name: "DOCKER_HOST"
-    value: "ssh://bizon"
+  - "DOCKER_HOST"
 
   #------------------------------------------------------------------------
   # 'soliplex': on-disk configuration locations

@@ -28,7 +28,7 @@ agent:
 
   # Docker sandbox for isolated execution
   # Requires: uv sync --group sandbox
-  # Requires: DOCKER_HOST in .env (e.g., ssh://bizon)
+  # Requires: DOCKER_HOST in .env (e.g., ssh://hostname)
   backend_kind: "docker"
   # Save code and results here for auditability (call agent.save_state() after run)
   backend_root: "../../deep-state/deep_coder_sandbox"

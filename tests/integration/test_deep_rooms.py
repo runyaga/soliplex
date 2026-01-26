@@ -1060,6 +1060,7 @@ async def test_deep_room(room_id: str, installation):
         saved_path = agent.save_state(
             run_output=result.output,
             prompt=test_config["prompt"],
+            run_result=result,
         )
         if saved_path:
             print(f"\n  Saved state to: {saved_path}")

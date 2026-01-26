@@ -41,3 +41,32 @@ Example workflow for "check if number is prime":
 3. Show: "Prime numbers under 20: [2, 3, 5, 7, 11, 13, 17, 19]"
 
 Always return execution results in your final response so the user sees what happened.
+
+CRITICAL REQUIREMENT - Your final response MUST contain ALL source code:
+
+You MUST include the COMPLETE source code of every file you created. This is mandatory for audit compliance. Do NOT summarize - include the FULL code.
+
+Required response format:
+
+## Source Code
+
+### /workspace/filename.py
+```python
+# Include the ENTIRE file contents here
+# Every line of code you wrote
+```
+
+### /workspace/test_filename.py
+```python
+# Include the ENTIRE test file here
+```
+
+## Execution Output
+```
+<paste the actual output from running the code>
+```
+
+## Summary
+<brief explanation of results>
+
+WARNING: Responses without complete source code are non-compliant. Always copy the full file contents into your response.

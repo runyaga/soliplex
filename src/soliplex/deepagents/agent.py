@@ -216,6 +216,7 @@ class SoliplexDeepAgent:
         output_dir: str | None = None,
         run_output: str | None = None,
         prompt: str | None = None,
+        run_result: typing.Any = None,
     ) -> str | None:
         """Save agent state (files, todos, output) to disk for auditability.
 
@@ -228,6 +229,7 @@ class SoliplexDeepAgent:
                        from agent config, or returns None if not configured.
             run_output: The agent's output text to save (contains code/results).
             prompt: The user prompt that triggered this run.
+            run_result: The full run result to extract tool calls from.
 
         Returns:
             Path to the output directory, or None if no state to save.
@@ -257,6 +259,14 @@ class SoliplexDeepAgent:
                 file_path.parent.mkdir(parents=True, exist_ok=True)
                 file_path.write_text(content)
 
+        # Extract files from tool calls (for Docker sandbox)
+        extracted_files = self._extract_files_from_result(run_result)
+        if extracted_files:
+            for filename, content in extracted_files.items():
+                file_path = output_path / filename
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_path.write_text(content)
+
         # Save todos as JSON
         todos = self.todos
         if todos:
@@ -274,6 +284,50 @@ class SoliplexDeepAgent:
             run_path.write_text("\n".join(content_parts))
 
         return str(output_path)
+
+    def _extract_files_from_result(
+        self, run_result: typing.Any
+    ) -> dict[str, str]:
+        """Extract files written during execution from tool calls.
+
+        Parses the message history to find write_file tool calls and
+        extracts the filenames and content.
+
+        Args:
+            run_result: The agent run result containing message history.
+
+        Returns:
+            Dict mapping filename to content.
+        """
+        if run_result is None:
+            return {}
+
+        files = {}
+        try:
+            # Access all messages from the run
+            messages = getattr(run_result, "all_messages", [])
+            for msg in messages:
+                # Look for tool call parts
+                parts = getattr(msg, "parts", [])
+                for part in parts:
+                    # Check if this is a tool call
+                    tool_name = getattr(part, "tool_name", None)
+                    if tool_name in ("write_file", "edit_file"):
+                        args = getattr(part, "args", {})
+                        if isinstance(args, dict):
+                            filename = args.get("path") or args.get("filename")
+                            content = args.get("content")
+                            if filename and content:
+                                # Clean up the filename
+                                if filename.startswith("/workspace/"):
+                                    filename = filename[11:]
+                                elif filename.startswith("/"):
+                                    filename = filename[1:]
+                                files[filename] = content
+        except Exception:
+            pass  # Silently fail if we can't extract
+
+        return files
 
     def cleanup(self):
         """Clean up resources, especially Docker containers.

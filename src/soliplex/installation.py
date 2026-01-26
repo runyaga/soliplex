@@ -7,6 +7,7 @@ import logfire
 import pydantic_ai
 from ag_ui import core as agui_core
 from haiku.rag import config as hr_config
+from sqlalchemy import sql as sqla_sql
 from sqlalchemy.ext import asyncio as sqla_asyncio
 
 from soliplex import agents
@@ -21,6 +22,12 @@ ProviderURL = str | None
 ProviderModelNames = set[str]
 ProviderTypeInfo = dict[ProviderURL, ProviderModelNames]
 ProviderInfoMap = dict[config.LLMProviderType, ProviderTypeInfo]
+
+
+NO_AUTH_MODE_USER_TOKEN = {
+    "name": "Phreddy Phlyntstone",
+    "email": "phreddy@example.com",
+}
 
 
 @dataclasses.dataclass
@@ -129,12 +136,12 @@ class Installation:
         return self._config.thread_persistence_dburi_async
 
     @property
-    def room_authz_dburi_sync(self) -> str:
-        return self._config.room_authz_dburi_sync
+    def authorization_dburi_sync(self) -> str:
+        return self._config.authorization_dburi_sync
 
     @property
-    def room_authz_dburi_async(self) -> str:
-        return self._config.room_authz_dburi_async
+    def authorization_dburi_async(self) -> str:
+        return self._config.authorization_dburi_async
 
     @property
     def auth_disabled(self):
@@ -148,13 +155,13 @@ class Installation:
         self,
         *,
         user: dict,
-        the_room_authz: authz_package.RoomAuthorization = None,
+        the_authz_policy: authz_package.AuthorizationPolicy = None,
     ) -> dict[str, config.RoomConfig]:
         """Return room configs available to the user"""
         configs = self._config.room_configs
 
-        if the_room_authz is not None:
-            allowed = await the_room_authz.filter_room_ids(
+        if the_authz_policy is not None:
+            allowed = await the_authz_policy.filter_room_ids(
                 configs.keys(),
                 user_token=user,
             )
@@ -171,11 +178,11 @@ class Installation:
         *,
         room_id: str,
         user: dict,
-        the_room_authz: authz_package.RoomAuthorization = None,
+        the_authz_policy: authz_package.AuthorizationPolicy = None,
     ) -> config.RoomConfig:
         """Return a room configs IFF available to the user"""
-        if the_room_authz is not None:
-            if not await the_room_authz.check_room_access(
+        if the_authz_policy is not None:
+            if not await the_authz_policy.check_room_access(
                 room_id=room_id,
                 user_token=user,
             ):
@@ -213,12 +220,12 @@ class Installation:
         *,
         room_id: str,
         user: dict,
-        the_room_authz: authz_package.RoomAuthorization = None,
+        the_authz_policy: authz_package.AuthorizationPolicy = None,
     ) -> pydantic_ai.Agent:
         room_config = await self.get_room_config(
             room_id=room_id,
             user=user,
-            the_room_authz=the_room_authz,
+            the_authz_policy=the_authz_policy,
         )
 
         return agents.get_agent_from_configs(
@@ -248,13 +255,13 @@ class Installation:
         *,
         room_id: str,
         user: dict,
-        the_room_authz: authz_package.RoomAuthorization = None,
+        the_authz_policy: authz_package.AuthorizationPolicy = None,
         run_agent_input: agui_core.RunAgentInput = None,
     ) -> pydantic_ai.Agent:
         room_config = await self.get_room_config(
             room_id=room_id,
             user=user,
-            the_room_authz=the_room_authz,
+            the_authz_policy=the_authz_policy,
         )
 
         kwargs = {}
@@ -332,6 +339,19 @@ def apply_logfire_configuration(
         logfire.instrument_fastapi(app, capture_headers=True)
 
 
+def add_no_auth_user_as_admin(connection):
+    query = sqla_sql.select(authz_schema.AdminUser)
+    result = connection.execute(query)
+    has_admin_users = result.first() is not None
+
+    if not has_admin_users:
+        email = NO_AUTH_MODE_USER_TOKEN["email"]
+        insert_stmt = sqla_sql.insert(authz_schema.AdminUser).values(
+            email=email,
+        )
+        connection.execute(insert_stmt)
+
+
 async def lifespan(
     app: fastapi.FastAPI,
     installation_path: pathlib.Path,
@@ -357,18 +377,22 @@ async def lifespan(
             agui_persistence.Base.metadata.create_all,
         )
 
-    ra_engine = sqla_asyncio.create_async_engine(
-        the_installation.thread_persistence_dburi_async
+    authz_engine = sqla_asyncio.create_async_engine(
+        the_installation.authorization_dburi_async
     )
-    async with ra_engine.begin() as ra_connection:
+    async with authz_engine.begin() as ra_connection:
         await ra_connection.run_sync(
             authz_schema.Base.metadata.create_all,
         )
+        if no_auth_mode:
+            await ra_connection.run_sync(
+                add_no_auth_user_as_admin,
+            )
 
     context = {
         "the_installation": the_installation,
         "threads_engine": tp_engine,
-        "room_authz_engine": ra_engine,
+        "authorization_engine": authz_engine,
     }
 
     async with contextlib.AsyncExitStack() as stack:
@@ -382,4 +406,4 @@ async def lifespan(
         yield context
 
     await tp_engine.dispose()
-    await ra_engine.dispose()
+    await authz_engine.dispose()

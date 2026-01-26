@@ -4,6 +4,7 @@ from unittest import mock
 
 import fastapi
 import pytest
+import sqlalchemy
 from ag_ui import core as agui_core
 from sqlalchemy.ext import asyncio as sqla_asyncio
 
@@ -497,23 +498,23 @@ def test_installation_thread_persistence_dburi_async():
     )
 
 
-def test_installation_room_authz_dburi_sync():
+def test_installation_authorization_dburi_sync():
     i_config = mock.create_autospec(config.InstallationConfig)
     the_installation = installation.Installation(i_config)
 
     assert (
-        the_installation.room_authz_dburi_sync
-        is i_config.room_authz_dburi_sync
+        the_installation.authorization_dburi_sync
+        is i_config.authorization_dburi_sync
     )
 
 
-def test_installation_room_authz_dburi_async():
+def test_installation_authorization_dburi_async():
     i_config = mock.create_autospec(config.InstallationConfig)
     the_installation = installation.Installation(i_config)
 
     assert (
-        the_installation.room_authz_dburi_async
-        is i_config.room_authz_dburi_async
+        the_installation.authorization_dburi_async
+        is i_config.authorization_dburi_async
     )
 
 
@@ -558,17 +559,17 @@ class FauxRoomAuthz:
 
 
 @pytest.fixture(params=[None, False, True])
-def room_authz(request):
+def authz_kwargs(request):
     kw = {}
     if request.param is not None:
-        kw["the_room_authz"] = FauxRoomAuthz(request.param)
+        kw["the_authz_policy"] = FauxRoomAuthz(request.param)
     return kw
 
 
 @pytest.mark.anyio
 async def test_installation_get_room_configs(
     test_user,
-    room_authz,
+    authz_kwargs,
     r_configs,
 ):
     i_config = mock.create_autospec(config.InstallationConfig)
@@ -578,11 +579,11 @@ async def test_installation_get_room_configs(
 
     found = await the_installation.get_room_configs(
         user=test_user,
-        **room_authz,
+        **authz_kwargs,
     )
 
-    if room_authz:
-        allowed = room_authz["the_room_authz"].allowed
+    if authz_kwargs:
+        allowed = authz_kwargs["the_authz_policy"].allowed
         if allowed:
             assert found == r_configs
         else:
@@ -597,7 +598,7 @@ async def test_installation_get_room_configs(
 )
 async def test_installation_get_room_config(
     test_user,
-    room_authz,
+    authz_kwargs,
     r_configs,
     w_room_id,
     raises,
@@ -607,8 +608,8 @@ async def test_installation_get_room_config(
 
     the_installation = installation.Installation(i_config)
 
-    if room_authz:
-        allowed = room_authz["the_room_authz"].allowed
+    if authz_kwargs:
+        allowed = authz_kwargs["the_authz_policy"].allowed
     else:
         allowed = True
 
@@ -617,7 +618,7 @@ async def test_installation_get_room_config(
             await the_installation.get_room_config(
                 room_id=w_room_id,
                 user=test_user,
-                **room_authz,
+                **authz_kwargs,
             )
     else:
         if not allowed:
@@ -625,13 +626,13 @@ async def test_installation_get_room_config(
                 await the_installation.get_room_config(
                     room_id=w_room_id,
                     user=test_user,
-                    **room_authz,
+                    **authz_kwargs,
                 )
         else:
             found = await the_installation.get_room_config(
                 room_id=w_room_id,
                 user=test_user,
-                **room_authz,
+                **authz_kwargs,
             )
 
             assert found is r_configs[w_room_id]
@@ -711,7 +712,7 @@ def test_installation_get_agent_by_id(gafc, w_agent_id, raises):
 async def test_installation_get_agent_for_room(
     gafc,
     test_user,
-    room_authz,
+    authz_kwargs,
     w_room_id,
     raises,
 ):
@@ -742,8 +743,8 @@ async def test_installation_get_agent_for_room(
     i_config = mock.create_autospec(config.InstallationConfig)
     i_config.room_configs = r_configs
 
-    if room_authz:
-        allowed = room_authz["the_room_authz"].allowed
+    if authz_kwargs:
+        allowed = authz_kwargs["the_authz_policy"].allowed
     else:
         allowed = True
 
@@ -754,7 +755,7 @@ async def test_installation_get_agent_for_room(
             await the_installation.get_agent_for_room(
                 room_id=w_room_id,
                 user=test_user,
-                **room_authz,
+                **authz_kwargs,
             )
     else:
         if not allowed:
@@ -762,7 +763,7 @@ async def test_installation_get_agent_for_room(
                 await the_installation.get_agent_for_room(
                     room_id=w_room_id,
                     user=test_user,
-                    **room_authz,
+                    **authz_kwargs,
                 )
 
             gafc.assert_not_called()
@@ -771,7 +772,7 @@ async def test_installation_get_agent_for_room(
             found = await the_installation.get_agent_for_room(
                 room_id=w_room_id,
                 user=test_user,
-                **room_authz,
+                **authz_kwargs,
             )
 
             assert found is gafc.return_value
@@ -842,7 +843,7 @@ async def test_installation_get_agent_for_completion(
 )
 async def test_installation_get_agent_deps_for_room(
     test_user,
-    room_authz,
+    authz_kwargs,
     w_room_id,
     raises,
     w_run_agent_input,
@@ -860,8 +861,8 @@ async def test_installation_get_agent_deps_for_room(
     i_config = mock.create_autospec(config.InstallationConfig)
     i_config.room_configs = r_configs
 
-    if room_authz:
-        allowed = room_authz["the_room_authz"].allowed
+    if authz_kwargs:
+        allowed = authz_kwargs["the_authz_policy"].allowed
     else:
         allowed = True
 
@@ -876,7 +877,7 @@ async def test_installation_get_agent_deps_for_room(
             await the_installation.get_agent_deps_for_room(
                 room_id=w_room_id,
                 user=test_user,
-                **room_authz,
+                **authz_kwargs,
                 **kw,
             )
     else:
@@ -885,14 +886,14 @@ async def test_installation_get_agent_deps_for_room(
                 await the_installation.get_agent_deps_for_room(
                     room_id=w_room_id,
                     user=test_user,
-                    **room_authz,
+                    **authz_kwargs,
                     **kw,
                 )
         else:
             found = await the_installation.get_agent_deps_for_room(
                 room_id=w_room_id,
                 user=test_user,
-                **room_authz,
+                **authz_kwargs,
                 **kw,
             )
 
@@ -1018,6 +1019,44 @@ def test_apply_logfire_configuration(logfire, w_logfire_config):
         )
 
 
+@pytest.mark.parametrize("w_admin_user", [False, True])
+def test_add_no_auth_user_as_admin(w_admin_user):
+    already = object()
+    query_result = mock.Mock(spec_set=["first"])
+    insert_result = mock.Mock(spec_set=())
+
+    if w_admin_user:
+        query_result.first.return_value = already
+    else:
+        query_result.first.return_value = None
+
+    conn = mock.create_autospec(sqlalchemy.Connection)
+
+    if w_admin_user:  # no call to insert
+        conn.execute.side_effect = [
+            query_result,
+        ]
+    else:
+        conn.execute.side_effect = [
+            query_result,
+            insert_result,
+        ]
+
+    installation.add_no_auth_user_as_admin(conn)
+
+    if w_admin_user:  # no call to insert
+        (query_call,) = conn.execute.call_args_list
+    else:
+        (query_call, insert_call) = conn.execute.call_args_list
+
+    (query,) = query_call.args
+    assert str(query).startswith("SELECT admin_users")
+
+    if not w_admin_user:
+        (insert,) = insert_call.args
+        assert str(insert).startswith("INSERT INTO admin_users")
+
+
 def _mock_mcp_app(key):
     async def _mock_lifespan(_ignored):
         yield None
@@ -1041,6 +1080,7 @@ def mcp_apps():
         (True, []),
     ],
 )
+@mock.patch("soliplex.installation.add_no_auth_user_as_admin")
 @mock.patch("soliplex.installation.apply_logfire_configuration")
 @mock.patch("soliplex.secrets.resolve_secrets")
 @mock.patch("soliplex.mcp_server.setup_mcp_for_rooms")
@@ -1050,6 +1090,7 @@ async def test_lifespan(
     smfr,
     srs,
     alc,
+    anauaa,
     mcp_apps,
     w_no_auth_mode,
     exp_oidc_paths,
@@ -1064,13 +1105,16 @@ async def test_lifespan(
         oidc_paths=["oidc"],
         environment={"OLLAMA_BASE_URL": OLLAMA_BASE_URL},
         thread_persistence_dburi_async=config.ASYNC_MEMORY_ENGINE_URL,
+        authorization_dburi_async=config.ASYNC_MEMORY_ENGINE_URL,
     )
     load_installation.return_value = i_config
     app = mock.create_autospec(fastapi.FastAPI)
 
     kwargs = {}
     if w_no_auth_mode is not None:
-        kwargs["no_auth_mode"] = w_no_auth_mode
+        exp_no_auth_mode = kwargs["no_auth_mode"] = w_no_auth_mode
+    else:
+        exp_no_auth_mode = False
 
     found = [
         item
@@ -1096,8 +1140,8 @@ async def test_lifespan(
     threads_engine = found[0]["threads_engine"]
     assert isinstance(threads_engine, sqla_asyncio.AsyncEngine)
 
-    room_authz_engine = found[0]["room_authz_engine"]
-    assert isinstance(room_authz_engine, sqla_asyncio.AsyncEngine)
+    authorization_engine = found[0]["authorization_engine"]
+    assert isinstance(authorization_engine, sqla_asyncio.AsyncEngine)
 
     for f_call, (key, mcp_app) in zip(
         app.mount.call_args_list,
@@ -1105,6 +1149,14 @@ async def test_lifespan(
         strict=True,
     ):
         assert f_call.args == ("/mcp/" + key, mcp_app)
+
+    if exp_no_auth_mode:
+        (anauaa_called,) = anauaa.call_args_list
+        (conn,) = anauaa_called.args
+        assert isinstance(conn, sqlalchemy.Connection)
+        assert anauaa_called.kwargs == {}
+    else:
+        anauaa.assert_not_called()
 
     alc.assert_called_once_with(app, the_installation)
     srs.assert_called_once_with(the_installation._config.secrets)

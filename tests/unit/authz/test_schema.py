@@ -13,6 +13,12 @@ from soliplex import models
 from soliplex.authz import schema as authz_schema
 
 NOW = datetime.datetime.now(datetime.UTC)
+
+EMAIL = "phreddy@example.com"
+USER_TOKEN = {
+    "email": EMAIL,
+}
+
 ROOM_ID = "test-room"
 
 ACL_ENTRY_DEFAULTS = {
@@ -58,6 +64,13 @@ def the_session(the_engine):
 
     with sqla_orm.Session(bind=the_engine) as session:
         yield session
+
+
+def test_adminuser_ctor(the_session):
+    admin_user = authz_schema.AdminUser(email=EMAIL)
+
+    the_session.add(admin_user)
+    the_session.commit()
 
 
 def test_roompolicy_ctor(the_session):
@@ -378,11 +391,11 @@ def faux_sqlaa_session():
 
 
 @pytest.mark.anyio
-async def test_roomauthorization_session(faux_sqlaa_session):
-    ra = authz_schema.RoomAuthorization(faux_sqlaa_session)
+async def test_authorizationpolicy_session(faux_sqlaa_session):
+    ap = authz_schema.AuthorizationPolicy(faux_sqlaa_session)
     begin = faux_sqlaa_session.begin
 
-    async with ra.session as session:
+    async with ap.session as session:
         assert session is faux_sqlaa_session
 
         begin.assert_called_once_with()
@@ -413,18 +426,68 @@ async def the_async_session(the_async_engine):  # pragma: NO COVER
 
 
 @pytest.mark.asyncio
-async def test_roomauthorization_check_room_access(the_async_session):
-    ra = authz_schema.RoomAuthorization(the_async_session)
+async def test_authorizationpolicy_crud_admin_user(the_async_session):
+    ap = authz_schema.AuthorizationPolicy(the_async_session)
+
+    await ap.add_admin_user(email=EMAIL)
+    user = await authz_schema._find_admin_user(
+        email=EMAIL,
+        session=the_async_session,
+    )
+    assert user is not None
+
+    await the_async_session.commit()
+
+    with pytest.raises(authz_schema.AdminUserExists):
+        await ap.add_admin_user(email=EMAIL)
+
+    no_dupe = await authz_schema._find_admin_user(
+        email=EMAIL,
+        session=the_async_session,
+    )
+    assert no_dupe is user
+    await the_async_session.commit()
+
+    await ap.remove_admin_user(email=EMAIL)
+    gone = await authz_schema._find_admin_user(
+        email=EMAIL,
+        session=the_async_session,
+    )
+    assert gone is None
+    await the_async_session.commit()
+
+    with pytest.raises(authz_schema.NoSuchAdminUser):
+        await ap.remove_admin_user(email=EMAIL)
+
+
+@pytest.mark.asyncio
+async def test_authorizationpolicy_check_admin_access(the_async_session):
+    ap = authz_schema.AuthorizationPolicy(the_async_session)
+
+    assert not await ap.check_admin_access(USER_TOKEN)
+
+    await ap.add_admin_user(email=EMAIL)
+
+    assert await ap.check_admin_access(USER_TOKEN)
+
+    await ap.remove_admin_user(email=EMAIL)
+
+    assert not await ap.check_admin_access(USER_TOKEN)
+
+
+@pytest.mark.asyncio
+async def test_authorizationpolicy_check_room_access(the_async_session):
+    ap = authz_schema.AuthorizationPolicy(the_async_session)
 
     # No policy -> public room
-    assert await ra.check_room_access(ROOM_ID, None)
+    assert await ap.check_room_access(ROOM_ID, None)
 
     # Policy w/ deny as default, no ACL entries
     denier = authz_schema.RoomPolicy(room_id=ROOM_ID)
     the_async_session.add(denier)
     await the_async_session.commit()
 
-    assert not await ra.check_room_access(ROOM_ID, None)
+    assert not await ap.check_room_access(ROOM_ID, None)
 
     allower = authz_schema.ACLEntry(
         room_policy=denier,
@@ -434,24 +497,24 @@ async def test_roomauthorization_check_room_access(the_async_session):
     the_async_session.add(allower)
     await the_async_session.commit()
 
-    assert await ra.check_room_access(ROOM_ID, None)
+    assert await ap.check_room_access(ROOM_ID, None)
 
 
 @pytest.mark.asyncio
-async def test_roomauthorization_filter_room_ids(the_async_session):
-    ra = authz_schema.RoomAuthorization(the_async_session)
+async def test_authorizationpolicy_filter_room_ids(the_async_session):
+    ap = authz_schema.AuthorizationPolicy(the_async_session)
 
     room_ids = [ROOM_ID]
 
     # No policy -> public room
-    assert await ra.filter_room_ids(room_ids, None) == room_ids
+    assert await ap.filter_room_ids(room_ids, None) == room_ids
 
     # Policy w/ deny as default, no ACL entries
     denier = authz_schema.RoomPolicy(room_id=ROOM_ID)
     the_async_session.add(denier)
     await the_async_session.commit()
 
-    assert await ra.filter_room_ids(room_ids, None) == []
+    assert await ap.filter_room_ids(room_ids, None) == []
 
     allower = authz_schema.ACLEntry(
         room_policy=denier,
@@ -461,15 +524,43 @@ async def test_roomauthorization_filter_room_ids(the_async_session):
     the_async_session.add(allower)
     await the_async_session.commit()
 
-    assert await ra.filter_room_ids(room_ids, None) == room_ids
+    assert await ap.filter_room_ids(room_ids, None) == room_ids
 
 
 @pytest.mark.asyncio
-async def test_roomauthorization_room_policy_crud(the_async_session):
-    ra = authz_schema.RoomAuthorization(the_async_session)
+async def test_authorizationpolicy_room_policy_crud_not_admin(
+    the_async_session,
+):
+    ap = authz_schema.AuthorizationPolicy(the_async_session)
+
+    with pytest.raises(authz_schema.NotAdminUser):
+        await ap.get_room_policy(ROOM_ID, USER_TOKEN)
+
+    acl_entry_model = models.ACLEntry(
+        allow_deny=authz_package.AllowDeny.ALLOW,
+        everyone=True,
+    )
+    policy_model = models.RoomPolicy(
+        room_id=ROOM_ID,
+        acl_entries=[acl_entry_model],
+    )
+
+    with pytest.raises(authz_schema.NotAdminUser):
+        await ap.update_room_policy(ROOM_ID, policy_model, USER_TOKEN)
+
+    with pytest.raises(authz_schema.NotAdminUser):
+        await ap.delete_room_policy(ROOM_ID, USER_TOKEN)
+
+
+@pytest.mark.asyncio
+async def test_authorizationpolicy_room_policy_crud(the_async_session):
+    ap = authz_schema.AuthorizationPolicy(the_async_session)
+
+    await ap.add_admin_user(email=EMAIL)
+    await the_async_session.commit()
 
     # No policy -> public room
-    policy = await ra.get_room_policy(ROOM_ID, None)
+    policy = await ap.get_room_policy(ROOM_ID, USER_TOKEN)
     assert policy is None
 
     acl_entry_model = models.ACLEntry(
@@ -480,10 +571,10 @@ async def test_roomauthorization_room_policy_crud(the_async_session):
         room_id=ROOM_ID,
         acl_entries=[acl_entry_model],
     )
-    await ra.update_room_policy(ROOM_ID, policy_model, None)
+    await ap.update_room_policy(ROOM_ID, policy_model, USER_TOKEN)
     await the_async_session.commit()
 
-    after = await ra.get_room_policy(ROOM_ID, None)
+    after = await ap.get_room_policy(ROOM_ID, USER_TOKEN)
     assert after == policy_model
     await the_async_session.commit()
 
@@ -494,38 +585,21 @@ async def test_roomauthorization_room_policy_crud(the_async_session):
     new_policy_model = policy_model.model_copy(
         update={"acl_entries": [new_acl_entry_model]},
     )
-    await ra.update_room_policy(ROOM_ID, new_policy_model, None)
+    await ap.update_room_policy(ROOM_ID, new_policy_model, USER_TOKEN)
     await the_async_session.commit()
 
-    with pytest.raises(KeyError):
-        await ra.get_room_policy(ROOM_ID, None)
-
-    await the_async_session.commit()
-
-    with pytest.raises(KeyError):
-        await ra.update_room_policy(ROOM_ID, new_policy_model, None)
-
-    await the_async_session.commit()
-
-    with pytest.raises(KeyError):
-        await ra.delete_room_policy(ROOM_ID, None)
-
-    await the_async_session.commit()
-
-    policy = await ra.get_room_policy(
-        ROOM_ID, {"preferred_username": "phreddy"}
-    )
+    policy = await ap.get_room_policy(ROOM_ID, USER_TOKEN)
     assert policy == new_policy_model
     await the_async_session.commit()
 
-    await ra.delete_room_policy(ROOM_ID, {"preferred_username": "phreddy"})
+    await ap.delete_room_policy(ROOM_ID, USER_TOKEN)
     await the_async_session.commit()
 
-    gone = await ra.get_room_policy(ROOM_ID, None)
+    gone = await ap.get_room_policy(ROOM_ID, USER_TOKEN)
     assert gone is None
     await the_async_session.commit()
 
-    await ra.delete_room_policy(ROOM_ID, None)
+    await ap.delete_room_policy(ROOM_ID, USER_TOKEN)
     await the_async_session.commit()
 
 

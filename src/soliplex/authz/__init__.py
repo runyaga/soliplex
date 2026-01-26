@@ -18,8 +18,20 @@ class AllowDeny(enum.Enum):
     DENY = "deny"
 
 
-class RoomAuthorization(abc.ABC):
-    """Protocol for checking / managing room authorization policies"""
+class AuthorizationPolicy(abc.ABC):
+    """Protocol for checking / managing authorization policies"""
+
+    @abc.abstractmethod
+    async def add_admin_user(self, email: str):
+        """Add a user to the admin users table."""
+
+    @abc.abstractmethod
+    async def remove_admin_user(self, email: str):
+        """Remove a user from the admin users table."""
+
+    @abc.abstractmethod
+    async def check_admin_access(self, user_token: UserToken) -> bool:
+        """Is the user represented by 'user_token' an admin user?"""
 
     @abc.abstractmethod
     async def check_room_access(
@@ -27,7 +39,7 @@ class RoomAuthorization(abc.ABC):
         room_id: str,
         user_token: UserToken | None,
     ) -> bool:
-        """Can the user represented by 'user_token' can access a room?"""
+        """Can the user represented by 'user_token' access a room?"""
 
     @abc.abstractmethod
     async def filter_room_ids(
@@ -41,7 +53,7 @@ class RoomAuthorization(abc.ABC):
     async def get_room_policy(
         self,
         room_id: str,
-        user_token: UserToken | None,
+        user_token: UserToken,
     ) -> models.RoomPolicy | None:  # noqa: F821
         """Return the authorization policy for the room"""
 
@@ -50,7 +62,7 @@ class RoomAuthorization(abc.ABC):
         self,
         room_id: str,
         room_policy: models.RoomPolicy,  # noqa: F821
-        user_token: UserToken | None,
+        user_token: UserToken,
     ) -> None:
         """Update the authorization policy for the room"""
 
@@ -58,17 +70,19 @@ class RoomAuthorization(abc.ABC):
     async def delete_room_policy(
         self,
         room_id: str,
-        user_token: UserToken | None,
+        user_token: UserToken,
     ) -> None:
         """Delete the authorization policy for the room"""
 
 
-async def get_the_room_authz(request: fastapi.Request) -> RoomAuthorization:
+async def get_the_authz_policy(
+    request: fastapi.Request,
+) -> AuthorizationPolicy:
     from . import schema
 
-    engine = request.state.room_authz_engine
+    engine = request.state.authorization_engine
     async with sqla_asyncio.AsyncSession(bind=engine) as session:
-        yield schema.RoomAuthorization(session)
+        yield schema.AuthorizationPolicy(session)
 
 
-depend_the_room_authz = fastapi.Depends(get_the_room_authz)
+depend_the_authz_policy = fastapi.Depends(get_the_authz_policy)

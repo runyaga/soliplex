@@ -50,6 +50,24 @@ class Base(AsyncAttrs, DeclarativeBase):
     }
 
 
+class AdminUser(Base):
+    """Info for users configured as admins.
+
+    'email': email address
+    """
+
+    __tablename__ = "admin_users"
+
+    id_: Mapped[int] = mapped_column(primary_key=True)
+
+    email: Mapped[str] = mapped_column(unique=True)
+
+    created: Mapped[datetime.datetime] = mapped_column(
+        sqla_sqltypes.TIMESTAMP(timezone=True),
+        default=_timestamp,
+    )
+
+
 class RoomPolicy(Base):
     """Describe authorization policy for a room
 
@@ -62,7 +80,7 @@ class RoomPolicy(Base):
         one-to-many relationship.
     """
 
-    __tablename__ = "room_policy"
+    __tablename__ = "room_policies"
 
     id_: Mapped[int] = mapped_column(primary_key=True)
 
@@ -126,12 +144,12 @@ class RoomPolicy(Base):
 class ACLEntry(Base):
     """Allow / deny access to a room based on fields in the user's token"""
 
-    __tablename__ = "room_acl_entry"
+    __tablename__ = "room_acl_entries"
 
     id_: Mapped[int] = mapped_column(primary_key=True)
 
     room_policy_id_: Mapped[int] = mapped_column(
-        ForeignKey("room_policy.id_", ondelete="CASCADE"),
+        ForeignKey("room_policies.id_", ondelete="CASCADE"),
     )
     room_policy: sqla_orm.Mapped[RoomPolicy] = relationship(
         back_populates="acl_entries",
@@ -200,7 +218,45 @@ class ACLEntry(Base):
         return None
 
 
-class RoomAuthorization(authz_package.RoomAuthorization):
+class NoSuchAdminUser(ValueError):
+    def __init__(self, email):
+        self.email = email
+        super().__init__(f"No admin user exists with email: {email}")
+
+
+class AdminUserExists(ValueError):
+    def __init__(self, email):
+        self.email = email
+        super().__init__(f"Admin user already exists with email: {email}")
+
+
+class NotAdminUser(ValueError):
+    def __init__(self, email):
+        self.email = email
+        super().__init__(f"Non-admin user, email: {email}")
+
+
+async def _find_admin_user(
+    email: str,
+    session,
+) -> AdminUser | None:
+    query = sqla_sql.select(AdminUser).where(AdminUser.email == email)
+    user = (await session.scalars(query)).first()
+
+    return user
+
+
+async def _find_room_policy(
+    room_id: str,
+    session,
+) -> RoomPolicy | None:
+    query = sqla_sql.select(RoomPolicy).where(RoomPolicy.room_id == room_id)
+    policy = (await session.scalars(query)).first()
+
+    return policy
+
+
+class AuthorizationPolicy(authz_package.AuthorizationPolicy):
     def __init__(self, session: sqla_asyncio.AsyncSession):
         self._session = session
 
@@ -210,17 +266,36 @@ class RoomAuthorization(authz_package.RoomAuthorization):
         async with self._session.begin():
             yield self._session
 
-    async def _find_room_policy(
-        self,
-        room_id: str,
-        session,
-    ) -> RoomPolicy | None:
-        query = sqla_sql.select(RoomPolicy).where(
-            RoomPolicy.room_id == room_id
-        )
-        policy = (await session.scalars(query)).first()
+    async def add_admin_user(self, email: str):
+        """Add a user to the admin users table."""
+        async with self.session as session:
+            user = await _find_admin_user(email, session)
 
-        return policy
+            if user is not None:
+                raise AdminUserExists(email=email)
+
+            user = AdminUser(email=email)
+            session.add(user)
+
+    async def remove_admin_user(self, email: str):
+        """Remove a user from the admin users table."""
+        async with self.session as session:
+            user = await _find_admin_user(email, session)
+
+            if user is None:
+                raise NoSuchAdminUser(email=email)
+
+            await session.delete(user)
+
+    async def check_admin_access(
+        self,
+        user_token: authz_package.UserToken,
+    ) -> bool:
+        """Is the user represented by 'user_token' an admin user?"""
+        async with self.session as session:
+            user = await _find_admin_user(user_token["email"], session)
+
+        return user is not None
 
     async def check_room_access(
         self,
@@ -235,7 +310,7 @@ class RoomAuthorization(authz_package.RoomAuthorization):
         Otherwise, return True (i.e., the room is public).
         """
         async with self.session as session:
-            policy = await self._find_room_policy(room_id, session)
+            policy = await _find_room_policy(room_id, session)
 
         if policy is not None:
             await policy.awaitable_attrs.acl_entries
@@ -259,7 +334,7 @@ class RoomAuthorization(authz_package.RoomAuthorization):
         result = []
         async with self.session as session:
             for room_id in room_ids:
-                policy = await self._find_room_policy(room_id, session)
+                policy = await _find_room_policy(room_id, session)
                 if policy is not None:
                     await policy.awaitable_attrs.acl_entries
                     allow_deny = policy.check_token(user_token)
@@ -272,19 +347,20 @@ class RoomAuthorization(authz_package.RoomAuthorization):
     async def get_room_policy(
         self,
         room_id: str,
-        user_token: authz_package.UserToken | None,
+        user_token: authz_package.UserToken,
     ) -> models.RoomPolicy | None:
         """Return the authorization policy for the room"""
         async with self.session as session:
-            policy = await self._find_room_policy(room_id, session)
+            email = user_token["email"]
+            user = await _find_admin_user(email, session)
+
+            if user is None:
+                raise NotAdminUser(email)
+
+            policy = await _find_room_policy(room_id, session)
 
         if policy is not None:
             await policy.awaitable_attrs.acl_entries
-            allowed = policy.check_token(user_token)
-
-            if allowed != authz_package.AllowDeny.ALLOW:
-                raise KeyError(room_id)
-
             return policy.as_model
 
         return None
@@ -293,18 +369,20 @@ class RoomAuthorization(authz_package.RoomAuthorization):
         self,
         room_id: str,
         room_policy: models.RoomPolicy,
-        user_token: authz_package.UserToken | None,
+        user_token: authz_package.UserToken,
     ) -> None:
         """Update the authorization policy for the room"""
         async with self.session as session:
-            policy = await self._find_room_policy(room_id, session)
+            email = user_token["email"]
+            user = await _find_admin_user(email, session)
+
+            if user is None:
+                raise NotAdminUser(email)
+
+            policy = await _find_room_policy(room_id, session)
 
             if policy is not None:
                 await policy.awaitable_attrs.acl_entries
-                allowed = policy.check_token(user_token)
-
-                if allowed != authz_package.AllowDeny.ALLOW:
-                    raise KeyError(room_id)
 
                 async with session.begin_nested():
                     await session.delete(policy)
@@ -319,19 +397,19 @@ class RoomAuthorization(authz_package.RoomAuthorization):
     async def delete_room_policy(
         self,
         room_id: str,
-        user_token: authz_package.UserToken | None,
+        user_token: authz_package.UserToken,
     ) -> None:
         """Delete any existing authorization policy for the room"""
         async with self.session as session:
-            policy = await self._find_room_policy(room_id, session)
+            email = user_token["email"]
+            user = await _find_admin_user(email, session)
+
+            if user is None:
+                raise NotAdminUser(email)
+
+            policy = await _find_room_policy(room_id, session)
 
             if policy is not None:
-                await policy.awaitable_attrs.acl_entries
-                allowed = policy.check_token(user_token)
-
-                if allowed != authz_package.AllowDeny.ALLOW:
-                    raise KeyError(room_id)
-
                 async with session.begin_nested():
                     await session.delete(policy)
 

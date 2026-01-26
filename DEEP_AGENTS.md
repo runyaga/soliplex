@@ -117,8 +117,9 @@ allow_mcp: false
 | `include_subagents` | bool | `true` | Enable subagent delegation |
 | `include_skills` | bool | `false` | Enable skills toolset |
 | `include_execute` | bool | auto | Enable code execution (auto-detects sandbox) |
-| `backend_kind` | string | `"state"` | `"state"` (in-memory) or `"filesystem"` (persistent) |
+| `backend_kind` | string | `"state"` | `"state"`, `"filesystem"`, or `"docker"` |
 | `backend_root` | string | auto | Directory for filesystem backend |
+| `docker_config` | dict | `{}` | Docker sandbox settings (image, work_dir) |
 | `subagents` | list | `[]` | Subagent configurations |
 | `skill_directories` | list | `[]` | Paths to discover skills |
 | `interrupt_on` | dict | `{}` | Tools requiring approval |
@@ -152,6 +153,11 @@ Requires human approval for sensitive operations.
 - `deep_executor` - Shell execution with approval
 - `legal_contract_reviewer_interrupt` - Contract analysis with write approval
 
+### Tier 3.5: Docker Sandbox (Unguarded)
+Fully automated code execution in isolated Docker containers.
+
+- `deep_python_sandbox` - Execute Python in Docker (remote via SSH)
+
 ### Tier 4: Skills
 Includes loadable skill packages.
 
@@ -167,19 +173,83 @@ Full subagent delegation capabilities.
 - `deep_architect` - System architecture design
 - `film_production_orchestrator` - Film pre-production with script_analyst, casting_director, location_scout, line_producer
 
-## Code Execution (Sandbox)
+## Code Execution (Docker Sandbox)
 
-The `include_execute` option enables Python code execution:
+The `include_execute` option enables code execution in an isolated Docker container:
 
 ```yaml
 agent:
   kind: "deep"
   include_execute: true
+
+  # Use Docker sandbox for isolated execution
+  backend_kind: "docker"
+  docker_config:
+    image: "python:3.12-slim"
+    work_dir: "/workspace"
+
+  # Set to false for fully automated execution (no approval required)
   interrupt_on:
-    execute: true  # Require approval before running code
+    execute: false
 ```
 
-When a `SandboxProtocol`-compatible backend is provided, code runs in isolation. The execute tool is auto-enabled when such a backend is detected.
+### Remote Docker Execution
+
+To run code on a remote Docker host via SSH:
+
+1. Set `DOCKER_HOST` in your `.env` file:
+   ```
+   DOCKER_HOST=ssh://hostname
+   ```
+
+2. Ensure SSH key authentication is configured for the remote host
+
+3. The Docker daemon on the remote host will execute the code
+
+### Docker Sandbox Features
+
+- **Isolated execution**: Code runs in a fresh container
+- **Package installation**: Can install packages with `pip install`
+- **File persistence**: Files persist within the container session
+- **Network access**: Containers have network access for web requests
+
+### Example Room Configuration
+
+```yaml
+id: "deep_python_sandbox"
+name: "Python Sandbox"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  include_todo: true
+  include_filesystem: true
+  include_execute: true
+
+  backend_kind: "docker"
+  docker_config:
+    image: "python:3.12-slim"
+    work_dir: "/workspace"
+
+  # Fully automated - no approval required
+  interrupt_on:
+    execute: false
+    write_file: false
+```
+
+### Container Cleanup
+
+Call `agent.cleanup()` when done to stop Docker containers:
+
+```python
+agent = create_deep_agent_from_config(agent_config)
+try:
+    result = await agent.run("Execute some code")
+finally:
+    agent.cleanup()  # Stops Docker container
+```
 
 ## Domain-Specific Rooms
 

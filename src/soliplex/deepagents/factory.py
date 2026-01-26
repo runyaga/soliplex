@@ -16,6 +16,42 @@ if typing.TYPE_CHECKING:
 MCP_ToolsetConfigMap = config.MCP_ClientToolsetConfigMap
 
 
+def _create_backend(agent_config: DeepAgentConfig):
+    """Create the appropriate backend based on configuration.
+
+    Args:
+        agent_config: Deep agent configuration.
+
+    Returns:
+        Backend instance (StateBackend, FilesystemBackend, or DockerSandbox).
+    """
+    from pydantic_ai_backends import StateBackend
+
+    backend_kind = agent_config.backend_kind
+
+    if backend_kind == "docker":
+        from pydantic_ai_backends import DockerSandbox
+
+        # DockerSandbox uses docker.from_env() which respects DOCKER_HOST
+        # Set DOCKER_HOST=ssh://hostname for remote Docker execution
+        docker_config = agent_config.docker_config or {}
+        return DockerSandbox(
+            image=docker_config.get("image", "python:3.12-slim"),
+            work_dir=docker_config.get("work_dir", "/workspace"),
+            sandbox_id=agent_config.id,
+        )
+
+    elif backend_kind == "filesystem":
+        from pydantic_ai_backends import FilesystemBackend
+
+        if agent_config.backend_root:
+            return FilesystemBackend(root=agent_config.backend_root)
+        return FilesystemBackend()
+
+    else:  # "state" or default
+        return StateBackend()
+
+
 def create_deep_agent_from_config(
     agent_config: DeepAgentConfig,
     tool_configs: ToolConfigMap | None = None,
@@ -73,10 +109,14 @@ def create_deep_agent_from_config(
             SkillDirectory(path) for path in agent_config.skill_directories
         ]
 
+    # Create backend based on configuration
+    backend = _create_backend(agent_config)
+
     # Create the deep agent
     deep_agent = create_deep_agent(
         model=model,
         instructions=agent_config.get_system_prompt(),
+        backend=backend,
         include_todo=agent_config.include_todo,
         include_filesystem=agent_config.include_filesystem,
         include_subagents=agent_config.include_subagents,

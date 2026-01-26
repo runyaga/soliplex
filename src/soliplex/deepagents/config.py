@@ -82,8 +82,12 @@ class DeepAgentConfig:
     max_nesting_depth: int = 0  # 0 = subagents can't spawn sub-subagents
 
     # Backend configuration
-    backend_kind: str = "state"  # "state", "filesystem", "composite"
+    backend_kind: str = "state"  # "state", "filesystem", "docker"
     backend_root: str = None
+
+    # Docker sandbox configuration (when backend_kind="docker")
+    # Set DOCKER_HOST=ssh://hostname for remote execution
+    docker_config: dict = dataclasses.field(default_factory=dict)
 
     # Subagent definitions
     subagents: list[SubAgentConfig] = dataclasses.field(default_factory=list)
@@ -135,9 +139,9 @@ class DeepAgentConfig:
             config["_config_path"] = config_path
 
             # Get installation-level deep_agents config
-            deep_agents_config = getattr(
-                installation_config, "deep_agents", None
-            ) or {}
+            deep_agents_config = (
+                getattr(installation_config, "deep_agents", None) or {}
+            )
 
             # Apply installation-level defaults for backend if not set in room
             if "backend_kind" not in config:
@@ -185,6 +189,10 @@ class DeepAgentConfig:
             # Parse interrupt_on as dict
             if "interrupt_on" in config:
                 config["interrupt_on"] = dict(config["interrupt_on"])
+
+            # Parse docker_config as dict
+            if "docker_config" in config:
+                config["docker_config"] = dict(config["docker_config"])
 
             return cls(**config)
 

@@ -1,0 +1,35 @@
+id: "deep_python_sandbox"
+name: "Python Sandbox"
+description: "Execute Python code in an isolated Docker container on remote host"
+suggestions:
+  - "Calculate the first 20 Fibonacci numbers"
+  - "Create a simple web scraper to fetch a webpage title"
+  - "Analyze data using pandas and numpy"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Enable all capabilities including code execution
+  include_todo: true
+  include_filesystem: true
+  include_subagents: false
+  include_skills: false
+  include_execute: true
+
+  # Use Docker sandbox backend for isolated code execution
+  # Requires DOCKER_HOST=ssh://hostname in environment for remote execution
+  backend_kind: "docker"
+  docker_config:
+    image: "python:3.12-slim"
+    work_dir: "/workspace"
+
+  # No approval required for code execution (fully automated)
+  interrupt_on:
+    execute: false
+    write_file: false
+    edit_file: false
+
+
+allow_mcp: false

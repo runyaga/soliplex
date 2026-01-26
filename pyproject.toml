@@ -32,6 +32,8 @@ dependencies = [
     "trio",
     "uvicorn[standard]",
     "certifi >= 2025.11.12",
+    "docker>=7.1.0",
+    "paramiko>=4.0.0",
 ]
 
 [project.scripts]

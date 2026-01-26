@@ -82,7 +82,18 @@ class SoliplexDeepAgent:
         backend_kind = getattr(self.agent_config, "backend_kind", "state")
         backend_root = getattr(self.agent_config, "backend_root", None)
 
-        if backend_kind == "filesystem" and backend_root:
+        if backend_kind == "docker":
+            from pydantic_ai_backends import DockerSandbox
+
+            docker_config = (
+                getattr(self.agent_config, "docker_config", {}) or {}
+            )
+            return DockerSandbox(
+                image=docker_config.get("image", "python:3.12-slim"),
+                work_dir=docker_config.get("work_dir", "/workspace"),
+                sandbox_id=self.agent_config.id,
+            )
+        elif backend_kind == "filesystem" and backend_root:
             return LocalBackend(root_dir=backend_root)
         return StateBackend()
 
@@ -195,3 +206,17 @@ class SoliplexDeepAgent:
         if self._deep_deps is not None:
             return self._deep_deps.files
         return {}
+
+    def cleanup(self):
+        """Clean up resources, especially Docker containers.
+
+        Should be called when the agent is no longer needed to ensure
+        Docker containers are properly stopped and removed.
+        """
+        if self._deep_deps is None:
+            return
+        if hasattr(self._deep_deps.backend, "stop"):
+            try:
+                self._deep_deps.backend.stop()
+            except Exception:
+                pass  # Ignore cleanup errors

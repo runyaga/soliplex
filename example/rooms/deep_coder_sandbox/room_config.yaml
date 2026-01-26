@@ -8,7 +8,7 @@ suggestions:
 
 agent:
   kind: "deep"
-  model_name: "gpt-oss:latest"
+  model_name: "qwen3-coder:30b"
   system_prompt: "./prompt.txt"
 
   # Full coding workflow with execution

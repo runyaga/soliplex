@@ -2103,6 +2103,13 @@ class InstallationConfig:
         default_factory=dict,
     )
 
+    #
+    # Deep agents configuration (pydantic-deep backend settings)
+    #
+    deep_agents: dict[str, typing.Any] = dataclasses.field(
+        default_factory=dict,
+    )
+
     def get_environment(self, key, default=None):
         """Find the configured value for a given quasi-envvar"""
         return self.environment.get(key, default)

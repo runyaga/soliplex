@@ -201,6 +201,19 @@ environment:
 haiku_rag_config_file: "./haiku.rag.yaml"
 
 #==========================================================================
+# Deep Agents configuration
+#==========================================================================
+# Configure the pydantic-deep agent backend for file persistence.
+#
+# default_backend_kind: "state" (in-memory) or "filesystem" (persistent)
+# state_root: Root directory for filesystem backend (each room gets a subdir)
+#==========================================================================
+
+deep_agents:
+  default_backend_kind: "filesystem"
+  state_root: "./deep-state"
+
+#==========================================================================
 # Agent configurations
 #
 # Agent configurations which are not bound to rooms / completions, but

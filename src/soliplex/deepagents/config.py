@@ -156,7 +156,11 @@ class DeepAgentConfig:
                         room_id = agent_id[5:]  # Strip "room-" prefix
                     else:
                         room_id = agent_id
-                    config["backend_root"] = f"{state_root}/{room_id}"
+
+                    # Resolve state_root relative to installation config path
+                    install_dir = installation_config._config_path.parent
+                    resolved_root = (install_dir / state_root).resolve()
+                    config["backend_root"] = str(resolved_root / room_id)
 
             # Handle system_prompt as inline text or file path
             if "system_prompt" in config:

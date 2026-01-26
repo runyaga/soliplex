@@ -1,0 +1,21 @@
+id: "deep_planner"
+name: "Deep Planner"
+description: "Task planning agent with todo management"
+suggestions:
+  - "Help me plan a website redesign project"
+  - "Break down learning Python into weekly goals"
+  - "Create a roadmap for launching a startup"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 1: Todo only - task decomposition
+  include_todo: true
+  include_filesystem: false
+  include_subagents: false
+  include_skills: false
+
+
+allow_mcp: false

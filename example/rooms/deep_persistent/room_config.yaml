@@ -1,0 +1,22 @@
+id: "deep_persistent"
+name: "Deep Persistent"
+description: "Research agent with filesystem-backed state persistence"
+suggestions:
+  - "Continue my previous research session"
+  - "Show me what we worked on last time"
+  - "Add to my existing project notes"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 2: Todo + Filesystem with persistent backend
+  include_todo: true
+  include_filesystem: true
+  include_subagents: false
+  include_skills: false
+
+  # Filesystem backend for persistence across restarts
+
+allow_mcp: false

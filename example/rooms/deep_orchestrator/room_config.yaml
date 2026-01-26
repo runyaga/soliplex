@@ -1,0 +1,64 @@
+id: "deep_orchestrator"
+name: "Deep Orchestrator"
+description: "Multi-agent coordinator that delegates to specialized subagents"
+suggestions:
+  - "Build a complete user authentication system"
+  - "Create a REST API with tests and documentation"
+  - "Refactor this module and update all consumers"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 5: Full multi-agent orchestration
+  include_todo: true
+  include_filesystem: true
+  include_subagents: true
+  include_skills: false
+  include_execute: true
+
+  # Subagents for delegation
+  subagents:
+    - name: "coder"
+      description: "Writes clean, well-structured code following best practices"
+      instructions: |
+        You are a senior software engineer. Write production-quality code.
+        - Follow language idioms and conventions
+        - Include type hints and docstrings
+        - Handle edge cases and errors gracefully
+        - Keep functions small and focused
+
+    - name: "tester"
+      description: "Creates comprehensive test suites with edge case coverage"
+      instructions: |
+        You are a QA engineer specializing in test automation.
+        - Write unit tests with high coverage
+        - Include edge cases and error conditions
+        - Use appropriate mocking strategies
+        - Follow AAA pattern (Arrange, Act, Assert)
+
+    - name: "reviewer"
+      description: "Reviews code for quality, security, and best practices"
+      instructions: |
+        You are a code reviewer focused on quality and security.
+        - Check for common vulnerabilities (OWASP top 10)
+        - Verify error handling and edge cases
+        - Ensure code follows project conventions
+        - Suggest performance improvements
+
+    - name: "documenter"
+      description: "Writes clear technical documentation and API references"
+      instructions: |
+        You are a technical writer.
+        - Write clear, concise documentation
+        - Include usage examples
+        - Document all parameters and return values
+        - Add troubleshooting sections where helpful
+
+  # Require approval for destructive operations
+  interrupt_on:
+    execute: true
+
+
+allow_mcp: false

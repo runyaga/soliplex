@@ -1,0 +1,21 @@
+id: "deep_coder"
+name: "Deep Coder"
+description: "Code generation agent with task tracking"
+suggestions:
+  - "Create a Python function to parse JSON files"
+  - "Build a simple REST API with FastAPI"
+  - "Write unit tests for a calculator module"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 2: Todo + Filesystem - coding workflow
+  include_todo: true
+  include_filesystem: true
+  include_subagents: false
+  include_skills: false
+
+
+allow_mcp: false

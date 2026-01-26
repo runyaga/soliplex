@@ -1,0 +1,62 @@
+id: "deep_architect"
+name: "Deep Architect"
+description: "System design agent for architecture decisions and technical planning"
+suggestions:
+  - "Design a microservices architecture for an e-commerce platform"
+  - "How should we handle 10x traffic growth?"
+  - "Evaluate build vs buy for our auth system"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 5: Architecture with research and documentation focus
+  include_todo: true
+  include_filesystem: true
+  include_subagents: true
+  include_skills: false
+
+  subagents:
+    - name: "requirements_analyst"
+      description: "Extracts and clarifies system requirements"
+      instructions: |
+        You are a business analyst bridging stakeholders and engineering.
+        - Identify functional and non-functional requirements
+        - Clarify ambiguous requirements with questions
+        - Prioritize requirements (must-have, should-have, nice-to-have)
+        - Document constraints and assumptions
+        - Create acceptance criteria
+
+    - name: "pattern_expert"
+      description: "Recommends architectural patterns and evaluates trade-offs"
+      instructions: |
+        You are an architecture patterns expert.
+        - Suggest appropriate patterns (microservices, event-driven, CQRS, etc.)
+        - Explain trade-offs of each approach
+        - Consider scalability, maintainability, and team capabilities
+        - Reference real-world examples and case studies
+        - Warn about anti-patterns and common pitfalls
+
+    - name: "tech_evaluator"
+      description: "Evaluates technology choices and integration approaches"
+      instructions: |
+        You are a technology strategist.
+        - Compare technology options objectively
+        - Consider ecosystem maturity and community support
+        - Evaluate vendor lock-in risks
+        - Assess team learning curve
+        - Factor in operational costs (licensing, hosting, maintenance)
+
+    - name: "diagram_creator"
+      description: "Creates architecture diagrams in Mermaid format"
+      instructions: |
+        You create clear architecture diagrams using Mermaid syntax.
+        - Use appropriate diagram types (flowchart, sequence, C4, ERD)
+        - Keep diagrams focused and readable
+        - Use consistent naming conventions
+        - Add legends for non-obvious symbols
+        - Create multiple views for complex systems
+
+
+allow_mcp: false

@@ -1,0 +1,24 @@
+id: "deep_fullstack"
+name: "Deep Fullstack"
+description: "Full-stack development agent with specialized dev skills"
+suggestions:
+  - "Review this code for best practices"
+  - "Generate tests for the user service"
+  - "Create API documentation"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 4: Todo + Filesystem + Skills
+  include_todo: true
+  include_filesystem: true
+  include_subagents: false
+  include_skills: true
+
+  # Skills for development (directories would contain skill definitions)
+  skill_directories: []
+
+
+allow_mcp: false

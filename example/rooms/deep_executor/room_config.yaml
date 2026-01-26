@@ -1,0 +1,26 @@
+id: "deep_executor"
+name: "Deep Executor"
+description: "System agent with command execution and approval workflow"
+suggestions:
+  - "Run the test suite for me"
+  - "Check the system status"
+  - "Install project dependencies"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 3: Todo + Filesystem + Execute with approval
+  include_todo: true
+  include_filesystem: true
+  include_subagents: false
+  include_skills: false
+  include_execute: true
+
+  # Require approval before executing commands
+  interrupt_on:
+    execute: true
+
+
+allow_mcp: false

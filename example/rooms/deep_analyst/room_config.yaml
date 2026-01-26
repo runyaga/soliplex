@@ -1,0 +1,24 @@
+id: "deep_analyst"
+name: "Deep Analyst"
+description: "Data analysis agent with specialized analysis skills"
+suggestions:
+  - "Analyze this CSV data for trends"
+  - "Summarize the key findings from these logs"
+  - "Create a report from the sales data"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 4: Todo + Filesystem + Skills
+  include_todo: true
+  include_filesystem: true
+  include_subagents: false
+  include_skills: true
+
+  # Skills for analysis (directories would contain skill definitions)
+  skill_directories: []
+
+
+allow_mcp: false

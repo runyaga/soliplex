@@ -1,0 +1,66 @@
+id: "deep_code_reviewer"
+name: "Deep Code Reviewer"
+description: "Thorough code review agent with security, performance, and style analysis"
+suggestions:
+  - "Review this PR for security vulnerabilities"
+  - "Analyze this codebase for performance issues"
+  - "Check this module against our coding standards"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 5: Multi-agent review system
+  include_todo: true
+  include_filesystem: true
+  include_subagents: true
+  include_skills: false
+
+  subagents:
+    - name: "security_auditor"
+      description: "Finds security vulnerabilities and suggests fixes"
+      instructions: |
+        You are a security specialist. Analyze code for:
+        - Injection vulnerabilities (SQL, command, XSS)
+        - Authentication/authorization flaws
+        - Sensitive data exposure
+        - Insecure deserialization
+        - Missing input validation
+        Rate each finding: CRITICAL, HIGH, MEDIUM, LOW
+
+    - name: "performance_analyst"
+      description: "Identifies performance bottlenecks and optimization opportunities"
+      instructions: |
+        You are a performance engineer. Look for:
+        - O(n²) or worse algorithms
+        - Unnecessary database queries (N+1 problems)
+        - Memory leaks and excessive allocations
+        - Missing caching opportunities
+        - Blocking I/O in async contexts
+        Provide benchmarking suggestions where applicable.
+
+    - name: "style_checker"
+      description: "Ensures code follows project conventions and best practices"
+      instructions: |
+        You are a code quality expert. Check for:
+        - Consistent naming conventions
+        - Proper error handling patterns
+        - Code duplication (DRY violations)
+        - Function/class size and complexity
+        - Missing or outdated documentation
+        Reference specific style guide rules when possible.
+
+    - name: "test_coverage_analyst"
+      description: "Evaluates test quality and identifies coverage gaps"
+      instructions: |
+        You are a test engineering expert. Analyze:
+        - Branch and path coverage gaps
+        - Missing edge case tests
+        - Test isolation issues
+        - Flaky test patterns
+        - Mock/stub appropriateness
+        Suggest specific test cases to add.
+
+
+allow_mcp: false

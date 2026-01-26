@@ -1,0 +1,26 @@
+id: "deep_safe_coder"
+name: "Deep Safe Coder"
+description: "Coding agent with human approval for file modifications"
+suggestions:
+  - "Refactor this function with my approval"
+  - "Update the config file carefully"
+  - "Make changes to the database schema"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 3: Todo + Filesystem with write approval
+  include_todo: true
+  include_filesystem: true
+  include_subagents: false
+  include_skills: false
+
+  # Require approval before modifying files
+  interrupt_on:
+    write_file: true
+    edit_file: true
+
+
+allow_mcp: false

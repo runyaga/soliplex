@@ -1,0 +1,21 @@
+id: "deep_researcher"
+name: "Deep Researcher"
+description: "Research agent with planning and file storage"
+suggestions:
+  - "Research best practices for API design"
+  - "Investigate React vs Vue for my project"
+  - "Compile notes on machine learning basics"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 2: Todo + Filesystem - research workflow
+  include_todo: true
+  include_filesystem: true
+  include_subagents: false
+  include_skills: false
+
+
+allow_mcp: false

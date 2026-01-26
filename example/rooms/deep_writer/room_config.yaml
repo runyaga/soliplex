@@ -1,0 +1,21 @@
+id: "deep_writer"
+name: "Deep Writer"
+description: "Document creation agent with structured drafting workflow"
+suggestions:
+  - "Write a technical blog post about async programming"
+  - "Draft a project proposal document"
+  - "Create documentation for my API"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 2: Todo + Filesystem - writing workflow
+  include_todo: true
+  include_filesystem: true
+  include_subagents: false
+  include_skills: false
+
+
+allow_mcp: false

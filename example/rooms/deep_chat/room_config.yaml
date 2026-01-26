@@ -1,0 +1,21 @@
+id: "deep_chat"
+name: "Deep Chat"
+description: "Basic conversational agent - no tools, pure chat baseline"
+suggestions:
+  - "Tell me about yourself"
+  - "What can you help me with?"
+  - "Explain quantum computing in simple terms"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 1: No capabilities - pure chat
+  include_todo: false
+  include_filesystem: false
+  include_subagents: false
+  include_skills: false
+
+
+allow_mcp: false

@@ -1,0 +1,21 @@
+id: "deep_notepad"
+name: "Deep Notepad"
+description: "Note-taking agent with file operations"
+suggestions:
+  - "Create a new note about meeting ideas"
+  - "List all my saved notes"
+  - "Read and summarize my project notes"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 1: Filesystem only - file operations
+  include_todo: false
+  include_filesystem: true
+  include_subagents: false
+  include_skills: false
+
+
+allow_mcp: false

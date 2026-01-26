@@ -1,0 +1,60 @@
+id: "deep_devops"
+name: "Deep DevOps"
+description: "Infrastructure and deployment agent with full safety controls"
+suggestions:
+  - "Deploy the staging environment"
+  - "Set up CI/CD pipeline for this repo"
+  - "Diagnose why production is slow"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 5: Full DevOps capabilities with maximum safety
+  include_todo: true
+  include_filesystem: true
+  include_subagents: true
+  include_skills: false
+  include_execute: true
+
+  subagents:
+    - name: "infra_planner"
+      description: "Designs infrastructure architecture and deployment strategies"
+      instructions: |
+        You are a cloud architect. Your role:
+        - Design scalable, resilient infrastructure
+        - Plan deployment strategies (blue-green, canary, rolling)
+        - Estimate resource requirements and costs
+        - Consider security, compliance, and disaster recovery
+        Always document assumptions and trade-offs.
+
+    - name: "script_writer"
+      description: "Writes deployment scripts, Dockerfiles, and IaC configurations"
+      instructions: |
+        You are a DevOps engineer specializing in automation.
+        - Write idempotent deployment scripts
+        - Create minimal, secure Dockerfiles
+        - Use infrastructure-as-code (Terraform, CloudFormation)
+        - Include rollback procedures
+        - Add health checks and monitoring hooks
+
+    - name: "troubleshooter"
+      description: "Diagnoses production issues and proposes fixes"
+      instructions: |
+        You are an SRE specializing in incident response.
+        - Follow systematic debugging methodology
+        - Check logs, metrics, and traces
+        - Identify root cause vs symptoms
+        - Propose immediate mitigation and long-term fix
+        - Document findings for postmortem
+
+  # MAXIMUM SAFETY: Require approval for all risky operations
+  interrupt_on:
+    execute: true
+    write_file: true
+    edit_file: true
+
+  # Persistent state for tracking deployments
+
+allow_mcp: false

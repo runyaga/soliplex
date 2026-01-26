@@ -131,7 +131,7 @@ class DefaultAgent(pydantic.BaseModel):
     retries: int
     system_prompt: str | None
     provider_type: config.LLMProviderType  # enum, not dataclass
-    provider_base_url: str
+    provider_base_url: str | None
     provider_key: str
 
     @classmethod
@@ -143,7 +143,7 @@ class DefaultAgent(pydantic.BaseModel):
             retries=agent_config.retries,
             system_prompt=agent_config.get_system_prompt(),
             provider_type=agent_config.provider_type,
-            provider_base_url=llm_provider_kw["base_url"],
+            provider_base_url=llm_provider_kw.get("base_url"),
             provider_key=agent_config.provider_key or "dummy",
         )
 
@@ -323,7 +323,7 @@ class Installation(pydantic.BaseModel):
     secrets: list[Secret] = []
     environment: dict[str, typing.Any] = {}
     haiku_rag_config_file: pathlib.Path | None = None
-    agents: list[DefaultAgent] = []
+    agents: list[Agent] = []
     agui_features: list[AGUI_Feature] = []
     oidc_paths: list[pathlib.Path] = []
     room_paths: list[pathlib.Path] = []
@@ -343,10 +343,16 @@ class Installation(pydantic.BaseModel):
             Secret.from_config(secret_config)
             for secret_config in installation_config.secrets
         ]
-        agents = [
-            DefaultAgent.from_config(agent_config)
-            for agent_config in installation_config.agent_configs
-        ]
+
+        agents = []
+        for agent_config in installation_config.agent_configs:
+            if agent_config.kind == "factory":
+                agent = FactoryAgent.from_config(agent_config)
+            else:
+                agent = DefaultAgent.from_config(agent_config)
+
+            agents.append(agent)
+
         agui_features = [
             AGUI_Feature.from_config(agui_feature)
             for agui_feature in installation_config.agui_features
@@ -379,6 +385,15 @@ class Installation(pydantic.BaseModel):
 # ============================================================================
 #   API interaction models
 # ============================================================================
+
+
+# ----------------------------------------------------------------------------
+#   Python software manifest models
+# ----------------------------------------------------------------------------
+InstalledPackage = dict[str, str]
+
+
+InstalledPackages = dict[str, InstalledPackage]
 
 
 # ----------------------------------------------------------------------------

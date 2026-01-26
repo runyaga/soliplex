@@ -1,10 +1,10 @@
 import contextlib
+import dataclasses
 from unittest import mock
 
 import fastapi
 import pytest
 from ag_ui import core as agui_core
-from haiku.rag.graph import agui as hr_agui
 from sqlalchemy.ext import asyncio as sqla_asyncio
 
 from soliplex import agents
@@ -19,8 +19,8 @@ DEFAULT = "test-default"
 
 SECRET_NAME_1 = "TEST_SECRET"
 SECRET_NAME_2 = "OTHER_SECRET"
-SECRET_CONFIG_1 = config.SecretConfig(SECRET_NAME_1)
-SECRET_CONFIG_2 = config.SecretConfig(SECRET_NAME_2)
+SECRET_CONFIG_1 = config.SecretConfig(secret_name=SECRET_NAME_1)
+SECRET_CONFIG_2 = config.SecretConfig(secret_name=SECRET_NAME_2)
 MISS_ERROR = object()
 OLLAMA_BASE_URL = "http://ollama.example.com:11434"
 
@@ -148,6 +148,333 @@ def test_installation_haiku_rag_config():
     the_installation = installation.Installation(i_config)
 
     assert the_installation.haiku_rag_config is i_config.haiku_rag_config
+
+
+@pytest.fixture(params=[None, "agent", "factory"])
+def standalone_agents(request):
+    kw = {}
+    agent_configs = kw["agent_configs"] = []
+
+    if request.param == "agent":
+        standalone_agent = mock.create_autospec(
+            config.AgentConfig,
+            id="standalone-agent",
+            provider_type=config.LLMProviderType.OLLAMA,
+            llm_provider_base_url=OLLAMA_BASE_URL,
+            model_name="standalone-model",
+        )
+
+        agent_configs.append(
+            standalone_agent,
+        )
+
+    elif request.param == "factory":
+        standalone_factory_agent = mock.create_autospec(
+            config.FactoryAgentConfig,
+            id="standalone-factory-agent",
+        )
+
+        agent_configs.append(
+            standalone_factory_agent,
+        )
+
+    return kw
+
+
+@pytest.fixture(params=[False, True])
+def quiz_judge_agents(request):
+    kw = {}
+
+    if request.param:
+        kw["judge_agent"] = mock.create_autospec(
+            config.AgentConfig,
+            id="judge-agent",
+            provider_type=config.LLMProviderType.OLLAMA,
+            llm_provider_base_url=OLLAMA_BASE_URL,
+            model_name="judge-model",
+        )
+    else:
+        kw["judge_agent"] = None
+
+    return kw
+
+
+@pytest.fixture(params=[False, True])
+def room_quizzes(request, quiz_judge_agents):
+    kw = {"quizzes": []}
+
+    if request.param:
+        kw["quizzes"].append(
+            mock.create_autospec(
+                config.QuizConfig,
+                **quiz_judge_agents,
+            )
+        )
+
+    return kw
+
+
+@pytest.fixture(params=[False, True])
+def rooms_with_agents(request, room_quizzes):
+    kw = {}
+    room_configs = kw["room_configs"] = {}
+
+    if request.param:
+        room_agent = mock.create_autospec(
+            config.AgentConfig,
+            id="room-agent",
+            provider_type=config.LLMProviderType.OLLAMA,
+            llm_provider_base_url=OLLAMA_BASE_URL,
+            model_name="room-model",
+        )
+        room_config = mock.create_autospec(
+            config.RoomConfig,
+            id="test-room",
+            agent_config=room_agent,
+            **room_quizzes,
+        )
+        room_configs["test-room"] = room_config
+
+    return kw
+
+
+@pytest.fixture(params=[False, True])
+def completions_with_agents(request):
+    kw = {}
+    completion_configs = kw["completion_configs"] = {}
+
+    if request.param:
+        completion_agent = mock.create_autospec(
+            config.AgentConfig,
+            id="completion-agent",
+            provider_type=config.LLMProviderType.OLLAMA,
+            llm_provider_base_url=OLLAMA_BASE_URL,
+            model_name="completion-model",
+        )
+        completion_config = mock.create_autospec(
+            config.CompletionConfig,
+            id="test-completion",
+            agent_config=completion_agent,
+        )
+        completion_configs["test-completion"] = completion_config
+
+    return kw
+
+
+def test_installation_all_agent_configs(
+    standalone_agents,
+    rooms_with_agents,
+    completions_with_agents,
+):
+    i_config = mock.create_autospec(
+        config.InstallationConfig,
+        **standalone_agents,
+        **rooms_with_agents,
+        **completions_with_agents,
+    )
+
+    expected = {}
+
+    if standalone_agents["agent_configs"]:
+        expected |= {
+            agent.id: agent for agent in standalone_agents["agent_configs"]
+        }
+
+    if rooms_with_agents["room_configs"]:
+        expected |= {
+            room.agent_config.id: room.agent_config
+            for room in rooms_with_agents["room_configs"].values()
+        }
+        quizzes = []
+
+        for room in rooms_with_agents["room_configs"].values():
+            quizzes.extend(room.quizzes)
+
+        expected |= {
+            quiz.judge_agent.id: quiz.judge_agent
+            for quiz in quizzes
+            if quiz.judge_agent is not None
+        }
+
+    if completions_with_agents["completion_configs"]:
+        expected |= {
+            completion.agent_config.id: completion.agent_config
+            for completion in (
+                completions_with_agents["completion_configs"].values()
+            )
+        }
+
+    the_installation = installation.Installation(i_config)
+
+    found = the_installation.all_agent_configs
+
+    assert found == expected
+
+
+def test_installation_agent_provider_info(
+    standalone_agents,
+    rooms_with_agents,
+    completions_with_agents,
+):
+    i_config = mock.create_autospec(
+        config.InstallationConfig,
+        **standalone_agents,
+        **rooms_with_agents,
+        **completions_with_agents,
+    )
+
+    expected = {}
+
+    def _add_agent(agent):
+        # FactoryAgentConfig has no provider info or model
+        provider_type = getattr(agent, "provider_type", None)
+
+        if provider_type is not None:
+            type_urls = expected.setdefault(agent.provider_type, {})
+            url_models = type_urls.setdefault(
+                agent.llm_provider_base_url, set()
+            )
+            url_models.add(agent.model_name)
+
+    if standalone_agents["agent_configs"]:
+        for agent in standalone_agents["agent_configs"]:
+            _add_agent(agent)
+
+    if rooms_with_agents["room_configs"]:
+        for room in rooms_with_agents["room_configs"].values():
+            _add_agent(room.agent_config)
+
+            for quiz in room.quizzes:
+                if quiz.judge_agent:
+                    _add_agent(quiz.judge_agent)
+
+    if completions_with_agents["completion_configs"]:
+        completion_configs = completions_with_agents["completion_configs"]
+        for completion in completion_configs.values():
+            _add_agent(completion.agent_config)
+
+    the_installation = installation.Installation(i_config)
+
+    found = the_installation.agent_provider_info
+
+    assert found == expected
+
+
+HR_CONFIG_SECTIONS = ["embeddings", "qa", "reranking", "research"]
+TEST_MODEL_PROVIDER = "test-model-provider"
+TEST_MODEL_BASE_URL = "https://provider.example.com:11434"
+TEST_MODEL_NAME = "test-model-name"
+
+
+@dataclasses.dataclass
+class FauxHRModel:
+    provider: str = TEST_MODEL_PROVIDER
+    base_url: str = TEST_MODEL_BASE_URL
+    name: str = TEST_MODEL_NAME
+
+
+@pytest.fixture(params=[None] + HR_CONFIG_SECTIONS)
+def hr_config_w_providers(request):
+    hr_config = mock.Mock(
+        spec_set=HR_CONFIG_SECTIONS + ["which"],
+        which=request.param,
+        embeddings=None,
+        qa=None,
+        reranking=None,
+        research=None,
+    )
+    model = FauxHRModel()
+    section = mock.Mock(spec_set=["model"], model=model)
+
+    for section_name in HR_CONFIG_SECTIONS:
+        if section_name == request.param:
+            setattr(hr_config, section_name, section)
+
+    return hr_config
+
+
+def test_installation_haiku_rag_provider_info(hr_config_w_providers):
+    i_config = mock.create_autospec(
+        config.InstallationConfig,
+        haiku_rag_config=hr_config_w_providers,
+    )
+    the_installation = installation.Installation(i_config)
+
+    expected = {}
+
+    if hr_config_w_providers.which is not None:
+        expected[TEST_MODEL_PROVIDER] = {
+            TEST_MODEL_BASE_URL: set([TEST_MODEL_NAME]),
+        }
+
+    found = the_installation.haiku_rag_provider_info
+
+    assert found == expected
+
+
+def test_installation_all_provider_info(
+    standalone_agents,
+    rooms_with_agents,
+    completions_with_agents,
+    hr_config_w_providers,
+):
+    i_config = mock.create_autospec(
+        config.InstallationConfig,
+        haiku_rag_config=hr_config_w_providers,
+        **standalone_agents,
+        **rooms_with_agents,
+        **completions_with_agents,
+    )
+    i_config.get_environment.side_effect = {
+        "OLLAMA_BASE_URL": OLLAMA_BASE_URL,
+    }.get
+    the_installation = installation.Installation(i_config)
+
+    expected = {}
+
+    def _add_agent(agent):
+        # FactoryAgentConfig has no provider info or model
+        provider_type = getattr(agent, "provider_type", None)
+
+        if provider_type is not None:
+            type_urls = expected.setdefault(agent.provider_type, {})
+            url_models = type_urls.setdefault(
+                agent.llm_provider_base_url, set()
+            )
+            url_models.add(agent.model_name)
+
+    if standalone_agents["agent_configs"]:
+        for agent in standalone_agents["agent_configs"]:
+            _add_agent(agent)
+
+    if rooms_with_agents["room_configs"]:
+        for room in rooms_with_agents["room_configs"].values():
+            _add_agent(room.agent_config)
+
+            for quiz in room.quizzes:
+                if quiz.judge_agent:
+                    _add_agent(quiz.judge_agent)
+
+    if completions_with_agents["completion_configs"]:
+        completion_configs = completions_with_agents["completion_configs"]
+        for completion in completion_configs.values():
+            _add_agent(completion.agent_config)
+
+    if hr_config_w_providers.which is not None:
+        expected[TEST_MODEL_PROVIDER] = {
+            TEST_MODEL_BASE_URL: set([TEST_MODEL_NAME]),
+        }
+
+    found = the_installation.all_provider_info
+
+    assert found == expected
+
+
+def test_installation_logfire_config():
+    i_config = mock.create_autospec(config.InstallationConfig)
+    the_installation = installation.Installation(i_config)
+
+    assert the_installation.logfire_config is i_config.logfire_config
 
 
 def test_installation_thread_persistence_dburi_sync():
@@ -575,13 +902,6 @@ async def test_installation_get_agent_deps_for_room(
             assert found.user == test_user
             assert found.tool_configs == t_configs
 
-            if w_run_agent_input:
-                assert isinstance(found.agui_emitter, hr_agui.AGUIEmitter)
-                assert found.agui_emitter.thread_id == THREAD_ID
-                assert found.agui_emitter.run_id == RUN_ID
-            else:
-                assert found.agui_emitter is None
-
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("w_run_agent_input", [False, True])
@@ -633,13 +953,6 @@ async def test_installation_get_agent_deps_for_completion(
         assert found.user == test_user
         assert found.tool_configs == t_configs
 
-        if w_run_agent_input:
-            assert isinstance(found.agui_emitter, hr_agui.AGUIEmitter)
-            assert found.agui_emitter.thread_id == THREAD_ID
-            assert found.agui_emitter.run_id == RUN_ID
-        else:
-            assert found.agui_emitter is None
-
 
 @pytest.mark.anyio
 async def test_get_the_installation():
@@ -651,6 +964,58 @@ async def test_get_the_installation():
     found = await installation.get_the_installation(request)
 
     assert found is the_installation
+
+
+@pytest.mark.parametrize("w_logfire_config", [None, "bare", "ipydai", "ifapi"])
+@mock.patch("soliplex.installation.logfire")
+def test_apply_logfire_configuration(logfire, w_logfire_config):
+    app = mock.Mock(spec_set=())
+    the_installation = mock.Mock(spec_set=["logfire_config"])
+
+    if w_logfire_config is not None:
+        logfire_config = mock.create_autospec(config.LogfireConfig)
+        logfire_config.logfire_config_kwargs = {"foo": "bar"}
+
+        if w_logfire_config == "ipydai":
+            ipydai = logfire_config.instrument_pydantic_ai
+            ipydai.instrument_pydantic_ai_kwargs = {"baz": "bam"}
+        else:
+            logfire_config.instrument_pydantic_ai = None
+
+        if w_logfire_config == "ifapi":
+            ifapi = logfire_config.instrument_fast_api
+            ifapi.instrument_fast_api_kwargs = {"qux": "spam"}
+        else:
+            logfire_config.instrument_fast_api = None
+
+        the_installation.logfire_config = logfire_config
+    else:
+        the_installation.logfire_config = None
+
+    installation.apply_logfire_configuration(app, the_installation)
+
+    if w_logfire_config is not None:
+        logfire.configure.assert_called_once_with(foo="bar")
+
+        if w_logfire_config == "ipydai":
+            logfire.instrument_pydantic_ai.assert_called_once_with(
+                baz="bam",
+            )
+        elif w_logfire_config == "ifapi":
+            logfire.instrument_fastapi.assert_called_once_with(
+                app,
+                qux="spam",
+            )
+    else:
+        logfire.configure.assert_called_once_with(
+            send_to_logfire="if-token-present",
+        )
+
+        logfire.instrument_pydantic_ai.assert_called_with()
+        logfire.instrument_fastapi.assert_called_with(
+            app,
+            capture_headers=True,
+        )
 
 
 def _mock_mcp_app(key):
@@ -676,6 +1041,7 @@ def mcp_apps():
         (True, []),
     ],
 )
+@mock.patch("soliplex.installation.apply_logfire_configuration")
 @mock.patch("soliplex.secrets.resolve_secrets")
 @mock.patch("soliplex.mcp_server.setup_mcp_for_rooms")
 @mock.patch("soliplex.config.load_installation")
@@ -683,6 +1049,7 @@ async def test_lifespan(
     load_installation,
     smfr,
     srs,
+    alc,
     mcp_apps,
     w_no_auth_mode,
     exp_oidc_paths,
@@ -739,5 +1106,6 @@ async def test_lifespan(
     ):
         assert f_call.args == ("/mcp/" + key, mcp_app)
 
+    alc.assert_called_once_with(app, the_installation)
     srs.assert_called_once_with(the_installation._config.secrets)
     smfr.assert_called_once_with(the_installation)

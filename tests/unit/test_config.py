@@ -7,7 +7,6 @@ import json
 import pathlib
 import ssl
 import typing
-import warnings
 from unittest import mock
 from urllib import parse as url_parse
 
@@ -268,6 +267,7 @@ FULL_HTTP_MCTC_CONFIG_YAML = """
 
 AGENT_ID = "testing-agent"
 TEMPLATE_AGENT_ID = "testing-template"
+W_EXTRA_CONFIG_TEMPLATE_AGENT_ID = "testing-template-w-extra-config"
 BOGUS_TEMPLATE_AGENT_ID = "BOGUS"
 SYSTEM_PROMPT = "You are a test"
 MODEL_NAME = "test-model"
@@ -280,7 +280,6 @@ OLLAMA_BASE_URL = "https://example.com:12345"
 
 BARE_INSTALLATION_CONFIG_ENVIRONMENT = {
     "OLLAMA_BASE_URL": PROVIDER_BASE_URL,
-    "DEFAULT_AGENT_MODEL": MODEL_NAME,
 }
 
 TEST_QUIZ_ID = "test_quiz"
@@ -381,16 +380,9 @@ FADTC_CONFIG_KW = {
 
 BOGUS_AGENT_CONFIG_YAML = ""
 
-EMPTY_AGENT_CONFIG_KW = dict(
+W_KIND_AGENT_CONFIG_KW = dict(
     id=AGENT_ID,
-)
-EMPTY_AGENT_CONFIG_YAML = f"""
-id: "{AGENT_ID}"
-"""
-
-# XXX DEPRECATED:  'model_name' will be required.
-EMPTY_W_KIND_AGENT_CONFIG_KW = dict(
-    id=AGENT_ID,
+    model_name=MODEL_NAME,
     kind="testing",
 )
 
@@ -521,29 +513,58 @@ template_id: "{BOGUS_TEMPLATE_AGENT_ID}"
 system_prompt: ./prompt.txt
 """
 
-WO_CONFIG_PYTHON_AGENT_CONFIG_KW = dict(
+FACTORY_NAME = "soliplex.config.test_factory_wo_config"
+WO_CONFIG_FACTORY_AGENT_CONFIG_KW = dict(
     id=AGENT_ID,
-    factory_name="soliplex.config.test_factory_wo_config",
+    factory_name=FACTORY_NAME,
     with_agent_config=False,
 )
-WO_CONFIG_PYTHON_AGENT_CONFIG_YAML = f"""
+WO_CONFIG_FACTORY_AGENT_CONFIG_YAML = f"""
 id: "{AGENT_ID}"
-factory_name: "soliplex.config.test_factory_wo_config"
+factory_name: "{FACTORY_NAME}"
 with_agent_config: false
 """
 
-W_CONFIG_PYTHON_AGENT_CONFIG_KW = dict(
+W_CONFIG_FACTORY_AGENT_CONFIG_KW = dict(
     id=AGENT_ID,
-    factory_name="soliplex.config.test_factory_w_config",
+    factory_name=FACTORY_NAME,
     with_agent_config=True,
     extra_config={
         "foo": "Bar",
     },
 )
-W_CONFIG_PYTHON_AGENT_CONFIG_YAML = f"""
+W_CONFIG_FACTORY_AGENT_CONFIG_YAML = f"""
 id: "{AGENT_ID}"
-factory_name: "soliplex.config.test_factory_w_config"
+factory_name: "{FACTORY_NAME}"
 with_agent_config: true
+extra_config:
+  foo: "Bar"
+"""
+
+W_BOGUS_TEMPLATE_ID_FACTORY_AGENT_CONFIG_YAML = f"""
+id: "{AGENT_ID}"
+template_id: "{BOGUS_TEMPLATE_AGENT_ID}"
+"""
+
+W_TEMPLATE_ID_FACTORY_AGENT_CONFIG_KW = dict(
+    id=AGENT_ID,
+    _template_id=TEMPLATE_AGENT_ID,
+)
+W_TEMPLATE_ID_FACTORY_AGENT_CONFIG_YAML = f"""
+id: "{AGENT_ID}"
+template_id: "{TEMPLATE_AGENT_ID}"
+"""
+
+W_TEMPLATE_ID_W_EXTRA_CONFIG_FACTORY_AGENT_CONFIG_KW = dict(
+    id=AGENT_ID,
+    _template_id=W_EXTRA_CONFIG_TEMPLATE_AGENT_ID,
+    extra_config={
+        "foo": "Bar",
+    },
+)
+W_TEMPLATE_ID_W_EXTRA_CONFIG_FACTORY_AGENT_CONFIG_YAML = f"""
+id: "{AGENT_ID}"
+template_id: "{W_EXTRA_CONFIG_TEMPLATE_AGENT_ID}"
 extra_config:
   foo: "Bar"
 """
@@ -795,6 +816,310 @@ mcp_client_toolsets:
         {HTTP_MCP_QP_KEY}: "{HTTP_MCP_QP_VALUE}"
 """
 
+EMPTY_LFIPYDAI_CONFIG_YAML = ""  # raises
+DEFAULT_LFIPYDAI_EXP_KWARGS = {
+    "include_binary_content": True,
+    "include_content": True,
+}
+
+W_VALUES_LFIPYDAI_CONFIG_KW = {
+    "include_binary_content": False,
+    "include_content": False,
+}
+W_VALUES_LFIPYDAI_CONFIG_YAML = """\
+include_binary_content: false
+include_content: false
+"""
+W_VALUES_LFIPYDAI_CONFIG_EXP_KW = W_VALUES_LFIPYDAI_CONFIG_KW
+
+
+EMPTY_LFIFAPI_CONFIG_YAML = ""  # raises
+DEFAULT_LFIFAPI_EXP_KWARGS = {
+    "capture_headers": False,
+    "excluded_urls": None,
+    "record_send_receive": False,
+    "extra_spans": False,
+}
+
+LFIFAPI_EXCLUDE_URL = "https://exclude-ifapi.example.com"
+W_VALUES_LFIFAPI_CONFIG_KW = {
+    "capture_headers": True,
+    "excluded_urls": [LFIFAPI_EXCLUDE_URL],
+    "record_send_receive": True,
+    "extra_spans": True,
+}
+W_VALUES_LFIFAPI_CONFIG_YAML = f"""\
+capture_headers: true
+excluded_urls:
+    - "{LFIFAPI_EXCLUDE_URL}"
+record_send_receive: true
+extra_spans: true
+"""
+W_VALUES_LFIFAPI_CONFIG_EXP_KW = W_VALUES_LFIFAPI_CONFIG_KW
+
+
+EMPTY_LOGFIRE_CONFIG_YAML = ""  # raises
+
+#
+#   Secret / environment for default 'logfire_config' (token-only)
+#
+TEST_LOGFIRE_TOKEN = "DEADBEEF"
+TEST_LOGFIRE_SERVICE_NAME = "test-service-name"
+TEST_LOGFIRE_SERVICE_VERSION = "test-service-version"
+TEST_LOGFIRE_ENVIRONMENT = "test-environment"
+TEST_LOGFIRE_CONFIG_DIR = "/path/to/logfire/config"
+TEST_LOGFIRE_DATA_DIR = "/path/to/logfire/data"
+TEST_LOGFIRE_MIN_LEVEL = "debug"
+TEST_LOGFIRE_BASE_URL = "https://logfire.example.com"
+
+TEST_LOGFIRE_IC_DEFAULT_SECRETS = {
+    "secret:LOGFIRE_TOKEN": TEST_LOGFIRE_TOKEN,
+}
+
+TEST_LOGFIRE_IC_DEFAULT_ENV = {
+    "LOGFIRE_SERVICE_NAME": TEST_LOGFIRE_SERVICE_NAME,
+    "LOGFIRE_SERVICE_VERSION": TEST_LOGFIRE_SERVICE_VERSION,
+    "LOGFIRE_ENVIRONMENT": TEST_LOGFIRE_ENVIRONMENT,
+    "LOGFIRE_CONFIG_DIR": TEST_LOGFIRE_CONFIG_DIR,
+    "LOGFIRE_DATA_DIR": TEST_LOGFIRE_DATA_DIR,
+    "LOGFIRE_MIN_LEVEL": TEST_LOGFIRE_MIN_LEVEL,
+}
+
+W_TOKEN_ONLY_LOGFIRE_CONFIG_INIT_KW = {
+    "token": "secret:LOGFIRE_TOKEN",
+}
+W_TOKEN_ONLY_LOGFIRE_CONFIG_YAML = """\
+token: "secret:LOGFIRE_TOKEN"
+"""
+W_TOKEN_ONLY_LOGFIRE_CONFIG_EXP_LC_KWARGS = {
+    "token": TEST_LOGFIRE_TOKEN,
+    "service_name": TEST_LOGFIRE_SERVICE_NAME,
+    "service_version": TEST_LOGFIRE_SERVICE_VERSION,
+    "environment": TEST_LOGFIRE_ENVIRONMENT,
+    "config_dir": TEST_LOGFIRE_CONFIG_DIR,
+    "data_dir": TEST_LOGFIRE_DATA_DIR,
+    "min_level": TEST_LOGFIRE_MIN_LEVEL,
+    "add_baggage_to_attributes": True,
+}
+W_TOKEN_ONLY_LOGFIRE_CONFIG_AS_YAML = {
+    "token": "secret:LOGFIRE_TOKEN",
+    "service_name": "env:LOGFIRE_SERVICE_NAME",
+    "service_version": "env:LOGFIRE_SERVICE_VERSION",
+    "environment": "env:LOGFIRE_ENVIRONMENT",
+    "config_dir": "env:LOGFIRE_CONFIG_DIR",
+    "data_dir": "env:LOGFIRE_DATA_DIR",
+    "min_level": "env:LOGFIRE_MIN_LEVEL",
+    "add_baggage_to_attributes": True,
+}
+
+#
+#   Secret / environment for full 'logfire_config' (all scalars)
+#
+TEST_LOGFIRE_OTHER_TOKEN = "FACEDACE"
+TEST_LOGFIRE_OTHER_SERVICE_NAME = "other-service-name"
+TEST_LOGFIRE_OTHER_SERVICE_VERSION = "other-service-version"
+TEST_LOGFIRE_OTHER_ENVIRONMENT = "other-environment"
+TEST_LOGFIRE_OTHER_CONFIG_DIR = "/other/path/to/logfire/config"
+TEST_LOGFIRE_OTHER_DATA_DIR = "/other/path/to/logfire/data"
+TEST_LOGFIRE_OTHER_MIN_LEVEL = "other"
+TEST_LOGFIRE_OTHER_BASE_URL = "https://logfire-other.example.com"
+
+TEST_LOGFIRE_IC_OTHER_SECRETS = {
+    "secret:LOGFIRE_TOKEN": TEST_LOGFIRE_OTHER_TOKEN,
+}
+
+TEST_LOGFIRE_IC_OTHER_ENV = {
+    "LOGFIRE_SERVICE_NAME": TEST_LOGFIRE_OTHER_SERVICE_NAME,
+    "LOGFIRE_SERVICE_VERSION": TEST_LOGFIRE_OTHER_SERVICE_VERSION,
+    "LOGFIRE_ENVIRONMENT": TEST_LOGFIRE_OTHER_ENVIRONMENT,
+    "LOGFIRE_CONFIG_DIR": TEST_LOGFIRE_OTHER_CONFIG_DIR,
+    "LOGFIRE_DATA_DIR": TEST_LOGFIRE_OTHER_DATA_DIR,
+    "LOGFIRE_MIN_LEVEL": TEST_LOGFIRE_OTHER_MIN_LEVEL,
+    "LOGFIRE_BASE_URL": TEST_LOGFIRE_OTHER_BASE_URL,
+}
+
+W_SCALARS_LOGFIRE_CONFIG_INIT_KW = {
+    "token": "secret:LOGFIRE_TOKEN",
+    "service_name": "env:LOGFIRE_SERVICE_NAME",
+    "service_version": "env:LOGFIRE_SERVICE_VERSION",
+    "environment": "env:LOGFIRE_ENVIRONMENT",
+    "config_dir": "env:LOGFIRE_CONFIG_DIR",
+    "data_dir": "env:LOGFIRE_DATA_DIR",
+    "min_level": "env:LOGFIRE_MIN_LEVEL",
+    "inspect_arguments": False,
+    "add_baggage_to_attributes": False,
+    "distributed_tracing": True,
+}
+W_SCALARS_LOGFIRE_CONFIG_YAML = """\
+token: "secret:LOGFIRE_TOKEN"
+service_name: "env:LOGFIRE_SERVICE_NAME"
+service_version: "env:LOGFIRE_SERVICE_VERSION"
+environment: "env:LOGFIRE_ENVIRONMENT"
+config_dir: "env:LOGFIRE_CONFIG_DIR"
+data_dir: "env:LOGFIRE_DATA_DIR"
+min_level: "env:LOGFIRE_MIN_LEVEL"
+inspect_arguments: False
+add_baggage_to_attributes: False
+distributed_tracing: True
+"""
+W_SCALARS_LOGFIRE_CONFIG_EXP_LC_KWARGS = {
+    "token": TEST_LOGFIRE_OTHER_TOKEN,
+    "service_name": TEST_LOGFIRE_OTHER_SERVICE_NAME,
+    "service_version": TEST_LOGFIRE_OTHER_SERVICE_VERSION,
+    "environment": TEST_LOGFIRE_OTHER_ENVIRONMENT,
+    "config_dir": TEST_LOGFIRE_OTHER_CONFIG_DIR,
+    "data_dir": TEST_LOGFIRE_OTHER_DATA_DIR,
+    "min_level": TEST_LOGFIRE_OTHER_MIN_LEVEL,
+    "inspect_arguments": False,
+    "add_baggage_to_attributes": False,
+    "distributed_tracing": True,
+}
+W_SCALARS_LOGFIRE_CONFIG_AS_YAML = {
+    "token": "secret:LOGFIRE_TOKEN",
+    "service_name": "env:LOGFIRE_SERVICE_NAME",
+    "service_version": "env:LOGFIRE_SERVICE_VERSION",
+    "environment": "env:LOGFIRE_ENVIRONMENT",
+    "config_dir": "env:LOGFIRE_CONFIG_DIR",
+    "data_dir": "env:LOGFIRE_DATA_DIR",
+    "min_level": "env:LOGFIRE_MIN_LEVEL",
+    "inspect_arguments": False,
+    "add_baggage_to_attributes": False,
+    "distributed_tracing": True,
+}
+
+W_BASE_URL_LOGFIRE_CONFIG_INIT_KW = {
+    "token": "secret:LOGFIRE_TOKEN",
+    "base_url": "env:LOGFIRE_BASE_URL",
+}
+W_BASE_URL_LOGFIRE_CONFIG_YAML = """\
+token: "secret:LOGFIRE_TOKEN"
+base_url: "env:LOGFIRE_BASE_URL"
+"""
+W_BASE_URL_LOGFIRE_CONFIG_EXP_LC_KWARGS = {
+    "token": TEST_LOGFIRE_OTHER_TOKEN,
+    "service_name": TEST_LOGFIRE_OTHER_SERVICE_NAME,
+    "service_version": TEST_LOGFIRE_OTHER_SERVICE_VERSION,
+    "environment": TEST_LOGFIRE_OTHER_ENVIRONMENT,
+    "config_dir": TEST_LOGFIRE_OTHER_CONFIG_DIR,
+    "data_dir": TEST_LOGFIRE_OTHER_DATA_DIR,
+    "min_level": TEST_LOGFIRE_OTHER_MIN_LEVEL,
+    "add_baggage_to_attributes": True,
+    "advanced": {
+        "base_url": TEST_LOGFIRE_OTHER_BASE_URL,
+    },
+}
+W_BASE_URL_LOGFIRE_CONFIG_AS_YAML = {
+    "token": "secret:LOGFIRE_TOKEN",
+    "service_name": "env:LOGFIRE_SERVICE_NAME",
+    "service_version": "env:LOGFIRE_SERVICE_VERSION",
+    "environment": "env:LOGFIRE_ENVIRONMENT",
+    "config_dir": "env:LOGFIRE_CONFIG_DIR",
+    "data_dir": "env:LOGFIRE_DATA_DIR",
+    "min_level": "env:LOGFIRE_MIN_LEVEL",
+    "add_baggage_to_attributes": True,
+    "base_url": "env:LOGFIRE_BASE_URL",
+}
+
+W_SCRUBBING_LOGFIRE_CONFIG_INIT_KW = {
+    "token": "secret:LOGFIRE_TOKEN",
+    "scrubbing_patterns": [".*"],
+}
+W_SCRUBBING_LOGFIRE_CONFIG_YAML = """\
+token: "secret:LOGFIRE_TOKEN"
+scrubbing_patterns:
+    - ".*"
+"""
+W_SCRUBBING_LOGFIRE_CONFIG_EXP_LC_KWARGS = {
+    "token": TEST_LOGFIRE_TOKEN,
+    "service_name": TEST_LOGFIRE_SERVICE_NAME,
+    "service_version": TEST_LOGFIRE_SERVICE_VERSION,
+    "environment": TEST_LOGFIRE_ENVIRONMENT,
+    "config_dir": TEST_LOGFIRE_CONFIG_DIR,
+    "data_dir": TEST_LOGFIRE_DATA_DIR,
+    "min_level": TEST_LOGFIRE_MIN_LEVEL,
+    "add_baggage_to_attributes": True,
+    "scrubbing": {
+        "extra_patterns": [
+            ".*",
+        ],
+    },
+}
+W_SCRUBBING_LOGFIRE_CONFIG_AS_YAML = {
+    "token": "secret:LOGFIRE_TOKEN",
+    "service_name": "env:LOGFIRE_SERVICE_NAME",
+    "service_version": "env:LOGFIRE_SERVICE_VERSION",
+    "environment": "env:LOGFIRE_ENVIRONMENT",
+    "config_dir": "env:LOGFIRE_CONFIG_DIR",
+    "data_dir": "env:LOGFIRE_DATA_DIR",
+    "min_level": "env:LOGFIRE_MIN_LEVEL",
+    "add_baggage_to_attributes": True,
+    "scrubbing_patterns": [".*"],
+}
+
+W_IPYDAI_LOGFIRE_CONFIG_INIT_KW = {
+    "token": "secret:LOGFIRE_TOKEN",
+    "instrument_pydantic_ai": config.LogfireInstrumentPydanticAI(
+        include_binary_content=False,
+        include_content=False,
+    ),
+}
+W_IPYDAI_LOGFIRE_CONFIG_YAML = """\
+token: "secret:LOGFIRE_TOKEN"
+instrument_pydantic_ai:
+    include_binary_content: false
+    include_content: false
+"""
+W_IPYDAI_LOGFIRE_CONFIG_AS_YAML = {
+    "token": "secret:LOGFIRE_TOKEN",
+    "service_name": "env:LOGFIRE_SERVICE_NAME",
+    "service_version": "env:LOGFIRE_SERVICE_VERSION",
+    "environment": "env:LOGFIRE_ENVIRONMENT",
+    "config_dir": "env:LOGFIRE_CONFIG_DIR",
+    "data_dir": "env:LOGFIRE_DATA_DIR",
+    "min_level": "env:LOGFIRE_MIN_LEVEL",
+    "add_baggage_to_attributes": True,
+    "instrument_pydantic_ai": {
+        "include_binary_content": False,
+        "include_content": False,
+    },
+}
+
+W_IFAPI_LOGFIRE_CONFIG_INIT_KW = {
+    "token": "secret:LOGFIRE_TOKEN",
+    "instrument_fast_api": config.LogfireInstrumentFastAPI(
+        capture_headers=True,
+        excluded_urls=[LFIFAPI_EXCLUDE_URL],
+        record_send_receive=True,
+        extra_spans=True,
+    ),
+}
+W_IFAPI_LOGFIRE_CONFIG_YAML = f"""\
+token: "secret:LOGFIRE_TOKEN"
+instrument_fast_api:
+    capture_headers: true
+    excluded_urls:
+        - "{LFIFAPI_EXCLUDE_URL}"
+    record_send_receive: true
+    extra_spans: true
+"""
+W_IFAPI_LOGFIRE_CONFIG_AS_YAML = {
+    "token": "secret:LOGFIRE_TOKEN",
+    "service_name": "env:LOGFIRE_SERVICE_NAME",
+    "service_version": "env:LOGFIRE_SERVICE_VERSION",
+    "environment": "env:LOGFIRE_ENVIRONMENT",
+    "config_dir": "env:LOGFIRE_CONFIG_DIR",
+    "data_dir": "env:LOGFIRE_DATA_DIR",
+    "min_level": "env:LOGFIRE_MIN_LEVEL",
+    "add_baggage_to_attributes": True,
+    "instrument_fast_api": {
+        "capture_headers": True,
+        "excluded_urls": [LFIFAPI_EXCLUDE_URL],
+        "record_send_receive": True,
+        "extra_spans": True,
+    },
+}
+
+
 SECRET_NAME = "TEST_SECRET"
 SECRET_VALUE = "DEADBEEF"
 ENV_VAR_NAME = "TEST_ENV_VAR"
@@ -948,15 +1273,17 @@ FULL_ICMETA_KW = {
             source="server",
         ),
     ],
-    "tool_configs": [config.ConfigMeta(config.SearchDocumentsToolConfig)],
+    "tool_configs": [
+        config.ConfigMeta(config_klass=config.SearchDocumentsToolConfig),
+    ],
     "mcp_toolset_configs": [
-        config.ConfigMeta(config.Stdio_MCP_ClientToolsetConfig),
-        config.ConfigMeta(config.HTTP_MCP_ClientToolsetConfig),
+        config.ConfigMeta(config_klass=config.Stdio_MCP_ClientToolsetConfig),
+        config.ConfigMeta(config_klass=config.HTTP_MCP_ClientToolsetConfig),
     ],
     "mcp_server_tool_wrappers": [
         config.ConfigMeta(
-            config.SearchDocumentsToolConfig,
-            config.WithQueryMCPWrapper,
+            config_klass=config.SearchDocumentsToolConfig,
+            wrapper_klass=config.WithQueryMCPWrapper,
         ),
     ],
     "agent_configs": [
@@ -1029,10 +1356,10 @@ SECRET_NAME_2 = "TEST_SECRET_TWO"
 DB_SECRET_NAME = "DBSECRET"
 DB_SECRET_VALUE = "R34ll7#S33KR1T"
 
-SECRET_CONFIG_1 = config.SecretConfig(SECRET_NAME_1)
-SECRET_CONFIG_2 = config.SecretConfig(SECRET_NAME_2)
+SECRET_CONFIG_1 = config.SecretConfig(secret_name=SECRET_NAME_1)
+SECRET_CONFIG_2 = config.SecretConfig(secret_name=SECRET_NAME_2)
 DB_SECRET_CONFIG = config.SecretConfig(
-    DB_SECRET_NAME,
+    secret_name=DB_SECRET_NAME,
     _resolved=DB_SECRET_VALUE,
 )
 
@@ -1045,18 +1372,27 @@ SECRET_NCHARS = 37
 W_SECRETS_INSTALLATION_CONFIG_KW = {
     "id": INSTALLATION_ID,
     "secrets": [
-        config.SecretConfig(SECRET_NAME_1),
+        config.SecretConfig(secret_name=SECRET_NAME_1),
         config.SecretConfig(
-            SECRET_NAME_2,
+            secret_name=SECRET_NAME_2,
             sources=[
-                config.EnvVarSecretSource(SECRET_NAME_2, SECRET_ENV_VAR),
-                config.FilePathSecretSource(SECRET_NAME_2, SECRET_FILE_PATH),
-                config.SubprocessSecretSource(
-                    SECRET_NAME_2,
-                    SECRET_COMAND,
-                    SECRET_ARGS,
+                config.EnvVarSecretSource(
+                    secret_name=SECRET_NAME_2,
+                    env_var_name=SECRET_ENV_VAR,
                 ),
-                config.RandomCharsSecretSource(SECRET_NAME_2, SECRET_NCHARS),
+                config.FilePathSecretSource(
+                    secret_name=SECRET_NAME_2,
+                    file_path=SECRET_FILE_PATH,
+                ),
+                config.SubprocessSecretSource(
+                    secret_name=SECRET_NAME_2,
+                    command=SECRET_COMAND,
+                    args=SECRET_ARGS,
+                ),
+                config.RandomCharsSecretSource(
+                    secret_name=SECRET_NAME_2,
+                    n_chars=SECRET_NCHARS,
+                ),
             ],
         ),
     ],
@@ -1127,7 +1463,7 @@ W_AGENT_CONFIG_INSTALLATION_CONFIG_KW = {
     "id": INSTALLATION_ID,
     "agent_configs": [
         config.AgentConfig(
-            AGENT_CONFIG_ID,
+            id=AGENT_CONFIG_ID,
             model_name=MODEL_NAME,
             system_prompt=SYSTEM_PROMPT,
         ),
@@ -1139,6 +1475,31 @@ agent_configs:
     - id: "{AGENT_CONFIG_ID}"
       model_name: "{MODEL_NAME}"
       system_prompt: "{SYSTEM_PROMPT}"
+"""
+
+W_FACTORY_AGENT_CONFIG_INSTALLATION_CONFIG_KW = {
+    "id": INSTALLATION_ID,
+    "meta": {
+        "agent_configs": [
+            config.ConfigMeta(config_klass=config.FactoryAgentConfig),
+        ],
+    },
+    "agent_configs": [
+        config.FactoryAgentConfig(
+            id=AGENT_CONFIG_ID,
+            factory_name="soliplex.haiku_chat.chat_agent_factory",
+        ),
+    ],
+}
+W_FACTORY_AGENT_CONFIG_INSTALLATION_CONFIG_YAML = f"""\
+id: "{INSTALLATION_ID}"
+meta:
+    agent_configs:
+        - "soliplex.config.FactoryAgentConfig"
+agent_configs:
+    - id: "{AGENT_CONFIG_ID}"
+      kind: "factory"
+      factory_name: "soliplex.haiku_chat.chat_agent_factory"
 """
 
 OIDC_PATH_1 = "./oidc"
@@ -1247,6 +1608,16 @@ W_QUIZZES_PATHS_ONLY_NULL_INSTALLATION_CONFIG_YAML = f"""\
 id: "{INSTALLATION_ID}"
 quizzes_paths:
     -
+"""
+
+W_LOGFIRE_CONFIG_INSTALLATION_CONFIG_KW = {
+    "id": INSTALLATION_ID,
+    "logfire_config": config.LogfireConfig(token=TEST_LOGFIRE_TOKEN),
+}
+W_LOGFIRE_CONFIG_INSTALLATION_CONFIG_YAML = f"""
+id: "{INSTALLATION_ID}"
+logfire_config:
+    token: "{TEST_LOGFIRE_TOKEN}"
 """
 
 TP_DBURI_SYNC = "sqlite+pysqlite:////tmp/tp_testing.sqlite"
@@ -1552,7 +1923,7 @@ def test_toolconfig_from_yaml_w_error(temp_dir):
         config.ToolConfig.from_yaml(
             installation_config=installation_config,
             config_path=config_path,
-            config={
+            config_dict={
                 "tool_name": tool_name,
                 "allow_mcp": True,
                 "nonesuch": "BOGUS",
@@ -1576,7 +1947,7 @@ def test_toolconfig_from_yaml(installation_config, temp_dir):
     tool_config = config.ToolConfig.from_yaml(
         installation_config=installation_config,
         config_path=config_path,
-        config={
+        config_dict={
             "tool_name": tool_name,
             "allow_mcp": True,
         },
@@ -1928,7 +2299,7 @@ def test_sdtc_from_yaml(
             config.SearchDocumentsToolConfig.from_yaml(
                 installation_config=installation_config,
                 config_path=config_path,
-                config=config_dict,
+                config_dict=config_dict,
             )
 
         assert exc.value._config_path == config_path
@@ -1937,7 +2308,7 @@ def test_sdtc_from_yaml(
         sdt_config = config.SearchDocumentsToolConfig.from_yaml(
             installation_config=installation_config,
             config_path=config_path,
-            config=config_dict,
+            config_dict=config_dict,
         )
         expected = config.SearchDocumentsToolConfig(
             _installation_config=installation_config,
@@ -2187,7 +2558,7 @@ def test_rrtc_from_yaml(
             config.RAGResearchToolConfig.from_yaml(
                 installation_config=installation_config,
                 config_path=config_path,
-                config=config_dict,
+                config_dict=config_dict,
             )
 
         assert exc.value._config_path == config_path
@@ -2196,7 +2567,7 @@ def test_rrtc_from_yaml(
         rrt_config = config.RAGResearchToolConfig.from_yaml(
             installation_config=installation_config,
             config_path=config_path,
-            config=config_dict,
+            config_dict=config_dict,
         )
         expected = config.RAGResearchToolConfig(
             _installation_config=installation_config,
@@ -2268,7 +2639,7 @@ def test_awrctc_from_yaml(
             config.AskWithRichCitationsToolConfig.from_yaml(
                 installation_config=installation_config,
                 config_path=config_path,
-                config=config_dict,
+                config_dict=config_dict,
             )
 
         assert exc.value._config_path == config_path
@@ -2277,7 +2648,7 @@ def test_awrctc_from_yaml(
         awrct_config = config.AskWithRichCitationsToolConfig.from_yaml(
             installation_config=installation_config,
             config_path=config_path,
-            config=config_dict,
+            config_dict=config_dict,
         )
         expected = config.AskWithRichCitationsToolConfig(
             _installation_config=installation_config,
@@ -2315,7 +2686,7 @@ def test_stdio_mctc_from_yaml(
             config.Stdio_MCP_ClientToolsetConfig.from_yaml(
                 installation_config=installation_config,
                 config_path=config_path,
-                config=config_dict,
+                config_dict=config_dict,
             )
 
         assert exc.value._config_path == config_path
@@ -2324,7 +2695,7 @@ def test_stdio_mctc_from_yaml(
         stdio_mctc = config.Stdio_MCP_ClientToolsetConfig.from_yaml(
             installation_config=installation_config,
             config_path=config_path,
-            config=config_dict,
+            config_dict=config_dict,
         )
         expected = config.Stdio_MCP_ClientToolsetConfig(
             _installation_config=installation_config,
@@ -2406,7 +2777,7 @@ def test_http_mctc_from_yaml(
             config.HTTP_MCP_ClientToolsetConfig.from_yaml(
                 installation_config=installation_config,
                 config_path=config_path,
-                config=config_dict,
+                config_dict=config_dict,
             )
 
         assert exc.value._config_path == config_path
@@ -2415,7 +2786,7 @@ def test_http_mctc_from_yaml(
         http_mctc = config.HTTP_MCP_ClientToolsetConfig.from_yaml(
             installation_config=installation_config,
             config_path=config_path,
-            config=config_dict,
+            config_dict=config_dict,
         )
         expected = config.HTTP_MCP_ClientToolsetConfig(
             _installation_config=installation_config,
@@ -2501,7 +2872,7 @@ def test_noargsmcpwrapper_call():
     func = mock.Mock(spec_set=())
     tool_config = mock.create_autospec(config.ToolConfig)
 
-    wrapper = config.NoArgsMCPWrapper(func, tool_config)
+    wrapper = config.NoArgsMCPWrapper(func=func, tool_config=tool_config)
 
     found = wrapper()
 
@@ -2513,7 +2884,7 @@ def test_withquerymcpwrapper_call():
     func = mock.Mock(spec_set=())
     tool_config = mock.create_autospec(config.ToolConfig)
 
-    wrapper = config.WithQueryMCPWrapper(func, tool_config)
+    wrapper = config.WithQueryMCPWrapper(func=func, tool_config=tool_config)
 
     found = wrapper(query="text")
 
@@ -2524,7 +2895,6 @@ def test_withquerymcpwrapper_call():
 @pytest.mark.parametrize(
     "kw",
     [
-        EMPTY_AGENT_CONFIG_KW.copy(),
         BARE_AGENT_CONFIG_KW.copy(),
     ],
 )
@@ -2533,64 +2903,45 @@ def test_agentconfig_ctor(installation_config, kw):
 
     found = config.AgentConfig(**kw)
 
-    if "model_name" in kw:
-        assert found.model_name == kw["model_name"]
-    else:
-        assert (
-            found.model_name
-            is installation_config.get_environment.return_value
-        )
+    assert found.model_name == kw["model_name"]
 
 
 @pytest.mark.parametrize(
-    "config_yaml, expectation, warns",
+    "config_yaml, expectation",
     [
         (
             BOGUS_AGENT_CONFIG_YAML,
             pytest.raises(config.FromYamlException),
-            False,
-        ),
-        (
-            EMPTY_AGENT_CONFIG_YAML,
-            contextlib.nullcontext(EMPTY_AGENT_CONFIG_KW.copy()),
-            True,
         ),
         (
             BARE_AGENT_CONFIG_YAML,
             contextlib.nullcontext(BARE_AGENT_CONFIG_KW.copy()),
-            False,
         ),
         (
             W_PROVIDER_KW_AGENT_CONFIG_YAML,
             contextlib.nullcontext(W_PROVIDER_KW_AGENT_CONFIG_KW.copy()),
-            False,
         ),
         (
             W_RETRIES_AGENT_CONFIG_YAML,
             contextlib.nullcontext(W_RETRIES_AGENT_CONFIG_KW.copy()),
-            False,
         ),
         (
             W_MODEL_SETTINGS_AGENT_CONFIG_YAML,
             contextlib.nullcontext(W_MODEL_SETTINGS_AGENT_CONFIG_KW.copy()),
-            False,
         ),
         (
             W_PROMPT_FILE_AGENT_CONFIG_YAML,
             contextlib.nullcontext(W_PROMPT_FILE_AGENT_CONFIG_KW.copy()),
-            False,
         ),
         (
             W_PROMPT_FILE_W_TEMPLATE_ID_AGENT_CONFIG_YAML,
             contextlib.nullcontext(
                 W_PROMPT_FILE_W_TEMPLATE_ID_AGENT_CONFIG_KW.copy()
             ),
-            False,
         ),
         (
             W_PROMPT_FILE_W_BOGUS_TEMPLATE_ID_AGENT_CONFIG_YAML,
             pytest.raises(config.FromYamlException),
-            False,
         ),
     ],
 )
@@ -2599,7 +2950,6 @@ def test_agentconfig_from_yaml(
     temp_dir,
     config_yaml,
     expectation,
-    warns,
 ):
     yaml_file = temp_dir / "test.yaml"
     yaml_file.write_text(config_yaml)
@@ -2624,10 +2974,7 @@ def test_agentconfig_from_yaml(
         template_kw = {}
         installation_config.agent_configs = []
 
-    with (
-        expectation as expected,
-        warnings.catch_warnings(record=True) as log,
-    ):
+    with expectation as expected:
         found = config.AgentConfig.from_yaml(
             installation_config,
             yaml_file,
@@ -2635,11 +2982,6 @@ def test_agentconfig_from_yaml(
         )
 
     if isinstance(expected, dict):
-        if warns:
-            assert len(log) == 1
-        else:
-            assert len(log) == 0
-
         exp_agent_config = config.AgentConfig(
             _installation_config=installation_config,
             _config_path=yaml_file,
@@ -2656,7 +2998,6 @@ def test_agentconfig_from_yaml(
 @pytest.mark.parametrize(
     "agent_config_kw",
     [
-        EMPTY_AGENT_CONFIG_KW.copy(),
         BARE_AGENT_CONFIG_KW.copy(),
         W_MODEL_SETTINGS_AGENT_CONFIG_KW.copy(),
         W_PROMPT_FILE_AGENT_CONFIG_KW.copy(),
@@ -2699,25 +3040,57 @@ def test_agentconfig_get_system_prompt(
             assert agent_config.get_system_prompt() is None
 
 
-@pytest.mark.parametrize("has_pk", [False, True])
-@pytest.mark.parametrize("has_base_url", [False, True])
-def test_agentconfig_llm_provider_kw(
+@pytest.mark.parametrize(
+    "provider_type, kw, expected",
+    [
+        (config.LLMProviderType.OLLAMA, {}, OLLAMA_BASE_URL),
+        (
+            config.LLMProviderType.OLLAMA,
+            {"provider_base_url": PROVIDER_BASE_URL},
+            PROVIDER_BASE_URL,
+        ),
+        (config.LLMProviderType.OPENAI, {}, None),
+        (
+            config.LLMProviderType.OPENAI,
+            {"provider_base_url": PROVIDER_BASE_URL},
+            PROVIDER_BASE_URL,
+        ),
+        (config.LLMProviderType.GOOGLE, {}, None),
+    ],
+)
+def test_agentconfig_llm_provider_base_url(
     installation_config,
-    has_base_url,
+    provider_type,
+    kw,
+    expected,
+):
+    ic_environ = {"OLLAMA_BASE_URL": OLLAMA_BASE_URL}
+    installation_config.get_environment = ic_environ.get
+
+    aconfig = config.AgentConfig(
+        id="test-agent",
+        system_prompt="You are a test",
+        provider_type=provider_type,
+        _installation_config=installation_config,
+        **kw,
+    )
+
+    found = aconfig.llm_provider_base_url
+
+    assert found == expected
+
+
+@pytest.mark.parametrize("has_pk", [False, True])
+def test_agentconfig_llm_provider_kw_ollama_w_default_base_url(
+    installation_config,
     has_pk,
 ):
     ic_environ = {"OLLAMA_BASE_URL": OLLAMA_BASE_URL}
     installation_config.get_environment = ic_environ.get
 
-    kw = {"_installation_config": installation_config}
-
-    if has_base_url:
-        expected_base_url = kw["provider_base_url"] = PROVIDER_BASE_URL
-    else:
-        expected_base_url = OLLAMA_BASE_URL
-
+    kw = {}
     expected = {
-        "base_url": expected_base_url + "/v1",
+        "base_url": f"{OLLAMA_BASE_URL}/v1",
     }
 
     if has_pk:
@@ -2725,7 +3098,145 @@ def test_agentconfig_llm_provider_kw(
         expected["api_key"] = installation_config.get_secret.return_value
 
     aconfig = config.AgentConfig(
-        id="test-agent", system_prompt="You are a test", **kw
+        id="test-agent",
+        system_prompt="You are a test",
+        provider_type=config.LLMProviderType.OLLAMA,
+        _installation_config=installation_config,
+        **kw,
+    )
+
+    found = aconfig.llm_provider_kw
+
+    assert found == expected
+
+    if has_pk:
+        installation_config.get_secret.assert_called_once_with(
+            "secret:SECRET_NAME"
+        )
+    else:
+        installation_config.get_secret.assert_not_called()
+
+
+@pytest.mark.parametrize("has_pk", [False, True])
+def test_agentconfig_llm_provider_kw_ollama_w_explicit_base_url(
+    installation_config,
+    has_pk,
+):
+    kw = {}
+    expected = {
+        "base_url": f"{PROVIDER_BASE_URL}/v1",
+    }
+
+    if has_pk:
+        kw["provider_key"] = "secret:SECRET_NAME"
+        expected["api_key"] = installation_config.get_secret.return_value
+
+    aconfig = config.AgentConfig(
+        id="test-agent",
+        system_prompt="You are a test",
+        provider_type=config.LLMProviderType.OLLAMA,
+        provider_base_url=PROVIDER_BASE_URL,
+        _installation_config=installation_config,
+        **kw,
+    )
+
+    found = aconfig.llm_provider_kw
+
+    assert found == expected
+
+    if has_pk:
+        installation_config.get_secret.assert_called_once_with(
+            "secret:SECRET_NAME"
+        )
+    else:
+        installation_config.get_secret.assert_not_called()
+
+
+@pytest.mark.parametrize("has_pk", [False, True])
+def test_agentconfig_llm_provider_kw_openai_wo_provider_url(
+    installation_config,
+    has_pk,
+):
+    kw = {}
+    expected = {}
+
+    if has_pk:
+        kw["provider_key"] = "secret:SECRET_NAME"
+        expected["api_key"] = installation_config.get_secret.return_value
+
+    aconfig = config.AgentConfig(
+        id="test-agent",
+        system_prompt="You are a test",
+        provider_type=config.LLMProviderType.OPENAI,
+        _installation_config=installation_config,
+        **kw,
+    )
+
+    found = aconfig.llm_provider_kw
+
+    assert found == expected
+
+    if has_pk:
+        installation_config.get_secret.assert_called_once_with(
+            "secret:SECRET_NAME"
+        )
+    else:
+        installation_config.get_secret.assert_not_called()
+
+
+@pytest.mark.parametrize("has_pk", [False, True])
+def test_agentconfig_llm_provider_kw_openai_w_provider_url(
+    installation_config,
+    has_pk,
+):
+    kw = {}
+    expected = {
+        "base_url": f"{PROVIDER_BASE_URL}/v1",
+    }
+
+    if has_pk:
+        kw["provider_key"] = "secret:SECRET_NAME"
+        expected["api_key"] = installation_config.get_secret.return_value
+
+    aconfig = config.AgentConfig(
+        id="test-agent",
+        system_prompt="You are a test",
+        provider_type=config.LLMProviderType.OPENAI,
+        provider_base_url=PROVIDER_BASE_URL,
+        _installation_config=installation_config,
+        **kw,
+    )
+
+    found = aconfig.llm_provider_kw
+
+    assert found == expected
+
+    if has_pk:
+        installation_config.get_secret.assert_called_once_with(
+            "secret:SECRET_NAME"
+        )
+    else:
+        installation_config.get_secret.assert_not_called()
+
+
+@pytest.mark.parametrize("has_pk", [False, True])
+def test_agentconfig_llm_provider_kw_google(
+    installation_config,
+    has_pk,
+):
+    kw = {}
+    expected = {}
+
+    if has_pk:
+        kw["provider_key"] = "secret:SECRET_NAME"
+        expected["api_key"] = installation_config.get_secret.return_value
+
+    aconfig = config.AgentConfig(
+        id="test-agent",
+        system_prompt="You are a test",
+        provider_type=config.LLMProviderType.GOOGLE,
+        _installation_config=installation_config,
+        **kw,
     )
 
     found = aconfig.llm_provider_kw
@@ -2743,7 +3254,6 @@ def test_agentconfig_llm_provider_kw(
 @pytest.mark.parametrize(
     "agent_config_kw",
     [
-        EMPTY_AGENT_CONFIG_KW.copy(),
         BARE_AGENT_CONFIG_KW.copy(),
         W_PROVIDER_KW_AGENT_CONFIG_KW.copy(),
         W_RETRIES_AGENT_CONFIG_KW.copy(),
@@ -2758,7 +3268,6 @@ def test_agentconfig_as_yaml(
 
     ic_environ = {
         "OLLAMA_BASE_URL": OLLAMA_BASE_URL,
-        "DEFAULT_AGENT_MODEL": MODEL_NAME,
     }
     installation_config.get_environment = ic_environ.get
     agent_config_kw["_installation_config"] = installation_config
@@ -2798,8 +3307,8 @@ def test_agentconfig_as_yaml(
 @pytest.mark.parametrize(
     "kw",
     [
-        WO_CONFIG_PYTHON_AGENT_CONFIG_KW.copy(),
-        W_CONFIG_PYTHON_AGENT_CONFIG_KW.copy(),
+        WO_CONFIG_FACTORY_AGENT_CONFIG_KW.copy(),
+        W_CONFIG_FACTORY_AGENT_CONFIG_KW.copy(),
     ],
 )
 def test_factoryagentconfig_ctor(kw):
@@ -2815,8 +3324,8 @@ def test_factoryagentconfig_ctor(kw):
 @pytest.mark.parametrize(
     "kw",
     [
-        WO_CONFIG_PYTHON_AGENT_CONFIG_KW.copy(),
-        W_CONFIG_PYTHON_AGENT_CONFIG_KW.copy(),
+        WO_CONFIG_FACTORY_AGENT_CONFIG_KW.copy(),
+        W_CONFIG_FACTORY_AGENT_CONFIG_KW.copy(),
     ],
 )
 def test_factoryagentconfig_factory(kw, w_existing):
@@ -2856,12 +3365,21 @@ def test_factoryagentconfig_factory(kw, w_existing):
     [
         (BOGUS_AGENT_CONFIG_YAML, None),
         (
-            WO_CONFIG_PYTHON_AGENT_CONFIG_YAML,
-            WO_CONFIG_PYTHON_AGENT_CONFIG_KW.copy(),
+            WO_CONFIG_FACTORY_AGENT_CONFIG_YAML,
+            WO_CONFIG_FACTORY_AGENT_CONFIG_KW.copy(),
         ),
         (
-            W_CONFIG_PYTHON_AGENT_CONFIG_YAML,
-            W_CONFIG_PYTHON_AGENT_CONFIG_KW.copy(),
+            W_CONFIG_FACTORY_AGENT_CONFIG_YAML,
+            W_CONFIG_FACTORY_AGENT_CONFIG_KW.copy(),
+        ),
+        (W_BOGUS_TEMPLATE_ID_FACTORY_AGENT_CONFIG_YAML, None),
+        (
+            W_TEMPLATE_ID_FACTORY_AGENT_CONFIG_YAML,
+            W_TEMPLATE_ID_FACTORY_AGENT_CONFIG_KW.copy(),
+        ),
+        (
+            W_TEMPLATE_ID_W_EXTRA_CONFIG_FACTORY_AGENT_CONFIG_YAML,
+            W_TEMPLATE_ID_W_EXTRA_CONFIG_FACTORY_AGENT_CONFIG_KW.copy(),
         ),
     ],
 )
@@ -2877,6 +3395,23 @@ def test_factoryagentconfig_from_yaml(
     with yaml_file.open() as stream:
         config_dict = yaml.safe_load(stream)
 
+    if config_dict is not None:
+        template_id = config_dict.get("template_id")
+    else:
+        template_id = None
+
+    if template_id not in (None, BOGUS_TEMPLATE_AGENT_ID):
+        template_kw = {
+            "factory_name": FACTORY_NAME,
+            "with_agent_config": True,
+        }
+        installation_config.agent_configs = [
+            config.FactoryAgentConfig(id=template_id, **template_kw),
+        ]
+    else:
+        template_kw = {}
+        installation_config.agent_configs = []
+
     if expected_kw is None:
         with pytest.raises(config.FromYamlException):
             config.FactoryAgentConfig.from_yaml(
@@ -2888,7 +3423,7 @@ def test_factoryagentconfig_from_yaml(
         expected = config.FactoryAgentConfig(
             _installation_config=installation_config,
             _config_path=yaml_file,
-            **expected_kw,
+            **(template_kw | expected_kw),
         )
 
         found = config.FactoryAgentConfig.from_yaml(
@@ -2899,12 +3434,15 @@ def test_factoryagentconfig_from_yaml(
 
         assert found == expected
 
+        # See #180.
+        assert found._installation_config is installation_config
+
 
 @pytest.mark.parametrize(
     "kw",
     [
-        WO_CONFIG_PYTHON_AGENT_CONFIG_KW.copy(),
-        W_CONFIG_PYTHON_AGENT_CONFIG_KW.copy(),
+        WO_CONFIG_FACTORY_AGENT_CONFIG_KW.copy(),
+        W_CONFIG_FACTORY_AGENT_CONFIG_KW.copy(),
     ],
 )
 def test_factoryagentconfig_as_yaml(
@@ -2928,7 +3466,7 @@ def test_factoryagentconfig_as_yaml(
     "agent_config, expected_kw",
     [
         (BARE_AGENT_CONFIG_KW.copy(), BARE_AGENT_CONFIG_KW),
-        (EMPTY_W_KIND_AGENT_CONFIG_KW.copy(), EMPTY_W_KIND_AGENT_CONFIG_KW),
+        (W_KIND_AGENT_CONFIG_KW.copy(), W_KIND_AGENT_CONFIG_KW),
     ],
 )
 def test_extract_agent_configs(
@@ -2937,9 +3475,10 @@ def test_extract_agent_configs(
     agent_config,
     expected_kw,
 ):
-    @dataclasses.dataclass
+    @dataclasses.dataclass(kw_only=True)
     class TestAgentConfig:
         id: str
+        model_name: str
         kind: typing.ClassVar[str] = "testing"
         _installation_config: config.InstallationConfig = None
         _config_path: pathlib.Path = None
@@ -3521,7 +4060,7 @@ def test_completionconfig_from_yaml(
     ],
 )
 def test_envvar_secret_source_ctor(w_params, exp_env_var_name):
-    source = config.EnvVarSecretSource(SECRET_NAME, **w_params)
+    source = config.EnvVarSecretSource(secret_name=SECRET_NAME, **w_params)
 
     assert source.env_var_name == exp_env_var_name
     assert source.extra_arguments == {"env_var_name": exp_env_var_name}
@@ -3605,7 +4144,11 @@ def test_filepathsecretsource_as_yaml():
     ],
 )
 def test_subprocess_secret_source_command_line(w_args, exp_command_line):
-    source = config.SubprocessSecretSource(SECRET_NAME, COMMAND, w_args)
+    source = config.SubprocessSecretSource(
+        secret_name=SECRET_NAME,
+        command=COMMAND,
+        args=w_args,
+    )
     assert source.command_line == exp_command_line
     assert source.extra_arguments == {"command_line": exp_command_line}
 
@@ -3646,7 +4189,7 @@ def test_subprocesssecretsource_as_yaml(w_args):
     ],
 )
 def test_randomcharssecretsource_extra_args(kwargs, exp_nc):
-    source = config.RandomCharsSecretSource(SECRET_NAME, **kwargs)
+    source = config.RandomCharsSecretSource(secret_name=SECRET_NAME, **kwargs)
 
     assert source.extra_arguments == {"n_chars": exp_nc}
 
@@ -3675,15 +4218,23 @@ def test_randomcharssecretsource_as_yaml(kwargs, exp_nc):
 @pytest.mark.parametrize(
     "w_sources, exp_sources",
     [
-        (None, [config.EnvVarSecretSource(SECRET_NAME)]),
-        ([config.EnvVarSecretSource(SECRET_NAME, ENV_VAR_NAME)], None),
+        (None, [config.EnvVarSecretSource(secret_name=SECRET_NAME)]),
+        (
+            [
+                config.EnvVarSecretSource(
+                    secret_name=SECRET_NAME,
+                    env_var_name=ENV_VAR_NAME,
+                ),
+            ],
+            None,
+        ),
     ],
 )
 def test_secretconfig_ctor(w_sources, exp_sources):
     if exp_sources is None:
         exp_sources = w_sources
 
-    secret = config.SecretConfig(SECRET_NAME, w_sources)
+    secret = config.SecretConfig(secret_name=SECRET_NAME, sources=w_sources)
 
     assert secret.secret_name == SECRET_NAME
     assert secret.sources == exp_sources
@@ -3692,7 +4243,10 @@ def test_secretconfig_ctor(w_sources, exp_sources):
 def test_secretconfig_as_yaml():
     source_1 = mock.Mock(spec_set=["as_yaml"])
     source_2 = mock.Mock(spec_set=["as_yaml"])
-    secret = config.SecretConfig(SECRET_NAME, [source_1, source_2])
+    secret = config.SecretConfig(
+        secret_name=SECRET_NAME,
+        sources=[source_1, source_2],
+    )
 
     expected = {
         "secret_name": SECRET_NAME,
@@ -3707,7 +4261,7 @@ def test_secretconfig_as_yaml():
 
 
 def test_secretconfig_resolved():
-    secret = config.SecretConfig(SECRET_NAME)
+    secret = config.SecretConfig(secret_name=SECRET_NAME)
 
     assert secret.resolved is None
     secret._resolved = SECRET_VALUE
@@ -3750,6 +4304,331 @@ def test_aguifeature_json_schema(the_agui_feature):
     found = the_agui_feature.json_schema
 
     assert found == FeatureModel.model_json_schema()
+
+
+@pytest.mark.parametrize(
+    "init_kw, expected",
+    [
+        ({}, DEFAULT_LFIPYDAI_EXP_KWARGS),
+        (W_VALUES_LFIPYDAI_CONFIG_KW, W_VALUES_LFIPYDAI_CONFIG_EXP_KW),
+    ],
+)
+def test_lfipydai_instrument_pydantic_ai_kwargs(init_kw, expected):
+    ipydai_config = config.LogfireInstrumentPydanticAI(**init_kw)
+
+    found = ipydai_config.instrument_pydantic_ai_kwargs
+
+    assert found == expected
+
+
+@pytest.mark.parametrize(
+    "init_kw, expected",
+    [
+        ({}, DEFAULT_LFIPYDAI_EXP_KWARGS),
+        (W_VALUES_LFIPYDAI_CONFIG_KW, W_VALUES_LFIPYDAI_CONFIG_EXP_KW),
+    ],
+)
+def test_lfipydai_as_yaml(init_kw, expected):
+    ipydai_config = config.LogfireInstrumentPydanticAI(**init_kw)
+
+    found = ipydai_config.as_yaml
+
+    assert found == expected
+
+
+@pytest.mark.parametrize(
+    "config_yaml, expected_kw",
+    [
+        (EMPTY_LFIPYDAI_CONFIG_YAML, None),
+        (W_VALUES_LFIPYDAI_CONFIG_YAML, W_VALUES_LFIPYDAI_CONFIG_KW),
+    ],
+)
+def test_lfipydai_from_yaml(
+    temp_dir,
+    config_yaml,
+    expected_kw,
+):
+    pass
+    yaml_file = temp_dir / "test.yaml"
+    yaml_file.write_text(config_yaml)
+
+    with yaml_file.open() as stream:
+        config_dict = yaml.safe_load(stream)
+
+    if expected_kw is None:
+        with pytest.raises(config.FromYamlException) as exc:
+            config.LogfireInstrumentPydanticAI.from_yaml(
+                yaml_file,
+                config_dict,
+            )
+
+        assert exc.value._config_path == yaml_file
+
+    else:
+        expected = config.LogfireInstrumentPydanticAI(**expected_kw)
+        expected = dataclasses.replace(
+            expected,
+            _config_path=yaml_file,
+        )
+
+        found = config.LogfireInstrumentPydanticAI.from_yaml(
+            yaml_file,
+            config_dict,
+        )
+
+        assert found == expected
+
+
+@pytest.mark.parametrize(
+    "init_kw, expected",
+    [
+        ({}, DEFAULT_LFIFAPI_EXP_KWARGS),
+        (W_VALUES_LFIFAPI_CONFIG_KW, W_VALUES_LFIFAPI_CONFIG_EXP_KW),
+    ],
+)
+def test_lfifapi_instrument_fast_api_kwargs(init_kw, expected):
+    ipydai_config = config.LogfireInstrumentFastAPI(**init_kw)
+
+    found = ipydai_config.instrument_fast_api_kwargs
+
+    assert found == expected
+
+
+@pytest.mark.parametrize(
+    "init_kw, expected",
+    [
+        ({}, DEFAULT_LFIFAPI_EXP_KWARGS),
+        (W_VALUES_LFIFAPI_CONFIG_KW, W_VALUES_LFIFAPI_CONFIG_EXP_KW),
+    ],
+)
+def test_lfifapi_as_yaml(init_kw, expected):
+    ipydai_config = config.LogfireInstrumentFastAPI(**init_kw)
+
+    found = ipydai_config.as_yaml
+
+    assert found == expected
+
+
+@pytest.mark.parametrize(
+    "config_yaml, expected_kw",
+    [
+        (EMPTY_LFIFAPI_CONFIG_YAML, None),
+        (W_VALUES_LFIFAPI_CONFIG_YAML, W_VALUES_LFIFAPI_CONFIG_KW),
+    ],
+)
+def test_lfifapi_from_yaml(
+    temp_dir,
+    config_yaml,
+    expected_kw,
+):
+    pass
+    yaml_file = temp_dir / "test.yaml"
+    yaml_file.write_text(config_yaml)
+
+    with yaml_file.open() as stream:
+        config_dict = yaml.safe_load(stream)
+
+    if expected_kw is None:
+        with pytest.raises(config.FromYamlException) as exc:
+            config.LogfireInstrumentFastAPI.from_yaml(
+                yaml_file,
+                config_dict,
+            )
+
+        assert exc.value._config_path == yaml_file
+
+    else:
+        expected = config.LogfireInstrumentFastAPI(**expected_kw)
+        expected = dataclasses.replace(
+            expected,
+            _config_path=yaml_file,
+        )
+
+        found = config.LogfireInstrumentFastAPI.from_yaml(
+            yaml_file,
+            config_dict,
+        )
+
+        assert found == expected
+
+
+@pytest.mark.parametrize(
+    "init_kw, ic_secrets, ic_env, expected",
+    [
+        (
+            W_TOKEN_ONLY_LOGFIRE_CONFIG_INIT_KW,
+            TEST_LOGFIRE_IC_DEFAULT_SECRETS,
+            TEST_LOGFIRE_IC_DEFAULT_ENV,
+            W_TOKEN_ONLY_LOGFIRE_CONFIG_EXP_LC_KWARGS,
+        ),
+        (
+            W_SCALARS_LOGFIRE_CONFIG_INIT_KW,
+            TEST_LOGFIRE_IC_OTHER_SECRETS,
+            TEST_LOGFIRE_IC_OTHER_ENV,
+            W_SCALARS_LOGFIRE_CONFIG_EXP_LC_KWARGS,
+        ),
+        (
+            W_BASE_URL_LOGFIRE_CONFIG_INIT_KW,
+            TEST_LOGFIRE_IC_OTHER_SECRETS,
+            TEST_LOGFIRE_IC_OTHER_ENV,
+            W_BASE_URL_LOGFIRE_CONFIG_EXP_LC_KWARGS,
+        ),
+        (
+            W_SCRUBBING_LOGFIRE_CONFIG_INIT_KW,
+            TEST_LOGFIRE_IC_DEFAULT_SECRETS,
+            TEST_LOGFIRE_IC_DEFAULT_ENV,
+            W_SCRUBBING_LOGFIRE_CONFIG_EXP_LC_KWARGS,
+        ),
+    ],
+)
+def test_logfireconfig_logfire_config_kwargs(
+    installation_config,
+    init_kw,
+    ic_secrets,
+    ic_env,
+    expected,
+):
+    get_secret = installation_config.get_secret
+    get_secret.side_effect = ic_secrets.get
+
+    def _getenv(key):
+        return ic_env.get(key[4:])
+
+    installation_config.get_environment.side_effect = _getenv
+
+    lf_config = config.LogfireConfig(
+        _installation_config=installation_config,
+        **init_kw,
+    )
+
+    found = lf_config.logfire_config_kwargs
+
+    assert found == expected
+
+
+@pytest.mark.parametrize(
+    "init_kw, expected",
+    [
+        (
+            W_TOKEN_ONLY_LOGFIRE_CONFIG_INIT_KW,
+            W_TOKEN_ONLY_LOGFIRE_CONFIG_AS_YAML,
+        ),
+        (
+            W_SCALARS_LOGFIRE_CONFIG_INIT_KW,
+            W_SCALARS_LOGFIRE_CONFIG_AS_YAML,
+        ),
+        (
+            W_BASE_URL_LOGFIRE_CONFIG_INIT_KW,
+            W_BASE_URL_LOGFIRE_CONFIG_AS_YAML,
+        ),
+        (
+            W_SCRUBBING_LOGFIRE_CONFIG_INIT_KW,
+            W_SCRUBBING_LOGFIRE_CONFIG_AS_YAML,
+        ),
+        (
+            W_IPYDAI_LOGFIRE_CONFIG_INIT_KW,
+            W_IPYDAI_LOGFIRE_CONFIG_AS_YAML,
+        ),
+        (
+            W_IFAPI_LOGFIRE_CONFIG_INIT_KW,
+            W_IFAPI_LOGFIRE_CONFIG_AS_YAML,
+        ),
+    ],
+)
+def test_logfireconfig_logfire_as_yaml(
+    installation_config,
+    init_kw,
+    expected,
+):
+    lf_config = config.LogfireConfig(
+        _installation_config=installation_config,
+        **init_kw,
+    )
+
+    found = lf_config.as_yaml
+
+    assert found == expected
+
+
+@pytest.mark.parametrize(
+    "config_yaml, expected_kw",
+    [
+        (EMPTY_LOGFIRE_CONFIG_YAML, None),
+        (
+            W_TOKEN_ONLY_LOGFIRE_CONFIG_YAML,
+            W_TOKEN_ONLY_LOGFIRE_CONFIG_INIT_KW,
+        ),
+        (
+            W_SCALARS_LOGFIRE_CONFIG_YAML,
+            W_SCALARS_LOGFIRE_CONFIG_INIT_KW,
+        ),
+        (
+            W_BASE_URL_LOGFIRE_CONFIG_YAML,
+            W_BASE_URL_LOGFIRE_CONFIG_INIT_KW,
+        ),
+        (
+            W_SCRUBBING_LOGFIRE_CONFIG_YAML,
+            W_SCRUBBING_LOGFIRE_CONFIG_INIT_KW,
+        ),
+        (
+            W_IPYDAI_LOGFIRE_CONFIG_YAML,
+            W_IPYDAI_LOGFIRE_CONFIG_INIT_KW,
+        ),
+        (
+            W_IFAPI_LOGFIRE_CONFIG_YAML,
+            W_IFAPI_LOGFIRE_CONFIG_INIT_KW,
+        ),
+    ],
+)
+def test_logfireconfig_from_yaml(
+    installation_config,
+    temp_dir,
+    config_yaml,
+    expected_kw,
+):
+    yaml_file = temp_dir / "test.yaml"
+    yaml_file.write_text(config_yaml)
+
+    with yaml_file.open() as stream:
+        config_dict = yaml.safe_load(stream)
+
+    if expected_kw is None:
+        with pytest.raises(config.FromYamlException) as exc:
+            config.LogfireConfig.from_yaml(
+                installation_config,
+                yaml_file,
+                config_dict,
+            )
+
+        assert exc.value._config_path == yaml_file
+
+    else:
+        ipydai = expected_kw.pop("instrument_pydantic_ai", None)
+
+        if ipydai is not None:
+            ipydai = dataclasses.replace(ipydai, _config_path=yaml_file)
+            expected_kw["instrument_pydantic_ai"] = ipydai
+
+        ifapi = expected_kw.pop("instrument_fast_api", None)
+
+        if ifapi is not None:
+            ifapi = dataclasses.replace(ifapi, _config_path=yaml_file)
+            expected_kw["instrument_fast_api"] = ifapi
+
+        expected = config.LogfireConfig(**expected_kw)
+        expected = dataclasses.replace(
+            expected,
+            _installation_config=installation_config,
+            _config_path=yaml_file,
+        )
+
+        found = config.LogfireConfig.from_yaml(
+            installation_config,
+            yaml_file,
+            config_dict,
+        )
+
+        assert found == expected
 
 
 def test__load_config_yaml_w_missing(temp_dir):
@@ -4020,7 +4899,7 @@ def test_configmeta_dottedname():
         __module__="some.module",
         __name__="some_config",
     )
-    meta = config.ConfigMeta(config_klass)
+    meta = config.ConfigMeta(config_klass=config_klass)
 
     assert meta.dotted_name == "some.module.some_config"
 
@@ -4096,7 +4975,21 @@ def test_installationconfigmeta_from_yaml(
 
         assert ic_meta == expected
 
-        if config_meta and "tool_configs" in config_dict["meta"]:
+        if config_meta and "agui_features" in config_meta:
+            afs_by_feature_name = patched_soliplex_config[
+                "AGUI_FEATURES_BY_NAME"
+            ]
+            for (af_name, af_found), af_expected in zip(
+                afs_by_feature_name.items(),
+                config_meta["agui_features"],
+                strict=True,
+            ):
+                assert af_name == af_expected["name"]
+                assert af_found.name == af_expected["name"]
+                assert af_found.model_klass == af_expected["model_klass"]
+                assert af_found.source == af_expected["source"]
+
+        if config_meta and "tool_configs" in config_meta:
             tcs_by_tool_name = patched_soliplex_config[
                 "TOOL_CONFIG_CLASSES_BY_TOOL_NAME"
             ]
@@ -4148,7 +5041,7 @@ def test_installationconfigmeta_from_yaml(
                     is wcs_by_class_name[wrapper_klass]
                 )
 
-        if config_meta and "agent_configs" in config_dict["meta"]:
+        if config_meta and "agent_configs" in config_meta:
             acs_by_kind = patched_soliplex_config[
                 "AGENT_CONFIG_CLASSES_BY_KIND"
             ]
@@ -4684,6 +5577,10 @@ def test_installationconfig_room_authz_dburi_async(w_kw, expected):
             W_AGENT_CONFIG_INSTALLATION_CONFIG_KW.copy(),
         ),
         (
+            W_FACTORY_AGENT_CONFIG_INSTALLATION_CONFIG_YAML,
+            W_FACTORY_AGENT_CONFIG_INSTALLATION_CONFIG_KW.copy(),
+        ),
+        (
             W_OIDC_PATHS_INSTALLATION_CONFIG_YAML,
             W_OIDC_PATHS_INSTALLATION_CONFIG_KW.copy(),
         ),
@@ -4714,6 +5611,10 @@ def test_installationconfig_room_authz_dburi_async(w_kw, expected):
         (
             W_QUIZZES_PATHS_ONLY_NULL_INSTALLATION_CONFIG_YAML,
             W_QUIZZES_PATHS_ONLY_NULL_INSTALLATION_CONFIG_KW.copy(),
+        ),
+        (
+            W_LOGFIRE_CONFIG_INSTALLATION_CONFIG_YAML,
+            W_LOGFIRE_CONFIG_INSTALLATION_CONFIG_KW.copy(),
         ),
         (
             W_TP_DBURI_INSTALLATION_CONFIG_YAML,
@@ -4817,6 +5718,10 @@ def test_installationconfig_from_yaml(
                 exp_agent_config._installation_config = found
                 exp_agent_config._config_path = config_path
 
+        if "logfire_config" in expected_kw:
+            expected.logfire_config._installation_config = found
+            expected.logfire_config._config_path = config_path
+
         assert found == expected
 
 
@@ -4881,7 +5786,8 @@ def test_installationconfig_from_yaml_environ_wo_value(temp_dir, config_yaml):
     assert found == expected
 
 
-def test_installationconfig_as_yaml():
+@pytest.mark.parametrize("w_logfire_config", [False, True])
+def test_installationconfig_as_yaml(w_logfire_config):
     meta = mock.create_autospec(config.InstallationConfigMeta)
     secret_1 = mock.create_autospec(config.SecretConfig)
     secret_2 = mock.create_autospec(config.SecretConfig)
@@ -4891,6 +5797,13 @@ def test_installationconfig_as_yaml():
         model_name=MODEL_NAME,
         provider_base_url=PROVIDER_BASE_URL,
     )
+
+    kwargs = {}
+
+    if w_logfire_config:
+        kwargs["logfire_config"] = config.LogfireConfig(
+            token="secret:LOGFIRE_TOKEN",
+        )
 
     installation_config = config.InstallationConfig(
         id=INSTALLATION_ID,
@@ -4908,6 +5821,7 @@ def test_installationconfig_as_yaml():
         ],
         completion_paths=[pathlib.Path("/path/to/completions")],
         quizzes_paths=[pathlib.Path("./other/quizzes")],
+        **kwargs,
     )
 
     expected = {
@@ -4929,6 +5843,9 @@ def test_installationconfig_as_yaml():
         "completion_paths": ["/path/to/completions"],
         "quizzes_paths": ["other/quizzes"],
     }
+
+    if w_logfire_config:
+        expected["logfire_config"] = W_TOKEN_ONLY_LOGFIRE_CONFIG_AS_YAML
 
     found = installation_config.as_yaml
 

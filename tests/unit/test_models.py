@@ -424,16 +424,6 @@ def agent_retries(request):
     return _from_param(request, "retries")
 
 
-@pytest.fixture(params=[*config.LLMProviderType])
-def agent_provider_type(request):
-    return _from_param(request, "provider_type")
-
-
-@pytest.fixture(params=[None, AGENT_BASE_URL])
-def agent_provider_base_url(request):
-    return _from_param(request, "provider_base_url")
-
-
 @pytest.fixture
 def installation_config():
     environ = {"OLLAMA_BASE_URL": OLLAMA_BASE_URL}
@@ -442,11 +432,48 @@ def installation_config():
     return installation
 
 
+@pytest.mark.parametrize(
+    "agent_provider_kw, exp_base",
+    [
+        (  # Ollama, default URL
+            {
+                "provider_type": config.LLMProviderType.OLLAMA,
+            },
+            f"{OLLAMA_BASE_URL}/v1",
+        ),
+        (  # Ollama, explicit URL
+            {
+                "provider_type": config.LLMProviderType.OLLAMA,
+                "provider_base_url": AGENT_BASE_URL,
+            },
+            f"{AGENT_BASE_URL}/v1",
+        ),
+        (  # OpenAI, no URL
+            {
+                "provider_type": config.LLMProviderType.OPENAI,
+            },
+            None,
+        ),
+        (  # OpenAI, explicit URL
+            {
+                "provider_type": config.LLMProviderType.OPENAI,
+                "provider_base_url": AGENT_BASE_URL,
+            },
+            f"{AGENT_BASE_URL}/v1",
+        ),
+        (  # Google, no URL
+            {
+                "provider_type": config.LLMProviderType.GOOGLE,
+            },
+            None,
+        ),
+    ],
+)
 def test_defaultagent_from_config(
     agent_retries,
-    agent_provider_type,
-    agent_provider_base_url,
     installation_config,
+    agent_provider_kw,
+    exp_base,
 ):
     agent_config = config.AgentConfig(
         id=AGENT_ID,
@@ -454,14 +481,8 @@ def test_defaultagent_from_config(
         system_prompt=AGENT_PROMPT,
         _installation_config=installation_config,
         **agent_retries,
-        **agent_provider_type,
-        **agent_provider_base_url,
+        **agent_provider_kw,
     )
-
-    if not agent_provider_base_url:
-        exp_base = f"{OLLAMA_BASE_URL}/v1"
-    else:
-        exp_base = f"{AGENT_BASE_URL}/v1"
 
     if not agent_retries:
         exp_retries = 3
@@ -720,7 +741,12 @@ def test_completion_from_config(room_agent, room_tools):
         assert completion_model.tools == {}
 
 
-@pytest.fixture(params=[None, [config.SecretConfig(INSTALLATION_SECRET)]])
+@pytest.fixture(
+    params=[
+        None,
+        [config.SecretConfig(secret_name=INSTALLATION_SECRET)],
+    ]
+)
 def installation_secrets(request):
     return _from_param(request, "secrets")
 
@@ -754,6 +780,15 @@ def installation_haiku_rag_config_file(request):
                 id=INSTALLATION_AGENT_ID,
                 model_name=INSTALLATION_AGENT_MODEL_NAME,
                 system_prompt=INSTALLATION_AGENT_SYSTEM_PROMPT,
+                provider_type=config.LLMProviderType.OLLAMA,
+                provider_base_url=AGENT_BASE_URL,
+            ),
+        ],
+        [
+            config.FactoryAgentConfig(
+                id=INSTALLATION_AGENT_ID,
+                factory_name=FACTORY_NAME,
+                with_agent_config=False,
             ),
         ],
     ]
@@ -879,7 +914,10 @@ def test_installation_from_config(
         strict=True,
     ):
         assert m_agent.id == c_agent.id
-        assert m_agent.model_name == c_agent.model_name
+        if isinstance(c_agent, config.FactoryAgentConfig):
+            assert m_agent.factory_name == c_agent.factory_name
+        else:
+            assert m_agent.model_name == c_agent.model_name
 
     for m_feature, c_feature in zip(
         installation_model.agui_features,

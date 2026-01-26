@@ -38,6 +38,8 @@ def _create_backend(agent_config: DeepAgentConfig):
 
         # DockerSandbox uses docker.from_env() which respects DOCKER_HOST
         # Set DOCKER_HOST=ssh://hostname for remote Docker execution
+        # Note: Volume mounts don't work with remote Docker (ssh://) since
+        # paths are on different machines
         docker_config = agent_config.docker_config or {}
         return DockerSandbox(
             image=docker_config.get("image", "python:3.12-slim"),

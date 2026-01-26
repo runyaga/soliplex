@@ -1,0 +1,26 @@
+id: "legal_contract_reviewer_interrupt"
+name: "Legal Contract Reviewer"
+description: "Contract analysis assistant with human approval for document modifications"
+suggestions:
+  - "Review this NDA for problematic clauses"
+  - "Analyze the liability sections in this agreement"
+  - "Create negotiation talking points for this contract"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 3: Todo + Filesystem with write approval
+  include_todo: true
+  include_filesystem: true
+  include_subagents: false
+  include_skills: false
+
+  # Require approval before modifying files (important for legal documents)
+  interrupt_on:
+    write_file: true
+    edit_file: true
+
+
+allow_mcp: false

@@ -13,6 +13,9 @@ id: "soliplex-conf-default"
 #==========================================================================
 
 meta:
+  # Register DeepAgentConfig for deep agent rooms
+  agent_configs:
+    - "soliplex.deepagents.config.DeepAgentConfig"
 
   #------------------------------------------------------------------------
   # Register AG-UI feature models so that they can be referenced by

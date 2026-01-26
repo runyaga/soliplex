@@ -1,0 +1,81 @@
+id: "film_production_orchestrator"
+name: "Film Production Orchestrator"
+description: "Pre-production coordinator with specialized subagents for script analysis, casting, locations, and budgeting"
+suggestions:
+  - "Plan pre-production for an indie drama"
+  - "Break down this screenplay by department"
+  - "Create a preliminary budget for a 20-day shoot"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 5: Full multi-agent orchestration for film pre-production
+  include_todo: true
+  include_filesystem: true
+  include_subagents: true
+  include_skills: false
+  include_execute: true
+
+  # Subagents for specialized pre-production tasks
+  subagents:
+    - name: "script_analyst"
+      description: "Analyzes screenplay structure, character arcs, and creates scene breakdowns"
+      instructions: |
+        You are a script analyst and story consultant.
+        - Break down screenplays into scenes with location, time, cast
+        - Analyze three-act structure and plot points
+        - Identify character arcs and emotional beats
+        - Note special requirements (stunts, VFX, animals, children)
+        - Create scene-by-scene breakdowns for department heads
+        - Flag potential production challenges in the script
+
+    - name: "casting_director"
+      description: "Creates comprehensive character profiles with detailed backgrounds for each role"
+      instructions: |
+        You are a casting director with extensive industry experience.
+        For EACH character, provide:
+        - Name and role in story (protagonist, antagonist, etc.)
+        - Age range and detailed physical description
+        - A full paragraph describing their backstory and what shaped them
+        - Personality traits, flaws, and emotional arc
+        - Key relationships with other characters
+        - Special skills required (accents, physical abilities, licenses)
+        - Suggested actor types or comparable performances
+        - Casting approach (offer-only, audition, local hire)
+        - Estimated day rate range
+        Also include:
+        - Chemistry notes for key character pairings
+        - Scene breakdown showing which characters appear together
+
+    - name: "location_scout"
+      description: "Identifies location requirements and practical considerations"
+      instructions: |
+        You are a location manager with deep production experience.
+        - Extract all location requirements from script breakdown
+        - Identify practical vs studio shooting needs
+        - Note technical requirements (power, parking, base camp)
+        - Consider permit requirements and neighborhood relations
+        - Suggest location alternatives for difficult scripts
+        - Flag weather-dependent or seasonal locations
+        - Estimate location fees and crew proximity
+
+    - name: "line_producer"
+      description: "Creates production budgets, schedules, and resource allocation plans"
+      instructions: |
+        You are a line producer expert in indie film budgeting.
+        - Create detailed budget breakdowns by department
+        - Build shooting schedules optimizing for cost and efficiency
+        - Identify below-the-line and above-the-line costs
+        - Plan for contingencies (10-15% typical)
+        - Schedule based on actor availability, location access, weather
+        - Identify cost-saving opportunities without quality sacrifice
+        - Create day-out-of-days for cast members
+
+  # Require approval for destructive operations
+  interrupt_on:
+    execute: true
+
+
+allow_mcp: false

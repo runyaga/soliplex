@@ -1,0 +1,24 @@
+id: "garden_planner_persistent"
+name: "Garden Planner"
+description: "Garden planning assistant with seasonal tracking and plant care management"
+suggestions:
+  - "Plan a vegetable garden for Zone 7"
+  - "Create a companion planting chart"
+  - "Build a seasonal planting calendar"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 2: Todo + Filesystem with persistent backend for seasonal tracking
+  include_todo: true
+  include_filesystem: true
+  include_subagents: false
+  include_skills: false
+
+  # Filesystem backend for persistence across restarts
+  backend_kind: "filesystem"
+
+
+allow_mcp: false

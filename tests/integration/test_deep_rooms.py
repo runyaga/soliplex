@@ -9,6 +9,7 @@ These tests exercise non-trivial behavior including:
 """
 
 import asyncio
+import os
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -181,9 +182,20 @@ DEEP_ROOM_TESTS = {
                 # Check for success criteria
                 contains_any(["success", "criteria", "rollback", "complete"]),
                 # Check for complexity/effort estimates
-                contains_any(["complexity", "effort", "estimate", "high", "medium", "low"]),
+                contains_any(
+                    [
+                        "complexity",
+                        "effort",
+                        "estimate",
+                        "high",
+                        "medium",
+                        "low",
+                    ]
+                ),
                 # Check for dependencies
-                contains_any(["depend", "prerequisite", "before", "after", "block"]),
+                contains_any(
+                    ["depend", "prerequisite", "before", "after", "block"]
+                ),
                 # Minimum substance
                 word_count_between(300, 5000),
             ],
@@ -363,6 +375,108 @@ DEEP_ROOM_TESTS = {
             ],
         },
     },
+    "wedding_planner_todo_fs": {
+        "tier": 2,
+        "capabilities": ["todo", "filesystem"],
+        "prompt": (
+            "Plan a wedding for 150 guests with a $50,000 budget. "
+            "The couple prefers an outdoor venue. Create:\n"
+            "1) 'guests/master_list.md' with guest categories (family, friends, "
+            "work colleagues), estimated counts per category, and space for RSVPs "
+            "and dietary restrictions.\n"
+            "2) 'vendors/comparison.md' comparing at least 3 options each for: "
+            "venue, catering, photography, and florals. Include estimated costs.\n"
+            "3) 'budget/tracker.md' with line items for all major categories, "
+            "estimated vs actual columns, and running totals.\n"
+            "4) 'timeline/milestones.md' with a 12-month planning timeline "
+            "including key deadlines for bookings, tastings, and fittings."
+        ),
+        "validates": "Wedding planning workflow with guest and budget management",
+        "expected_files": [
+            "guests/master_list.md",
+            "vendors/comparison.md",
+            "budget/tracker.md",
+            "timeline/milestones.md",
+        ],
+        "file_validators": {
+            "guests/master_list.md": [
+                has_markdown_structure(),
+                contains_all(["family", "friend"]),
+                contains_any(["150", "guest", "rsvp", "dietary"]),
+            ],
+            "vendors/comparison.md": [
+                has_markdown_structure(),
+                contains_all(["venue", "cater"]),
+                contains_any(["photo", "floral", "flower"]),
+                has_minimum_sections(3),
+            ],
+            "budget/tracker.md": [
+                has_markdown_structure(),
+                contains_any(["50,000", "50000", "$50"]),
+                contains_any(["venue", "cater", "total"]),
+            ],
+            "timeline/milestones.md": [
+                has_markdown_structure(),
+                contains_any(["month", "week", "deadline"]),
+                contains_any(["book", "tasting", "fitting"]),
+            ],
+        },
+    },
+    "garden_planner_persistent": {
+        "tier": 2,
+        "capabilities": ["todo", "filesystem"],
+        "prompt": (
+            "Plan a vegetable garden for Zone 7, with 400 sq ft of raised beds, "
+            "for a family of 4. Focus on tomatoes, peppers, and leafy greens. Create:\n"
+            "1) 'garden/layout.md' with bed dimensions, orientation, and plant placement. "
+            "Include spacing requirements and sun exposure notes.\n"
+            "2) 'plants/selection.md' listing recommended varieties for each crop type, "
+            "with days to maturity and companion planting notes.\n"
+            "3) 'calendar/planting_schedule.md' with indoor seed starting dates, "
+            "transplant dates, and direct sow dates based on Zone 7 frost dates.\n"
+            "4) 'care/maintenance_tasks.md' with watering schedules, fertilizing "
+            "timing, and pest prevention tips.\n"
+            "5) 'harvest/yield_tracker.md' with expected harvest windows and "
+            "estimated yields per plant."
+        ),
+        "validates": "Garden planning with seasonal tracking and plant care",
+        "expected_files": [
+            "garden/layout.md",
+            "plants/selection.md",
+            "calendar/planting_schedule.md",
+            "care/maintenance_tasks.md",
+            "harvest/yield_tracker.md",
+        ],
+        "file_validators": {
+            "garden/layout.md": [
+                has_markdown_structure(),
+                contains_any(["400", "sq ft", "square"]),
+                contains_any(["raised bed", "spacing", "sun"]),
+            ],
+            "plants/selection.md": [
+                has_markdown_structure(),
+                contains_all(["tomato", "pepper"]),
+                contains_any(["leafy", "lettuce", "spinach", "green"]),
+                contains_any(["companion", "days to maturity", "variety"]),
+            ],
+            "calendar/planting_schedule.md": [
+                has_markdown_structure(),
+                contains_any(["zone 7", "frost"]),
+                contains_any(["seed", "transplant", "sow"]),
+                contains_any(["spring", "march", "april", "may"]),
+            ],
+            "care/maintenance_tasks.md": [
+                has_markdown_structure(),
+                contains_any(["water", "fertil"]),
+                contains_any(["pest", "weed", "mulch"]),
+            ],
+            "harvest/yield_tracker.md": [
+                has_markdown_structure(),
+                contains_any(["harvest", "yield", "pick"]),
+                contains_any(["tomato", "pepper"]),
+            ],
+        },
+    },
     # =========================================================================
     # Tier 3: Guarded - Approval workflows (tests without actual approval)
     # =========================================================================
@@ -403,6 +517,39 @@ DEEP_ROOM_TESTS = {
         "output_validators": [
             contains_all(["python", "environment"]),
             contains_any(["disk", "memory", "network", "process"]),
+        ],
+    },
+    "legal_contract_reviewer_interrupt": {
+        "tier": 3,
+        "capabilities": ["todo", "filesystem", "interrupt_on_write"],
+        "prompt": (
+            "Review the following NDA excerpt and explain your analysis. "
+            "Do NOT write any files - just provide your analysis in your response.\n\n"
+            "```\n"
+            "CONFIDENTIALITY AGREEMENT\n\n"
+            "Section 3. Non-Compete: The Receiving Party agrees not to engage in any "
+            "business that competes with the Disclosing Party for a period of 5 years "
+            "after termination, worldwide.\n\n"
+            "Section 5. IP Assignment: All ideas, inventions, and works created by "
+            "the Receiving Party during the term, whether or not related to the "
+            "Disclosing Party's business, shall be the sole property of the Disclosing Party.\n\n"
+            "Section 8. Termination: The Disclosing Party may terminate this agreement "
+            "at any time for any reason with immediate effect. The Receiving Party "
+            "may only terminate with 90 days written notice and payment of a $50,000 fee.\n"
+            "```\n\n"
+            "Provide:\n"
+            "1) Section-by-section analysis of each clause\n"
+            "2) Risk assessment with severity ratings (Critical/High/Medium/Low)\n"
+            "3) Specific negotiation recommendations"
+        ),
+        "validates": "Contract analysis with risk identification (output only)",
+        "output_validators": [
+            contains_any(["non-compete", "non compete", "section 3"]),
+            contains_any(["ip", "intellectual property", "section 5"]),
+            contains_any(["termination", "section 8"]),
+            contains_any(["critical", "high", "medium", "low", "risk"]),
+            contains_any(["recommend", "suggest", "negotiate", "concern"]),
+            word_count_between(200, 5000),
         ],
     },
     # =========================================================================
@@ -669,6 +816,71 @@ DEEP_ROOM_TESTS = {
             ],
         },
     },
+    "film_production_orchestrator": {
+        "tier": 5,
+        "capabilities": ["todo", "filesystem", "subagents", "execute"],
+        "prompt": (
+            "Plan pre-production for an indie drama film:\n"
+            "- Runtime: 90 minutes\n"
+            "- Budget: $2 million\n"
+            "- Principal cast: 5 actors\n"
+            "- Shoot: 20 days\n"
+            "- Genre: Character-driven drama set in a small coastal town\n\n"
+            "Create a complete pre-production package:\n"
+            "1) 'script/breakdown.md' with scene-by-scene breakdown including "
+            "day/night, INT/EXT, cast needed, and special requirements.\n"
+            "2) 'casting/character_profiles.md' with detailed descriptions of "
+            "the 5 principal characters including age range, key traits, and "
+            "special skills needed.\n"
+            "3) 'locations/requirements.md' listing all location types needed "
+            "(coastal town, beach, diner, protagonist's home, etc.) with "
+            "technical requirements and permit considerations.\n"
+            "4) 'production/budget.md' with above-the-line and below-the-line "
+            "costs, department breakdowns, and contingency allocation.\n"
+            "5) 'production/schedule.md' with a 20-day shooting schedule "
+            "organized by location to minimize company moves."
+        ),
+        "validates": "Multi-subagent film pre-production coordination",
+        "expected_files": [
+            "script/breakdown.md",
+            "casting/character_profiles.md",
+            "locations/requirements.md",
+            "production/budget.md",
+            "production/schedule.md",
+        ],
+        "file_validators": {
+            "script/breakdown.md": [
+                has_markdown_structure(),
+                contains_any(["scene", "int", "ext", "day", "night"]),
+                contains_any(["cast", "character", "actor"]),
+            ],
+            "casting/character_profiles.md": [
+                has_markdown_structure(),
+                contains_any(["age", "character", "protagonist", "lead"]),
+                contains_any(["trait", "skill", "description"]),
+                contains_any(["backstory", "background", "history", "past"]),
+                word_count_between(200, 10000),
+            ],
+            "locations/requirements.md": [
+                has_markdown_structure(),
+                contains_any(["coastal", "beach", "town"]),
+                contains_any(["permit", "parking", "power", "access"]),
+            ],
+            "production/budget.md": [
+                has_markdown_structure(),
+                contains_any(["2,000,000", "2000000", "$2", "2 million"]),
+                contains_any(
+                    ["above-the-line", "below-the-line", "contingency"]
+                ),
+                contains_any(["cast", "crew", "location", "equipment"]),
+            ],
+            "production/schedule.md": [
+                has_markdown_structure(),
+                contains_any(["20", "day", "shoot"]),
+                contains_any(["scene", "location", "call"]),
+            ],
+        },
+    },
 }
 
 
@@ -768,6 +980,12 @@ def installation():
     config.AGENT_CONFIG_CLASSES_BY_KIND["deep"] = DeepAgentConfig
     install = config.load_installation(Path("example/installation.yaml"))
     install.resolve_environment()
+
+    # Export resolved environment to os.environ for subagent creation
+    for key, value in install.environment.items():
+        if value is not None:
+            os.environ[key] = str(value)
+
     return install
 
 
@@ -776,6 +994,7 @@ def installation():
 # =============================================================================
 
 
+@pytest.mark.asyncio
 @pytest.mark.needs_llm
 @pytest.mark.parametrize("room_id", DEEP_ROOM_TESTS.keys())
 async def test_deep_room(room_id: str, installation):
@@ -801,7 +1020,10 @@ async def test_deep_room(room_id: str, installation):
     # Validate output exists and has substance
     assert result is not None, f"{room_id} returned None"
     assert result.output, f"{room_id} returned empty output"
-    assert len(result.output) > 100, (
+    # For rooms with expected files, output can be short (just a summary)
+    # For output-only rooms, require more substantial output
+    min_output_len = 20 if test_config.get("expected_files") else 100
+    assert len(result.output) > min_output_len, (
         f"{room_id} output too short ({len(result.output)} chars): "
         f"{result.output[:200]}"
     )
@@ -845,6 +1067,7 @@ async def test_deep_room(room_id: str, installation):
 # =============================================================================
 
 
+@pytest.mark.asyncio
 @pytest.mark.needs_llm
 @pytest.mark.parametrize("test_name", MULTI_TURN_TESTS.keys())
 async def test_multi_turn_conversation(test_name: str, installation):

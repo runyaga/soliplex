@@ -1,0 +1,21 @@
+id: "wedding_planner_todo_fs"
+name: "Wedding Planner"
+description: "Event planning assistant for weddings with guest management, vendor coordination, and budget tracking"
+suggestions:
+  - "Plan a wedding for 150 guests with a $50K budget"
+  - "Create a guest list with categories and dietary needs"
+  - "Compare wedding venues and caterers"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Tier 2: Todo + Filesystem - event planning workflow
+  include_todo: true
+  include_filesystem: true
+  include_subagents: false
+  include_skills: false
+
+
+allow_mcp: false

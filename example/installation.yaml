@@ -165,7 +165,8 @@ environment:
   #   value: "http://localhost:11434"
   #------------------------------------------------------------------------
 
-  - "OLLAMA_BASE_URL"
+  - name: "OLLAMA_BASE_URL"
+    value: "http://bizon:11434"
 
   #------------------------------------------------------------------------
   # 'soliplex': on-disk configuration locations
@@ -231,7 +232,7 @@ agent_configs:
       Always provide code or examples in Markdown blocks.
 
   - id: "alternate_chat"
-    model_name: "gpt-oss:20b"
+    model_name: "gpt-oss:20b-120k"
     system_prompt: |
       You are an expert AI assistant specializing in information retrieval.
 

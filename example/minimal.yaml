@@ -78,7 +78,7 @@ agent_configs:
       Always provide code or examples in Markdown blocks.
 
   - id: "alternate_chat"
-    model_name: "gpt-oss:20b"
+    model_name: "gpt-oss:20b-120k"
     system_prompt: |
       You are an expert AI assistant specializing in information retrieval.
 

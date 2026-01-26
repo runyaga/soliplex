@@ -32,8 +32,6 @@ dependencies = [
     "trio",
     "uvicorn[standard]",
     "certifi >= 2025.11.12",
-    "docker>=7.1.0",
-    "paramiko>=4.0.0",
 ]
 
 [project.scripts]
@@ -69,6 +67,12 @@ deepagents = [
     "pydantic-deep >= 0.1.0",
     # Pin to 1.39.x for subagents compatibility (_register_toolset API)
     "pydantic-ai-slim >= 1.39.0, < 1.40.0",
+]
+sandbox = [
+    # Docker sandbox for isolated code execution
+    # Requires DOCKER_HOST for remote execution (e.g., ssh://hostname)
+    "docker >= 7.1.0",
+    "paramiko >= 4.0.0",  # SSH support for remote Docker
 ]
 
 [tool.pytest.ini_options]

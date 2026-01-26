@@ -86,7 +86,7 @@ class SoliplexDeepAgent:
             try:
                 from pydantic_ai_backends import DockerSandbox
             except ImportError as e:
-                msg = "Docker backend requires: uv add docker paramiko"
+                msg = "Docker backend requires: uv sync --group sandbox"
                 raise ImportError(msg) from e
 
             docker_config = (

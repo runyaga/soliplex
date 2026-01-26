@@ -33,7 +33,7 @@ def _create_backend(agent_config: DeepAgentConfig):
         try:
             from pydantic_ai_backends import DockerSandbox
         except ImportError as e:
-            msg = "Docker backend requires: uv add docker paramiko"
+            msg = "Docker backend requires: uv sync --group sandbox"
             raise ImportError(msg) from e
 
         # DockerSandbox uses docker.from_env() which respects DOCKER_HOST

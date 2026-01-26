@@ -823,17 +823,27 @@ DEEP_ROOM_TESTS = {
         "tier": 6,
         "capabilities": ["todo", "filesystem", "execute", "docker"],
         "prompt": (
-            "Write a Python function that checks if a number is prime, "
-            "then test it with the first 20 numbers. "
-            "Execute the code and show me the results."
+            "Create 10 classic computer science algorithms as separate Python files. "
+            "Each file should have a working implementation with a demo/test. "
+            "Create these files:\n"
+            "1. binary_search.py - Binary search algorithm\n"
+            "2. bubble_sort.py - Bubble sort algorithm\n"
+            "3. merge_sort.py - Merge sort algorithm\n"
+            "4. quick_sort.py - Quick sort algorithm\n"
+            "5. linked_list.py - Singly linked list implementation\n"
+            "6. stack.py - Stack data structure\n"
+            "7. queue.py - Queue data structure\n"
+            "8. binary_tree.py - Binary search tree\n"
+            "9. hash_table.py - Hash table with collision handling\n"
+            "10. graph_bfs.py - Breadth-first search on a graph\n\n"
+            "Execute each file to verify it works. Include all source code in your response."
         ),
-        "validates": "Docker sandbox code execution with results returned to chat",
+        "validates": "Docker sandbox with multiple algorithm files",
         "output_validators": [
-            # Should show execution results in output
-            contains_any(["prime", "2", "3", "5", "7", "11", "13", "17", "19"]),
-            # Should indicate code was executed
-            contains_any(["result", "output", "prime numbers", "True", "False"]),
-            word_count_between(30, 5000),
+            # Should have algorithm implementations with code
+            contains_any(["def ", "class "]),
+            contains_any(["```python", "```"]),
+            word_count_between(200, 100000),
         ],
         # No expected_files - Docker sandbox doesn't write to local filesystem
     },
@@ -1035,7 +1045,7 @@ async def test_deep_room(room_id: str, installation):
     # Run the test with extended timeout for complex tasks
     result = await asyncio.wait_for(
         agent.run(test_config["prompt"]),
-        timeout=300.0,  # 5 minutes for complex multi-step tasks
+        timeout=600.0,  # 10 minutes for complex multi-step tasks
     )
 
     # Validate output exists and has substance

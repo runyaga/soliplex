@@ -797,7 +797,7 @@ wheels = [
 
 [[package]]
 name = "docling-core"
-version = "2.57.0"
+version = "2.59.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jsonref" },
@@ -811,9 +811,9 @@ dependencies = [
     { name = "typer" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/08/fa/541931a448ddc9609a3e21ca176baf28bd0a89cbbd7be23380637a87d427/docling_core-2.57.0.tar.gz", hash = "sha256:24b71172e8bc4fbe2b4213b29f51878114f4c13f25fc0bc9920168505c76c1a3", size = 230768, upload-time = "2025-12-18T14:18:14.928Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f6/ae/b1216598ab2f2a0fbe5fe974bcd65d9407f26fff0ba89cf6d8d760601a0a/docling_core-2.59.0.tar.gz", hash = "sha256:08900edbaf86a0acdd3d1fb5d47284f3826f68638245ba4a03aba1558d0067d9", size = 231580, upload-time = "2026-01-12T16:40:21.321Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/24/1c/03cc087b360b7815c5472f5cfaaf9b09fa6d0397c05c120a7c623654bf21/docling_core-2.57.0-py3-none-any.whl", hash = "sha256:398768b4d275ad2e11703ad9446fd0315a9a5fc8d09bc45ed207302d844d6ed5", size = 223002, upload-time = "2025-12-18T14:18:13.558Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/e7/27ba60d253b65415e6e709fda5ddfc1baf82fa9f8fbd8ae14b9bbbba5474/docling_core-2.59.0-py3-none-any.whl", hash = "sha256:014e1075c41fdac0932f25226d6c0972cb9772d866efcf8d04ca2abe246797c1", size = 223304, upload-time = "2026-01-12T16:40:19.488Z" },
 ]
 
 [[package]]
@@ -1219,7 +1219,7 @@ wheels = [
 
 [[package]]
 name = "haiku-rag-slim"
-version = "0.25.0"
+version = "0.26.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "docling-core" },
@@ -1234,9 +1234,9 @@ dependencies = [
     { name = "typer" },
     { name = "watchfiles" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e6/bb/80ec4c6ea59a0036751c0184c15bc63ed173a92dad0e78d9f96e4e843e60/haiku_rag_slim-0.25.0.tar.gz", hash = "sha256:b0e982f397c6dd21e2e37fee227c031487d9ff7660a8eb7543ba9e42da7dd7aa", size = 96394, upload-time = "2026-01-12T10:09:19.347Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3d/63/19dc9e3994adbbf1cbae16a536b644425ebd5a55d439d8b02214da41f827/haiku_rag_slim-0.26.6.tar.gz", hash = "sha256:4ba2279f060d82cec2d6d5c9fa183b59ccd1289449cd8c800dfee71590fe404b", size = 96116, upload-time = "2026-01-19T12:55:04.601Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/59/56/fea263d5d54a6b464003ce30b38ffc432dce84855c88ad86ceb03b409100/haiku_rag_slim-0.25.0-py3-none-any.whl", hash = "sha256:053baf967a658ca523dd5fe5e41f7ac7f97575afbd08923487bb06549dd9daf0", size = 131043, upload-time = "2026-01-12T10:09:17.815Z" },
+    { url = "https://files.pythonhosted.org/packages/72/fd/89b8c7d4a389751f2c3a20c9793df209ac3506a38468a1640ab7e6abf58f/haiku_rag_slim-0.26.6-py3-none-any.whl", hash = "sha256:8ff68e6dcb0eb698d4a3f1c8ceaee91bc3857d098743062fe3cddc102db210ff", size = 132741, upload-time = "2026-01-19T12:55:03.088Z" },
 ]
 
 [[package]]
@@ -3545,7 +3545,7 @@ wheels = [
 
 [[package]]
 name = "soliplex"
-version = "0.35.dev0"
+version = "0.37.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "ag-ui-protocol" },
@@ -3560,6 +3560,7 @@ dependencies = [
     { name = "jsonpatch" },
     { name = "jwcrypto" },
     { name = "logfire", extra = ["fastapi"] },
+    { name = "pydantic-ai-slim", extra = ["google"] },
     { name = "pyjwt" },
     { name = "python-keycloak" },
     { name = "sqlmodel" },
@@ -3609,11 +3610,12 @@ requires-dist = [
     { name = "fastapi" },
     { name = "fastmcp", specifier = ">=2.13.0.2,<2.14" },
     { name = "greenlet" },
-    { name = "haiku-rag-slim", specifier = "==0.25.0" },
+    { name = "haiku-rag-slim", specifier = ">=0.26.5" },
     { name = "itsdangerous" },
     { name = "jsonpatch" },
     { name = "jwcrypto" },
     { name = "logfire", extras = ["fastapi"] },
+    { name = "pydantic-ai-slim", extras = ["google"] },
     { name = "pyjwt" },
     { name = "python-keycloak" },
     { name = "sqlmodel" },

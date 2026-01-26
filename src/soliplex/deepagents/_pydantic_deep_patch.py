@@ -67,6 +67,49 @@ when needed
 """
 
 
+def _get_subagent_model_string(model: str | Model | None) -> str:
+    """Extract model string for subagents from a Model instance or string.
+
+    When subagents are created, they need a model string (not a Model
+    instance) to create their own agents. This function extracts the
+    appropriate model string based on the provider type.
+
+    Args:
+        model: Either a model string, Model instance, or None.
+
+    Returns:
+        A model string suitable for pydantic-ai's infer_model().
+        - For strings: returns as-is
+        - For OllamaProvider models: returns "ollama:{model_name}"
+        - For OpenAIProvider models: returns "openai:{model_name}"
+        - For None or unknown: returns DEFAULT_MODEL
+    """
+    if isinstance(model, str):
+        return model
+
+    if model is None:
+        return DEFAULT_MODEL
+
+    # Try to extract provider info from Model instance
+    try:
+        from pydantic_ai.models.openai import OpenAIChatModel
+        from pydantic_ai.providers.ollama import OllamaProvider
+        from pydantic_ai.providers.openai import OpenAIProvider
+
+        if isinstance(model, OpenAIChatModel):
+            model_name = model._model_name
+            provider = model._provider
+
+            if isinstance(provider, OllamaProvider):
+                return f"ollama:{model_name}"
+            elif isinstance(provider, OpenAIProvider):
+                return f"openai:{model_name}"
+    except (AttributeError, ImportError):
+        pass
+
+    return DEFAULT_MODEL
+
+
 @overload
 def create_deep_agent(
     model: str | Model | None = None,
@@ -204,7 +247,7 @@ def create_deep_agent(  # noqa: C901
         all_toolsets.append(console_toolset)
 
     if include_subagents:
-        subagent_model = model if isinstance(model, str) else DEFAULT_MODEL
+        subagent_model = _get_subagent_model_string(model)
 
         def subagent_toolsets_factory(
             deps: DeepAgentDeps,

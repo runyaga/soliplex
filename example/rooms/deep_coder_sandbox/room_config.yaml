@@ -2,9 +2,17 @@ id: "deep_coder_sandbox"
 name: "Coder Sandbox"
 description: "Write code and execute it in an isolated Docker container - results returned to chat"
 suggestions:
-  - "Write a function to check if a number is prime and test it"
-  - "Create a web scraper that fetches the title of a webpage"
-  - "Build a simple calculator with tests"
+  # Increasingly complex CS algorithm demos
+  - "Implement binary search and demonstrate it finding elements in a sorted array"
+  - "Build a stack and queue from scratch, then solve the balanced parentheses problem"
+  - "Implement merge sort and visualize each merge step with the array state"
+  - "Create a hash table with collision handling and demonstrate insert/lookup/delete"
+  - "Build a binary search tree with insert, search, and in-order traversal"
+  - "Implement Dijkstra's shortest path algorithm on a weighted graph"
+  - "Build a trie for autocomplete and demonstrate prefix matching"
+  - "Implement dynamic programming for the knapsack problem with memoization"
+  - "Create a red-black tree with self-balancing insert operations"
+  - "Implement A* pathfinding on a 2D grid with obstacles and visualize the path"
 
 agent:
   kind: "deep"

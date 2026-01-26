@@ -30,6 +30,7 @@ agent:
   # Requires: uv sync --group sandbox
   # Requires: DOCKER_HOST in .env (e.g., ssh://bizon)
   backend_kind: "docker"
+  backend_root: "../deep-state/deep_coder_sandbox"
   docker_config:
     image: "python:3.12-slim"
     work_dir: "/workspace"

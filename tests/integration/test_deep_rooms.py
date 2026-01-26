@@ -1055,6 +1055,15 @@ async def test_deep_room(room_id: str, installation):
         is_valid, error_msg = validator(result.output)
         assert is_valid, f"{room_id} output validation failed: {error_msg}"
 
+    # For Docker sandbox rooms, save state for auditability
+    if agent_config.backend_kind == "docker" and agent_config.backend_root:
+        saved_path = agent.save_state(
+            run_output=result.output,
+            prompt=test_config["prompt"],
+        )
+        if saved_path:
+            print(f"\n  Saved state to: {saved_path}")
+
     # Validate expected files if specified
     expected_files = test_config.get("expected_files", [])
     file_validators = test_config.get("file_validators", {})

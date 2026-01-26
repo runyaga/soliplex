@@ -211,6 +211,70 @@ class SoliplexDeepAgent:
             return self._deep_deps.files
         return {}
 
+    def save_state(
+        self,
+        output_dir: str | None = None,
+        run_output: str | None = None,
+        prompt: str | None = None,
+    ) -> str | None:
+        """Save agent state (files, todos, output) to disk for auditability.
+
+        This is useful for Docker sandbox backends where files exist only
+        inside the container. Call this after agent.run() to persist the
+        code and results.
+
+        Args:
+            output_dir: Directory to save state. If None, uses backend_root
+                       from agent config, or returns None if not configured.
+            run_output: The agent's output text to save (contains code/results).
+            prompt: The user prompt that triggered this run.
+
+        Returns:
+            Path to the output directory, or None if no state to save.
+        """
+        from datetime import datetime
+        from pathlib import Path
+        import json
+
+        # Determine output directory
+        if output_dir is None:
+            output_dir = getattr(self.agent_config, "backend_root", None)
+            if output_dir and not Path(output_dir).is_absolute():
+                config_dir = Path(self.agent_config._config_path).parent
+                output_dir = str(config_dir / output_dir)
+
+        if not output_dir:
+            return None
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        # Save files from in-memory state (filesystem/state backends)
+        files = self.files
+        if files:
+            for filename, content in files.items():
+                file_path = output_path / filename
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_path.write_text(content)
+
+        # Save todos as JSON
+        todos = self.todos
+        if todos:
+            todos_path = output_path / "_todos.json"
+            todos_path.write_text(json.dumps(todos, indent=2, default=str))
+
+        # Save run output for auditability (especially for Docker sandbox)
+        if run_output:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_path = output_path / f"_run_{timestamp}.md"
+            content_parts = []
+            if prompt:
+                content_parts.append(f"# Prompt\n\n{prompt}\n")
+            content_parts.append(f"# Output\n\n{run_output}\n")
+            run_path.write_text("\n".join(content_parts))
+
+        return str(output_path)
+
     def cleanup(self):
         """Clean up resources, especially Docker containers.
 

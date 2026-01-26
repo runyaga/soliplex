@@ -1,0 +1,35 @@
+id: "deep_coder_sandbox"
+name: "Coder Sandbox"
+description: "Write code and execute it in an isolated Docker container - results returned to chat"
+suggestions:
+  - "Write a function to check if a number is prime and test it"
+  - "Create a web scraper that fetches the title of a webpage"
+  - "Build a simple calculator with tests"
+
+agent:
+  kind: "deep"
+  model_name: "gpt-oss:latest"
+  system_prompt: "./prompt.txt"
+
+  # Full coding workflow with execution
+  include_todo: true
+  include_filesystem: true
+  include_subagents: false
+  include_skills: false
+  include_execute: true
+
+  # Docker sandbox for isolated execution
+  # Requires: uv sync --group sandbox
+  # Requires: DOCKER_HOST in .env (e.g., ssh://bizon)
+  backend_kind: "docker"
+  docker_config:
+    image: "python:3.12-slim"
+    work_dir: "/workspace"
+
+  # Disable approval for code execution - results return directly to chat
+  interrupt_on:
+    execute: false
+
+
+
+allow_mcp: false

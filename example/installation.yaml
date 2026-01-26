@@ -184,6 +184,15 @@ environment:
     value: "http://bizon:11434"
 
   #------------------------------------------------------------------------
+  # Docker host for remote code execution sandbox
+  #
+  # Set to ssh://hostname for remote Docker execution
+  # Requires: uv sync --group sandbox
+  #------------------------------------------------------------------------
+  - name: "DOCKER_HOST"
+    value: "ssh://bizon"
+
+  #------------------------------------------------------------------------
   # 'soliplex': on-disk configuration locations
   #------------------------------------------------------------------------
   #

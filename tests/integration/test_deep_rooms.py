@@ -816,6 +816,27 @@ DEEP_ROOM_TESTS = {
             ],
         },
     },
+    # =========================================================================
+    # Tier 6: Docker Sandbox - Isolated code execution
+    # =========================================================================
+    "deep_coder_sandbox": {
+        "tier": 6,
+        "capabilities": ["todo", "filesystem", "execute", "docker"],
+        "prompt": (
+            "Write a Python function that checks if a number is prime, "
+            "then test it with the first 20 numbers. "
+            "Execute the code and show me the results."
+        ),
+        "validates": "Docker sandbox code execution with results returned to chat",
+        "output_validators": [
+            # Should show execution results in output
+            contains_any(["prime", "2", "3", "5", "7", "11", "13", "17", "19"]),
+            # Should indicate code was executed
+            contains_any(["result", "output", "prime numbers", "True", "False"]),
+            word_count_between(30, 5000),
+        ],
+        # No expected_files - Docker sandbox doesn't write to local filesystem
+    },
     "film_production_orchestrator": {
         "tier": 5,
         "capabilities": ["todo", "filesystem", "subagents", "execute"],

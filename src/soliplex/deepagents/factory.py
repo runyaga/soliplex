@@ -30,7 +30,11 @@ def _create_backend(agent_config: DeepAgentConfig):
     backend_kind = agent_config.backend_kind
 
     if backend_kind == "docker":
-        from pydantic_ai_backends import DockerSandbox
+        try:
+            from pydantic_ai_backends import DockerSandbox
+        except ImportError as e:
+            msg = "Docker backend requires: uv add docker paramiko"
+            raise ImportError(msg) from e
 
         # DockerSandbox uses docker.from_env() which respects DOCKER_HOST
         # Set DOCKER_HOST=ssh://hostname for remote Docker execution

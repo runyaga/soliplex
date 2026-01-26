@@ -83,7 +83,11 @@ class SoliplexDeepAgent:
         backend_root = getattr(self.agent_config, "backend_root", None)
 
         if backend_kind == "docker":
-            from pydantic_ai_backends import DockerSandbox
+            try:
+                from pydantic_ai_backends import DockerSandbox
+            except ImportError as e:
+                msg = "Docker backend requires: uv add docker paramiko"
+                raise ImportError(msg) from e
 
             docker_config = (
                 getattr(self.agent_config, "docker_config", {}) or {}

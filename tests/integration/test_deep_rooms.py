@@ -847,6 +847,69 @@ DEEP_ROOM_TESTS = {
         ],
         # No expected_files - Docker sandbox doesn't write to local filesystem
     },
+    # =========================================================================
+    # Tier 7: Extreme - Multi-phase optimization with validation
+    # =========================================================================
+    "humanitarian_logistics_optimizer": {
+        "tier": 7,
+        "capabilities": ["todo", "filesystem", "execute", "docker"],
+        "prompt": (
+            "Begin Operation Saheli Sustenance - a 30-day food distribution plan.\n\n"
+            "Budget: $5,000,000 USD\n\n"
+            "**locations.json**\n"
+            "```json\n"
+            '{"source_warehouses": [\n'
+            '  {"id": "WH-MAR", "name": "Marseille Port", "country": "France", "daily_loading_capacity_kg": 500000},\n'
+            '  {"id": "WH-DXB", "name": "Dubai Jebel Ali", "country": "UAE", "daily_loading_capacity_kg": 750000}\n'
+            '],\n'
+            '"distribution_points": [\n'
+            '  {"id": "DP-01", "city": "Gao", "country": "Mali", "urgency_level": 9, "daily_reception_capacity_kg": 100000},\n'
+            '  {"id": "DP-02", "city": "NDjamena", "country": "Chad", "urgency_level": 10, "daily_reception_capacity_kg": 150000},\n'
+            '  {"id": "DP-03", "city": "Zinder", "country": "Niger", "urgency_level": 8, "daily_reception_capacity_kg": 80000}\n'
+            ']}\n'
+            "```\n\n"
+            "**supplies.json**\n"
+            "```json\n"
+            '{"food_items": [\n'
+            '  {"name": "High-Energy Biscuits", "cost_per_kg_usd": 3.5, "shelf_life_days": 365, "calories_per_kg": 4500},\n'
+            '  {"name": "Rice", "cost_per_kg_usd": 0.8, "shelf_life_days": 730, "calories_per_kg": 3600},\n'
+            '  {"name": "Lentils", "cost_per_kg_usd": 1.2, "shelf_life_days": 500, "calories_per_kg": 3400},\n'
+            '  {"name": "Fortified Milk Powder", "cost_per_kg_usd": 5.0, "shelf_life_days": 180, "calories_per_kg": 5000}\n'
+            ']}\n'
+            "```\n\n"
+            "**transport.json**\n"
+            "```json\n"
+            '{"routes": [\n'
+            '  {"from": "WH-MAR", "to": "DP-01", "mode": "Air", "time_days": 2, "cost_per_kg_usd": 8.0, "capacity_kg": 50000},\n'
+            '  {"from": "WH-MAR", "to": "DP-01", "mode": "Sea+Land", "time_days": 25, "cost_per_kg_usd": 1.5, "capacity_kg": 2000000},\n'
+            '  {"from": "WH-DXB", "to": "DP-02", "mode": "Air", "time_days": 1, "cost_per_kg_usd": 6.5, "capacity_kg": 100000},\n'
+            '  {"from": "WH-DXB", "to": "DP-02", "mode": "Sea+Land", "time_days": 28, "cost_per_kg_usd": 1.8, "capacity_kg": 2500000},\n'
+            '  {"from": "WH-MAR", "to": "DP-03", "mode": "Air", "time_days": 3, "cost_per_kg_usd": 9.0, "capacity_kg": 40000},\n'
+            '  {"from": "WH-MAR", "to": "DP-03", "mode": "Sea+Land", "time_days": 22, "cost_per_kg_usd": 1.3, "capacity_kg": 2000000},\n'
+            '  {"from": "WH-DXB", "to": "DP-03", "mode": "Air", "time_days": 2, "cost_per_kg_usd": 7.5, "capacity_kg": 80000}\n'
+            ']}\n'
+            "```\n\n"
+            "Create:\n"
+            "1. /research/synthesis.md - Data analysis and assumptions\n"
+            "2. /research/model_definition.md - Mathematical formulation\n"
+            "3. /src/optimizer.py - Optimization code using pulp\n"
+            "4. /tests/test_schedule.py - Validation tests for the output plan\n"
+            "5. /plan/final_schedule.csv - The actionable distribution schedule\n\n"
+            "Run your optimizer, validate with tests, iterate if tests fail. "
+            "Include ALL source code in your final response."
+        ),
+        "validates": "Multi-phase logistics optimization with code and validation",
+        "output_validators": [
+            # Should have optimization/logistics terminology
+            contains_any(["optimize", "constraint", "schedule", "budget"]),
+            # Should have code
+            contains_any(["```python", "def ", "import"]),
+            # Should have test output
+            contains_any(["test", "pass", "assert", "pytest"]),
+            # Substantial output
+            word_count_between(1000, 200000),
+        ],
+    },
     "film_production_orchestrator": {
         "tier": 5,
         "capabilities": ["todo", "filesystem", "subagents", "execute"],

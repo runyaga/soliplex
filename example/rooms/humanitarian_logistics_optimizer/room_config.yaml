@@ -1,0 +1,32 @@
+id: "humanitarian_logistics_optimizer"
+name: "A.L.F.I. - Aid Logistics & Food-chain Intelligence"
+description: "Multi-phase humanitarian logistics optimization with research, modeling, coding, and validation"
+suggestions:
+  - "Begin Operation Saheli Sustenance - 30-day food distribution plan for $5M budget"
+  - "Analyze the logistics data and create initial research synthesis"
+  - "Implement the optimization model and run validation tests"
+
+agent:
+  kind: "deep"
+  model_name: "qwen3-coder:30b"
+  system_prompt: "./prompt.txt"
+
+  # Full capabilities for complex planning + coding
+  include_todo: true
+  include_filesystem: true
+  include_subagents: false
+  include_skills: false
+  include_execute: true
+
+  # Docker sandbox with scientific Python packages
+  backend_kind: "docker"
+  backend_root: "../../deep-state/humanitarian_logistics_optimizer"
+  docker_config:
+    image: "python:3.12-slim"
+    work_dir: "/workspace"
+
+  # No approval needed - let it iterate freely
+  interrupt_on:
+    execute: false
+
+allow_mcp: false

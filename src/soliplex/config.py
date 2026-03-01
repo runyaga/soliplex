@@ -191,14 +191,6 @@ def _no_repr_no_compare_none(**kw):
     return _no_repr_no_compare(default=None, **kw)
 
 
-def _default_list_field() -> dataclasses.field:
-    return dataclasses.field(default_factory=list)
-
-
-def _default_dict_field() -> dataclasses.field:
-    return dataclasses.field(default_factory=dict)
-
-
 # ============================================================================
 #   OIDC Authentication system configuration types
 # ============================================================================
@@ -279,7 +271,9 @@ class OIDCAuthSystemConfig:
 
 @dataclasses.dataclass(kw_only=True)
 class AvailableOIDCAuthSystemConfigs:
-    systems: list[OIDCAuthSystemConfig] = _default_list_field()
+    systems: list[OIDCAuthSystemConfig] = dataclasses.field(
+        default_factory=list,
+    )
 
 
 # ============================================================================
@@ -506,9 +500,13 @@ class Stdio_MCP_ClientToolsetConfig:
 
     kind: typing.ClassVar[str] = "stdio"
     command: str
-    args: list[str] = _default_list_field()
+    args: list[str] = dataclasses.field(
+        default_factory=list,
+    )
 
-    env: dict[str, str] = _default_dict_field()
+    env: dict[str, str] = dataclasses.field(
+        default_factory=dict,
+    )
     allowed_tools: list[str] = None
 
     # set in 'from_yaml' class factory
@@ -563,9 +561,13 @@ class HTTP_MCP_ClientToolsetConfig:
 
     kind: typing.ClassVar[str] = "http"
     url: str
-    headers: dict[str, typing.Any] = _default_dict_field()
+    headers: dict[str, typing.Any] = dataclasses.field(
+        default_factory=dict,
+    )
 
-    query_params: dict[str, str] = _default_dict_field()
+    query_params: dict[str, str] = dataclasses.field(
+        default_factory=dict,
+    )
     allowed_tools: list[str] = None
 
     # set in 'from_yaml' class factory
@@ -870,7 +872,9 @@ class FactoryAgentConfig:
     factory_name: str  # dotted name for import
     kind: typing.ClassVar[str] = "factory"
     with_agent_config: bool = False
-    extra_config: dict[str, typing.Any] = _default_dict_field()
+    extra_config: dict[str, typing.Any] = dataclasses.field(
+        default_factory=dict,
+    )
 
     agui_feature_names: tuple[str] = ()
 
@@ -989,7 +993,9 @@ class QuizQuestionType(enum.StrEnum):
 class QuizQuestionMetadata:
     type: QuizQuestionType
     uuid: str
-    options: list[str] = _default_list_field()
+    options: list[str] = dataclasses.field(
+        default_factory=list,
+    )
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -1163,15 +1169,17 @@ class RoomConfig:
     #
     _order: str = None  # defaults to 'id'
     welcome_message: str = None
-    suggestions: list[str] = _default_list_field()
+    suggestions: list[str] = dataclasses.field(
+        default_factory=list,
+    )
     enable_attachments: bool = False
 
     #
     # Tool options
     #
-    tool_configs: ToolConfigMap = _default_dict_field()
-    mcp_client_toolset_configs: MCP_ClientToolsetConfigMap = (
-        _default_dict_field()
+    tool_configs: ToolConfigMap = dataclasses.field(default_factory=dict)
+    mcp_client_toolset_configs: MCP_ClientToolsetConfigMap = dataclasses.field(
+        default_factory=dict
     )
 
     #
@@ -1182,7 +1190,9 @@ class RoomConfig:
     #
     # Quiz-specific options
     #
-    quizzes: list[QuizConfig] = _default_list_field()
+    quizzes: list[QuizConfig] = dataclasses.field(
+        default_factory=list,
+    )
     _quiz_map: dict[str, QuizConfig] = None
 
     # Set by `from_yaml` factory
@@ -1192,7 +1202,7 @@ class RoomConfig:
     logo_image: dataclasses.InitVar[str] = None
     _logo_image: str = None
 
-    _agui_feature_names: list[str] = _default_list_field()
+    _agui_feature_names: list[str] = dataclasses.field(default_factory=list)
 
     def __post_init__(self, logo_image: str | None):
         if logo_image is not None:
@@ -1312,10 +1322,12 @@ class CompletionConfig:
     #
     # Tool options
     #
-    tool_configs: dict[str, ToolConfig] = _default_dict_field()
-    mcp_client_toolset_configs: dict[str, MCP_ClientToolsetConfig] = (
-        _default_dict_field()
+    tool_configs: dict[str, ToolConfig] = dataclasses.field(
+        default_factory=dict,
     )
+    mcp_client_toolset_configs: dict[
+        str, Stdio_MCP_ClientToolsetConfig | HTTP_MCP_ClientToolsetConfig
+    ] = dataclasses.field(default_factory=dict)
 
     # Set by `from_yaml` factory
     _installation_config: InstallationConfig = _no_repr_no_compare_none()
@@ -1634,6 +1646,21 @@ AGUI_FEATURES_BY_NAME = {
         AGUI_Feature(
             name=features.HAIKU_CHAT_FEATURE,
             model_klass=features.hr_chat_state.ChatSessionState,
+            source=AGUI_FeatureSource.SERVER,
+        ),
+        AGUI_Feature(
+            name=features.FILTER_DOCUMENTS_FEATURE,
+            model_klass=features.FilterDocuments,
+            source=AGUI_FeatureSource.CLIENT,
+        ),
+        AGUI_Feature(
+            name=features.ASK_HISTORY_FEATURE,
+            model_klass=features.AskedAndAnswered,
+            source=AGUI_FeatureSource.SERVER,
+        ),
+        AGUI_Feature(
+            name=features.MONTY_FEATURE,
+            model_klass=features.MontyState,
             source=AGUI_FeatureSource.SERVER,
         ),
     ]
@@ -2342,7 +2369,9 @@ class InstallationConfig:
     #
     # Secrets name values looked up from env vars or other sources.
     #
-    secrets: list[SecretConfig] = _default_list_field()
+    secrets: list[SecretConfig] = dataclasses.field(
+        default_factory=list,
+    )
     _secrets_map: dict[str, SecretConfig] = None
 
     @property
@@ -2395,7 +2424,9 @@ class InstallationConfig:
     #
     # Map values similar to 'os.environ'.
     #
-    environment: dict[str, typing.Any] = _default_dict_field()
+    environment: dict[str, typing.Any] = dataclasses.field(
+        default_factory=dict,
+    )
 
     def get_environment(self, key, default=None):
         """Find the configured value for a given quasi-envvar"""
@@ -2443,7 +2474,9 @@ class InstallationConfig:
     #
     # Agent configurations not bound to a room or completion.
     #
-    agent_configs: list[AgentConfigTypes] = _default_list_field()
+    agent_configs: list[AgentConfigTypes] = dataclasses.field(
+        default_factory=list,
+    )
     _agent_configs_map: AgentConfigMap = None
 
     @property

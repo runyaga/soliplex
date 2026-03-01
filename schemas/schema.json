@@ -2,8 +2,230 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
+    "haiku.rag.chat": {
+      "$defs": {
+        "Citation": {
+          "description": "Resolved citation with full metadata for display/visual grounding.\n\nUsed by both research graph and chat agent. The optional index field\nsupports UI display ordering in chat contexts.",
+          "properties": {
+            "index": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Index"
+            },
+            "document_id": {
+              "title": "Document Id",
+              "type": "string"
+            },
+            "chunk_id": {
+              "title": "Chunk Id",
+              "type": "string"
+            },
+            "document_uri": {
+              "title": "Document Uri",
+              "type": "string"
+            },
+            "document_title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Document Title"
+            },
+            "page_numbers": {
+              "items": {
+                "type": "integer"
+              },
+              "title": "Page Numbers",
+              "type": "array"
+            },
+            "headings": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Headings"
+            },
+            "content": {
+              "title": "Content",
+              "type": "string"
+            }
+          },
+          "required": [
+            "document_id",
+            "chunk_id",
+            "document_uri",
+            "content"
+          ],
+          "title": "Citation",
+          "type": "object"
+        },
+        "QAHistoryEntry": {
+          "description": "A Q&A pair with optional cached embedding for similarity matching.",
+          "properties": {
+            "question": {
+              "title": "Question",
+              "type": "string"
+            },
+            "answer": {
+              "title": "Answer",
+              "type": "string"
+            },
+            "confidence": {
+              "default": 0.9,
+              "title": "Confidence",
+              "type": "number"
+            },
+            "citations": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/Citation"
+              },
+              "title": "Citations",
+              "type": "array"
+            },
+            "question_embedding": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "number"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Question Embedding"
+            }
+          },
+          "required": [
+            "question",
+            "answer"
+          ],
+          "title": "QAHistoryEntry",
+          "type": "object"
+        },
+        "SessionContext": {
+          "description": "Compressed summary of conversation history for research graph.",
+          "properties": {
+            "summary": {
+              "default": "",
+              "title": "Summary",
+              "type": "string"
+            },
+            "last_updated": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Last Updated"
+            }
+          },
+          "title": "SessionContext",
+          "type": "object"
+        }
+      },
+      "description": "State shared between frontend and agent via AG-UI.",
+      "properties": {
+        "initial_context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Initial Context"
+        },
+        "citations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Citation"
+          },
+          "title": "Citations",
+          "type": "array"
+        },
+        "citations_history": {
+          "default": [],
+          "items": {
+            "items": {
+              "$ref": "#/$defs/Citation"
+            },
+            "type": "array"
+          },
+          "title": "Citations History",
+          "type": "array"
+        },
+        "qa_history": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/QAHistoryEntry"
+          },
+          "title": "Qa History",
+          "type": "array"
+        },
+        "session_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "document_filter": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Document Filter",
+          "type": "array"
+        },
+        "citation_registry": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "default": {},
+          "title": "Citation Registry",
+          "type": "object"
+        }
+      },
+      "title": "ChatSessionState",
+      "type": "object"
+    },
     "filter_documents": {
-      "description": "Documents selected by the user to be used to answer a question\n\nThis model describes the 'filter_documents' key in the AG-UI state.\n\nIf 'document_ids' is empty or None, or if the 'filter_documents'\nkey is not present in the AG-UI state, no filter is applied:  the\n'ask_with_rich_citations' tool will return all documents matching\nthe query from the LLM.",
+      "description": "Documents selected by the user to filter answers\n\nThis model describes the 'filter_documents' key in the\nAG-UI state.\n\nIf 'document_ids' is empty or None, or if the\n'filter_documents' key is not present in the AG-UI state,\nno filter is applied: the 'ask_with_rich_citations' tool\nwill return all documents matching the query from the LLM.",
       "properties": {
         "document_ids": {
           "anyOf": [
@@ -102,7 +324,7 @@
           "type": "object"
         },
         "QuestionResponseCitations": {
-          "description": "Single question to the 'ask_with_rich_citations' tool\n\nIncludes response generated by the tool and accompanying citations.",
+          "description": "Single question/response from 'ask_with_rich_citations'\n\nIncludes response generated by the tool and accompanying\ncitations.",
           "properties": {
             "question": {
               "title": "Question",
@@ -129,7 +351,7 @@
           "type": "object"
         }
       },
-      "description": "History of questions asked and their replies + citations\n\nThis model describes the 'ask_history' key in the AG-UI state.\n\nEach call to the 'ask_with_rich_citations' took append",
+      "description": "History of questions asked and their replies + citations\n\nThis model describes the 'ask_history' key in the AG-UI\nstate.\n\nEach call to the 'ask_with_rich_citations' tool appends\none entry to the 'questions' list.",
       "properties": {
         "questions": {
           "default": [],
@@ -143,219 +365,16 @@
       "title": "AskedAndAnswered",
       "type": "object"
     },
-    "haiku.rag.chat": {
-      "$defs": {
-        "Citation": {
-          "description": "Resolved citation with full metadata for display/visual grounding.\n\nUsed by both research graph and chat agent. The optional index field\nsupports UI display ordering in chat contexts.",
-          "properties": {
-            "index": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Index"
-            },
-            "document_id": {
-              "title": "Document Id",
-              "type": "string"
-            },
-            "chunk_id": {
-              "title": "Chunk Id",
-              "type": "string"
-            },
-            "document_uri": {
-              "title": "Document Uri",
-              "type": "string"
-            },
-            "document_title": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Document Title"
-            },
-            "page_numbers": {
-              "items": {
-                "type": "integer"
-              },
-              "title": "Page Numbers",
-              "type": "array"
-            },
-            "headings": {
-              "anyOf": [
-                {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Headings"
-            },
-            "content": {
-              "title": "Content",
-              "type": "string"
-            }
-          },
-          "required": [
-            "document_id",
-            "chunk_id",
-            "document_uri",
-            "content"
-          ],
-          "title": "Citation",
-          "type": "object"
-        },
-        "QAResponse": {
-          "description": "A Q&A pair from conversation history with citations.",
-          "properties": {
-            "question": {
-              "title": "Question",
-              "type": "string"
-            },
-            "answer": {
-              "title": "Answer",
-              "type": "string"
-            },
-            "confidence": {
-              "default": 0.9,
-              "title": "Confidence",
-              "type": "number"
-            },
-            "citations": {
-              "default": [],
-              "items": {
-                "$ref": "#/$defs/Citation"
-              },
-              "title": "Citations",
-              "type": "array"
-            },
-            "question_embedding": {
-              "anyOf": [
-                {
-                  "items": {
-                    "type": "number"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Question Embedding"
-            }
-          },
-          "required": [
-            "question",
-            "answer"
-          ],
-          "title": "QAResponse",
-          "type": "object"
-        },
-        "SessionContext": {
-          "description": "Compressed summary of conversation history for research graph.",
-          "properties": {
-            "summary": {
-              "default": "",
-              "title": "Summary",
-              "type": "string"
-            },
-            "last_updated": {
-              "anyOf": [
-                {
-                  "format": "date-time",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Last Updated"
-            }
-          },
-          "title": "SessionContext",
-          "type": "object"
-        }
-      },
-      "description": "State shared between frontend and agent via AG-UI.",
+    "monty": {
+      "description": "State for the monty room\n\nThis model describes the 'monty' key in the AG-UI state,\ncarrying context passed through the monty bridge.",
       "properties": {
-        "session_id": {
-          "title": "Session Id",
+        "ace_skillbook_context": {
+          "default": "",
+          "title": "Ace Skillbook Context",
           "type": "string"
-        },
-        "initial_context": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Initial Context"
-        },
-        "citations": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/Citation"
-          },
-          "title": "Citations",
-          "type": "array"
-        },
-        "qa_history": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/QAResponse"
-          },
-          "title": "Qa History",
-          "type": "array"
-        },
-        "session_context": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SessionContext"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "document_filter": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Document Filter",
-          "type": "array"
-        },
-        "citation_registry": {
-          "additionalProperties": {
-            "type": "integer"
-          },
-          "default": {},
-          "title": "Citation Registry",
-          "type": "object"
         }
       },
-      "title": "ChatSessionState",
+      "title": "MontyState",
       "type": "object"
     }
   }

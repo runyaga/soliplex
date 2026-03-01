@@ -3,6 +3,7 @@ import pathlib
 from unittest import mock
 
 import fastapi
+import pydantic
 import pytest
 from haiku.rag.store.models import chunk as hr_chunk
 
@@ -414,6 +415,105 @@ async def test_get_room_documents(
         the_logger=the_logger,
     )
     the_logger.debug.assert_called_once_with(loggers.ROOM_GET_ROOM_DOCUMENTS)
+
+
+class _FeatAModel(pydantic.BaseModel):
+    """Feature A description"""
+
+    value: str
+
+
+class _FeatBModel(pydantic.BaseModel):
+    """Feature B description"""
+
+    count: int
+
+
+_FEATURE_MODELS = {
+    "feat_a": _FeatAModel,
+    "feat_b": _FeatBModel,
+}
+
+
+@pytest.mark.anyio
+@mock.patch(
+    "soliplex.views.rooms.config.AGUI_FEATURES_BY_NAME",
+    new_callable=dict,
+)
+async def test_get_room_feature_schemas(features_by_name, room_configs):
+    ROOM_ID = "foo"
+
+    request = mock.create_autospec(fastapi.Request)
+
+    the_installation = mock.create_autospec(installation.Installation)
+
+    if ROOM_ID not in room_configs:
+        the_installation.get_room_config.side_effect = KeyError("testing")
+    else:
+        the_installation.get_room_config.return_value = room_configs[ROOM_ID]
+
+    the_authz_policy = mock.create_autospec(
+        authz_package.AuthorizationPolicy,
+    )
+    the_logger = mock.create_autospec(loggers.LogWrapper)
+
+    feature_names = ("feat_a", "feat_b")
+
+    if ROOM_ID in room_configs:
+        room_configs[ROOM_ID].agui_feature_names = feature_names
+        for feat_name in feature_names:
+            features_by_name[feat_name] = config.AGUI_Feature(
+                name=feat_name,
+                model_klass=_FEATURE_MODELS[feat_name],
+            )
+
+    if ROOM_ID not in room_configs:
+        with pytest.raises(fastapi.HTTPException) as exc:
+            await rooms_views.get_room_feature_schemas(
+                request,
+                ROOM_ID,
+                the_installation=the_installation,
+                the_authz_policy=the_authz_policy,
+                the_user_claims=THE_USER_CLAIMS,
+                the_logger=the_logger,
+            )
+
+        assert exc.value.status_code == 404
+        assert exc.value.detail == loggers.ROOM_UNKNOWN_ROOM_ID % ROOM_ID
+        the_logger.exception.assert_called_once_with(
+            loggers.ROOM_UNKNOWN_ROOM_ID,
+            ROOM_ID,
+        )
+
+    else:
+        found = await rooms_views.get_room_feature_schemas(
+            request,
+            ROOM_ID,
+            the_installation=the_installation,
+            the_authz_policy=the_authz_policy,
+            the_user_claims=THE_USER_CLAIMS,
+            the_logger=the_logger,
+        )
+
+        assert found.room_id == ROOM_ID
+        assert set(found.features.keys()) == set(feature_names)
+
+        for feat_name in feature_names:
+            feat = found.features[feat_name]
+            assert feat.name == feat_name
+            assert feat.json_schema == (
+                _FEATURE_MODELS[feat_name].model_json_schema()
+            )
+
+    the_installation.get_room_config.assert_awaited_once_with(
+        room_id=ROOM_ID,
+        user=THE_USER_CLAIMS,
+        the_authz_policy=the_authz_policy,
+        the_logger=the_logger,
+    )
+    the_logger.debug.assert_called_once_with(
+        loggers.ROOM_GET_ROOM_FEATURE_SCHEMAS,
+    )
 
 
 @pytest.mark.anyio

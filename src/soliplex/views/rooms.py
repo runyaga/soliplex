@@ -7,6 +7,7 @@ from haiku.rag import client as rag_client
 
 from soliplex import authn
 from soliplex import authz as authz_package
+from soliplex import config
 from soliplex import installation
 from soliplex import loggers
 from soliplex import mcp_auth
@@ -225,6 +226,46 @@ async def get_room_documents(
     return models.RoomDocuments(
         room_id=room_id,
         document_set=document_set,
+    )
+
+
+@util.logfire_span("GET /v1/rooms/{room_id}/feature_schemas")
+@router.get("/v1/rooms/{room_id}/feature_schemas")
+async def get_room_feature_schemas(
+    request: fastapi.Request,
+    room_id: str,
+    the_installation: installation.Installation = depend_the_installation,
+    the_authz_policy: authz_package.AuthorizationPolicy = depend_the_authz,
+    the_user_claims: authn.UserClaims = depend_the_user_claims,
+    the_logger: loggers.LogWrapper = depend_the_logger,
+) -> models.RoomFeatureSchemas:
+    """Return the AG-UI feature schemas for a room"""
+    the_logger.debug(loggers.ROOM_GET_ROOM_FEATURE_SCHEMAS)
+
+    try:
+        room_config = await the_installation.get_room_config(
+            room_id=room_id,
+            user=the_user_claims,
+            the_authz_policy=the_authz_policy,
+            the_logger=the_logger,
+        )
+    except KeyError:
+        the_logger.exception(loggers.ROOM_UNKNOWN_ROOM_ID, room_id)
+        raise fastapi.HTTPException(
+            status_code=404,
+            detail=loggers.ROOM_UNKNOWN_ROOM_ID % room_id,
+        ) from None
+
+    features = {
+        name: models.AGUI_Feature.from_config(
+            config.AGUI_FEATURES_BY_NAME[name],
+        )
+        for name in room_config.agui_feature_names
+    }
+
+    return models.RoomFeatureSchemas(
+        room_id=room_id,
+        features=features,
     )
 
 

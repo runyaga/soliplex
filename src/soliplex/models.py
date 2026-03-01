@@ -491,6 +491,11 @@ class RoomDocuments(pydantic.BaseModel):
     document_set: RAGDocumentSet
 
 
+class RoomFeatureSchemas(pydantic.BaseModel):
+    room_id: str
+    features: dict[str, AGUI_Feature]
+
+
 # ----------------------------------------------------------------------------
 #   AG-UI-related models
 # ----------------------------------------------------------------------------

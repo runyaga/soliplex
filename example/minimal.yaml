@@ -231,6 +231,7 @@ room_paths:
   - "./rooms/monty"
   - "./rooms/monty-chart"
   - "./rooms/monty-chart-web"
+  - "./rooms/plain"
 #
 #==========================================================================
 # Completions configuration

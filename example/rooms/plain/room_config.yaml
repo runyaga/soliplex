@@ -1,0 +1,8 @@
+id: "plain"
+name: "Plain Chat"
+description: "Simple helpful assistant"
+agent:
+  model_name: "gpt-oss:latest"
+  system_prompt: |
+    You are a helpful assistant.
+allow_mcp: false

@@ -1,0 +1,11 @@
+id: "monty-chart-web"
+name: "Monty Data Analyst (Web)"
+description: "Write and execute sandboxed Python with DataFrame and charting tools (WASM)"
+suggestions:
+  - "Create a DataFrame of the top 5 cities by population and chart it"
+  - "Compute the Fibonacci sequence up to 20 and plot it"
+  - "Analyze this CSV data and show me a scatter plot"
+agent:
+  template_id: "default_chat"
+  system_prompt: "./prompt.txt"
+allow_mcp: false

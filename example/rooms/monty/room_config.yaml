@@ -1,0 +1,11 @@
+id: "monty"
+name: "Monty Python Sandbox"
+description: "Plain sandboxed Python execution — no DataFrame or charting tools"
+suggestions:
+  - "Print the first 20 Fibonacci numbers"
+  - "Compute factorial of 10 iteratively"
+  - "Write a function that reverses a string"
+agent:
+  template_id: "default_chat"
+  system_prompt: "./prompt.txt"
+allow_mcp: false

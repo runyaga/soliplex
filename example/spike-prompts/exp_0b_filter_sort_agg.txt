@@ -1,0 +1,11 @@
+TASK: Create employees, filter to Engineering, sort by salary descending, print the mean salary.
+
+Data: Alice/Engineering/95000, Bob/Marketing/72000, Carol/Engineering/105000, Dave/Marketing/68000, Eve/Engineering/88000
+
+Available functions:
+- df_create(data) -> handle. data is a list of row dicts.
+- df_filter(handle, column, op, value) -> new handle. ops: ==, !=, >, <, >=, <=
+- df_sort(handle, column, ascending) -> new handle.
+- df_mean(handle, column) -> float.
+
+Current state: No DataFrames exist.

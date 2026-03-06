@@ -1,0 +1,8 @@
+TASK: Filter the employees DataFrame to only Engineering department.
+
+Available functions:
+- df_filter(handle, column, op, value) -> new handle (int).
+
+Current state:
+- Handle 0: DataFrame with 5 rows, columns: [name, department, salary]
+  Sample: [{name: Alice, department: Engineering, salary: 95000}, ...]

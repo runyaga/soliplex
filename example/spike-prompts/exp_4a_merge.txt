@@ -1,0 +1,11 @@
+TASK: Merge employees with salaries on emp_id, then print all rows.
+
+Available functions:
+- df_merge(handle1, handle2, on_columns) -> new handle. on_columns is a list.
+- df_head(handle, n) -> list of dicts.
+
+Current state:
+- Handle 0: 3 rows, columns: [name, emp_id]
+  Data: Alice/E001, Bob/E002, Carol/E003
+- Handle 1: 3 rows, columns: [emp_id, salary]
+  Data: E001/95000, E002/72000, E003/105000

@@ -1,0 +1,9 @@
+id: "spike-20b"
+name: "Spike Worker (20B)"
+description: "Multi-pass spike: focused single-step code generation"
+agent:
+  model_name: "gpt-oss:20b"
+  provider_type: "ollama"
+  provider_base_url: "http://bizon:11435"
+  system_prompt: "./prompt.txt"
+allow_mcp: false

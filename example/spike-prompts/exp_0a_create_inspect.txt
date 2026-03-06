@@ -1,0 +1,8 @@
+TASK: Create a DataFrame with columns name and age for three people, then print the first 2 rows.
+Data: Alice(30), Bob(25), Carol(35)
+
+Available functions:
+- df_create(data) -> handle (int). data is a list of row dicts.
+- df_head(handle, n) -> list of dicts. Returns first n rows.
+
+Current state: No DataFrames exist.

@@ -52,6 +52,19 @@ meta:
   #------------------------------------------------------------------------
 
   #------------------------------------------------------------------------
+  # Register skill configuration types so that they can be referenced by
+  # their 'kind'
+  #
+  # 'soliplex.config.HR_RAG_SkillConfig' and
+  # 'soliplex.config.HR_RLM_SkillConfig' are registered by default,
+  # just as if we configured here:
+  #
+  # skill_configs:
+  # - "soliplex.config.HR_RAG_SkillConfig"
+  # - "soliplex.config.HR_RLM_SkillConfig"
+  #------------------------------------------------------------------------
+
+  #------------------------------------------------------------------------
   # Register MCP server tool wrapper types so that they can be used to
   # wrap tools from a given tool configuration class.
   #
@@ -72,7 +85,6 @@ meta:
   # agent_configs:
   # - "soliplex.config.AgentConfig"
   # - "soliplex.config.FactoryAgentConfig"
-  # - "soliplex.haiku_chat.ChatAgentConfig"
   #------------------------------------------------------------------------
 
   #------------------------------------------------------------------------
@@ -197,21 +209,45 @@ agent_configs:
 # Thread peristence:  SQLAlchemy DBURIs
 #==========================================================================
 thread_persistence_dburi:
-  sync: "sqlite://"
-  async: "sqlite+aiosqlite://"
+  sync: "postgresql://soliplex:soliplex@localhost:5432/soliplex"
+  async: "postgresql+asyncpg://soliplex:soliplex@localhost:5432/soliplex"
 
 #==========================================================================
 # Authorization policy:  SQLAlchemy DBURIs
 #==========================================================================
 authorization_dburi:
-  sync: "sqlite://"
-  async: "sqlite+aiosqlite://"
+  sync: "postgresql://soliplex:soliplex@localhost:5432/soliplex"
+  async: "postgresql+asyncpg://soliplex:soliplex@localhost:5432/soliplex"
 
 #==========================================================================
 # OIDC authentication provider configuration
 #==========================================================================
 # See: https://soliplex.github.io/soliplex/config/oidc_providers/
 #==========================================================================
+
+#==========================================================================
+# Skills configuration
+#==========================================================================
+# See: https://soliplex.github.io/soliplex/config/skills/
+#
+# Default is equivalent to::
+#
+# filesystem_skills_paths:
+#   - "./skills"
+#
+# ... but with no discovered skills enabled.
+#==========================================================================
+
+filesystem_skills_paths:
+  - "./skills"
+
+skill_configs:
+  - skill_name: "bare-bones"
+    kind: "filesystem"
+
+# Requires installing 'haiku-skills-image-generation'
+# - skill_name: "image-generation"
+#   kind: "entrypoint"
 
 #==========================================================================
 # Rooms configuration
@@ -228,7 +264,10 @@ room_paths:
   - "./rooms/joker"
   - "./rooms/faux"
   - "./rooms/quiztest"
-#
+  - "./rooms/skillstest"
+  - "./rooms/spike-20b"
+  - "./rooms/spike-120b"
+
 #==========================================================================
 # Completions configuration
 #==========================================================================

@@ -125,6 +125,17 @@ def test_installation_get_environment(w_default):
         i_config.get_environment.assert_called_once_with(KEY, None)
 
 
+def test_installation_get_environment_sources():
+    i_config = mock.create_autospec(config.InstallationConfig)
+    the_installation = installation.Installation(i_config)
+
+    found = the_installation.get_environment_sources(KEY)
+
+    assert found is i_config.get_environment_sources.return_value
+
+    i_config.get_environment_sources.assert_called_once_with(KEY)
+
+
 @pytest.mark.parametrize("w_raise", [False, True])
 def test_installation_resolve_environment(w_raise):
     i_config = mock.create_autospec(config.InstallationConfig)
@@ -781,11 +792,16 @@ def test_installation_get_agent_by_id(gafc, w_agent_id, raises):
     else:
         found = the_installation.get_agent_by_id(w_agent_id)
         assert found is gafc.return_value
-        gafc.assert_called_once_with(a_config, {}, {})
+        gafc.assert_called_once_with(
+            agent_config=a_config,
+            tool_configs={},
+            mcp_client_toolset_configs={},
+        )
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("w_the_logger", [False, True])
+@pytest.mark.parametrize("w_room_skills", [False, True])
 @pytest.mark.parametrize(
     "w_room_id, raises", [("room_id", False), ("nonesuch", True)]
 )
@@ -799,6 +815,7 @@ async def test_installation_get_agent_for_room(
     the_logger,
     w_room_id,
     raises,
+    w_room_skills,
     w_the_logger,
 ):
     a_config = mock.create_autospec(config.AgentConfig)
@@ -815,6 +832,16 @@ async def test_installation_get_agent_for_room(
 
     r_config = mock.create_autospec(config.RoomConfig)
     r_config.agent_config = a_config
+
+    exp_gafc_kwargs = {}
+
+    if w_room_skills:
+        r_config.skills = mock.create_autospec(config.RoomSkillsConfig)
+        exp_gafc_kwargs["skill_toolset_config"] = r_config.skills
+    else:
+        r_config.skills = None
+        exp_gafc_kwargs["skill_toolset_config"] = None
+
     t_configs = r_config.tool_configs = {
         "test_tool": tc_config,
         "test_sdtc": sdtc_config,
@@ -870,7 +897,12 @@ async def test_installation_get_agent_for_room(
 
             assert found is gafc.return_value
 
-            gafc.assert_called_once_with(a_config, t_configs, mcp_configs)
+            gafc.assert_called_once_with(
+                agent_config=a_config,
+                tool_configs=t_configs,
+                mcp_client_toolset_configs=mcp_configs,
+                **exp_gafc_kwargs,
+            )
 
     if w_the_logger:
         the_logger.bind.assert_called_once_with(
@@ -938,7 +970,11 @@ async def test_installation_get_agent_for_completion(
             user=test_user,
         )
         assert found is gafc.return_value
-        gafc.assert_called_once_with(a_config, t_configs, mcp_configs)
+        gafc.assert_called_once_with(
+            agent_config=a_config,
+            tool_configs=t_configs,
+            mcp_client_toolset_configs=mcp_configs,
+        )
 
 
 @pytest.mark.anyio

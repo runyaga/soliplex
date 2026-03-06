@@ -53,6 +53,19 @@ meta:
   #------------------------------------------------------------------------
 
   #------------------------------------------------------------------------
+  # Register skill configuration types so that they can be referenced by
+  # their 'kind'
+  #
+  # 'soliplex.config.HR_RAG_SkillConfig' and
+  # 'soliplex.config.HR_RLM_SkillConfig' are registered by default,
+  # just as if we configured here:
+  #
+  # skill_configs:
+  # - "soliplex.config.HR_RAG_SkillConfig"
+  # - "soliplex.config.HR_RLM_SkillConfig"
+  #------------------------------------------------------------------------
+
+  #------------------------------------------------------------------------
   # Register MCP server tool wrapper types so that they can be used to
   # wrap tools from a given tool configuration class.
   #
@@ -292,6 +305,52 @@ authorization_dburi:
 #
 # Or run 'soliplex-cli serve --no-auth-mode'
 #==========================================================================
+
+#==========================================================================
+# Skills configuration
+#==========================================================================
+# See: https://soliplex.github.io/soliplex/config/skills/
+#
+# Specify one or more filesystem paths to search for skill configs.
+#
+# Each path can be either:
+#
+# - a directory containing its own 'SKILLS.md' file:  this directory
+#   will be mapped as a single skill.
+#
+# - a directory whose immediate subdirectories will be treated as skills
+#   IFF they contain a `SKILLS.md` file.
+#
+# Non-absolute paths will be evaluated relative to the installation directory.
+#
+# The order of 'skills_paths' in this list controls which skill configuration
+# is used for any conflict on skill name:  skills found earlier in the list
+# "win" over later ones with the same name.
+#
+# By default, load skill configurations found under the path './skills',
+# just as though we had configured here:
+#
+# skills_paths:
+# - "./skills"
+#
+# ... but with no discovered skills enabled.
+#
+# To disable all skilss, list a single, "null" path, e.g.:
+#
+# skills_paths:
+#   -
+#==========================================================================
+
+filesystem_skills_paths:
+  - "./skills"
+
+skill_configs:
+  - skill_name: "bare-bones"
+    kind: "filesystem"
+
+# Requires installing 'haiku-skills-image-generation'
+# - skill_name: "image-generation"
+#   kind: "entrypoint"
 
 
 #==========================================================================

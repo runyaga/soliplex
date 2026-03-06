@@ -44,6 +44,9 @@ class Installation:
     def resolve_secrets(self):
         secrets.resolve_secrets(self._config.secrets)
 
+    def get_environment_sources(self, key) -> list[config.EnvironmentSource]:
+        return self._config.get_environment_sources(key)
+
     def get_environment(self, key, default=None) -> str:
         return self._config.get_environment(key, default)
 
@@ -240,9 +243,9 @@ class Installation:
         agent_id: str,
     ) -> pydantic_ai.Agent:
         return agents.get_agent_from_configs(
-            self._config.agent_configs_map[agent_id],
-            {},
-            {},
+            agent_config=self._config.agent_configs_map[agent_id],
+            tool_configs={},
+            mcp_client_toolset_configs={},
         )
 
     async def get_agent_for_room(
@@ -259,11 +262,13 @@ class Installation:
             the_authz_policy=the_authz_policy,
             the_logger=the_logger,
         )
+        mcpcts_configs = room_config.mcp_client_toolset_configs
 
         return agents.get_agent_from_configs(
-            room_config.agent_config,
-            room_config.tool_configs,
-            room_config.mcp_client_toolset_configs,
+            agent_config=room_config.agent_config,
+            tool_configs=room_config.tool_configs,
+            mcp_client_toolset_configs=mcpcts_configs,
+            skill_toolset_config=room_config.skills,
         )
 
     async def get_agent_for_completion(
@@ -276,10 +281,12 @@ class Installation:
             completion_id=completion_id,
             user=user,
         )
+        mcpcts_configs = completion_config.mcp_client_toolset_configs
+
         return agents.get_agent_from_configs(
-            completion_config.agent_config,
-            completion_config.tool_configs,
-            completion_config.mcp_client_toolset_configs,
+            agent_config=completion_config.agent_config,
+            tool_configs=completion_config.tool_configs,
+            mcp_client_toolset_configs=mcpcts_configs,
         )
 
     async def get_agent_deps_for_room(
@@ -442,6 +449,7 @@ async def lifespan(
     agui_engine = sqla_asyncio.create_async_engine(
         the_installation.thread_persistence_dburi_async,
         json_serializer=util.serialize_sqla_json,
+        pool_pre_ping=True,
     )
     async with agui_engine.begin() as agui_connection:
         await agui_connection.run_sync(

@@ -8,6 +8,7 @@ from unittest import mock
 import pydantic
 import pytest
 from ag_ui import core as agui_core
+from haiku.skills import models as hs_models
 
 from soliplex import agui as agui_package
 from soliplex import config
@@ -28,6 +29,15 @@ QUESTION_TYPE_MC = "multiple-choice"
 MC_OPTIONS = ["orange", "blue", "purple"]
 
 FEATURE_NAME = "feature_name"
+SKILL_NAME = "skill_name"
+SKILL_DESC = "This is a skill"
+SKILL_LICENSE = "Foo License v3.14"
+SKILL_COMPAT = "Skill compat"
+TOOL_ONE = "tool-one"
+TOOL_TWO = "tool-two"
+SKILL_META = {"foo": "bar"}
+SKILL_MODEL_NAME = "test-skill-model"
+SKILL_STATE_NAMESPACE = "test-skill-namespace"
 
 ROOM_ID = "test_room"
 ROOM_NAME = "Test Room"
@@ -382,6 +392,119 @@ def test_mcp_client_toolset_from_config_w_sdtc():
     assert params["query_params"] == mcp_ct_config.query_params
 
 
+@pytest.fixture(params=[None, SKILL_META])
+def w_metadata(request):
+    return request.param
+
+
+@pytest.fixture(params=[[], [TOOL_ONE, TOOL_TWO]])
+def w_allowed_tools(request):
+    return request.param
+
+
+class StateModelTest(pydantic.BaseModel):
+    pass
+
+
+@pytest.fixture(
+    params=[
+        {},
+        {
+            "state_type": StateModelTest,
+            "state_namespace": SKILL_STATE_NAMESPACE,
+        },
+    ]
+)
+def w_state_model_and_ns(request):
+    return request.param
+
+
+@pytest.fixture
+def filesystem_skill_config(
+    temp_dir,
+    w_metadata,
+    w_allowed_tools,
+    w_state_model_and_ns,
+):
+    skill_path = temp_dir / "skills" / SKILL_NAME
+    skill_metadata = mock.create_autospec(
+        hs_models.SkillMetadata,
+        name=SKILL_NAME,
+        description=SKILL_DESC,
+        license=SKILL_LICENSE,
+        compatibility=SKILL_COMPAT,
+        allowed_tools=w_allowed_tools,
+        metadata=w_metadata,
+    )
+    skill_metadata.name = SKILL_NAME  # mock quirk
+    return config.FilesystemSkillConfig(
+        _skill_metadata=skill_metadata,
+        _skill_path=skill_path,
+        model_name=SKILL_MODEL_NAME,
+        **w_state_model_and_ns,
+    )
+
+
+def test_skill_from_config_w_fssc(filesystem_skill_config):
+    found = models.Skill.from_config(filesystem_skill_config)
+
+    assert found.source == hs_models.SkillSource.FILESYSTEM
+    assert found.name == filesystem_skill_config.name
+    assert found.description == filesystem_skill_config.description
+    assert found.license == filesystem_skill_config.license
+    assert found.compatibility == filesystem_skill_config.compatibility
+    assert found.allowed_tools == " ".join(
+        filesystem_skill_config.allowed_tools,
+    )
+    assert found.metadata == filesystem_skill_config.metadata
+
+    if filesystem_skill_config.state_type is not None:
+        assert found.state_type_schema == StateModelTest.model_json_schema()
+    else:
+        assert found.state_type_schema is None
+
+    assert found.state_namespace == filesystem_skill_config.state_namespace
+
+
+@pytest.fixture
+def entrypoint_skill_config(
+    w_metadata,
+    w_allowed_tools,
+):
+    skill_metadata = mock.create_autospec(
+        hs_models.SkillMetadata,
+        name=SKILL_NAME,
+        description=SKILL_DESC,
+        license=SKILL_LICENSE,
+        compatibility=SKILL_COMPAT,
+        allowed_tools=w_allowed_tools,
+        metadata=w_metadata,
+    )
+    skill_metadata.name = SKILL_NAME  # mock quirk
+    return config.EntrypointSkillConfig(
+        _skill_metadata=skill_metadata,
+        model_name=SKILL_MODEL_NAME,
+        state_type=StateModelTest,
+        state_namespace=SKILL_STATE_NAMESPACE,
+    )
+
+
+def test_skill_from_config_w_epsc(entrypoint_skill_config):
+    found = models.Skill.from_config(entrypoint_skill_config)
+
+    assert found.source == hs_models.SkillSource.ENTRYPOINT
+    assert found.name == entrypoint_skill_config.name
+    assert found.description == entrypoint_skill_config.description
+    assert found.license == entrypoint_skill_config.license
+    assert found.compatibility == entrypoint_skill_config.compatibility
+    assert found.allowed_tools == " ".join(
+        entrypoint_skill_config.allowed_tools,
+    )
+    assert found.metadata == entrypoint_skill_config.metadata
+    assert found.state_type_schema == StateModelTest.model_json_schema()
+    assert found.state_namespace == SKILL_STATE_NAMESPACE
+
+
 @pytest.fixture(params=[None, AGENT_RETRIES])
 def agent_retries(request):
     return _from_param(request, "retries")
@@ -627,12 +750,27 @@ def which_agent(
         return w_agui_features_agent
 
 
-def test_room_from_config_bare(which_agent):
+@pytest.fixture
+def room_ic():
+    return config.InstallationConfig(
+        id=INSTALLATION_ID,
+        oidc_paths=[],
+        room_paths=[],
+        completion_paths=[],
+        quizzes_paths=[],
+        _available_filesystem_skill_configs={},
+        _available_entrypoint_skill_configs={},
+        _skill_configs={},
+    )
+
+
+def test_room_from_config_bare(room_ic, which_agent):
     room_config = config.RoomConfig(
         id=ROOM_ID,
         name=ROOM_NAME,
         description=ROOM_DESCRIPTION,
         agent_config=which_agent,
+        _installation_config=room_ic,
     )
 
     room_model = models.Room.from_config(room_config)
@@ -642,6 +780,7 @@ def test_room_from_config_bare(which_agent):
     assert room_model.description == ROOM_DESCRIPTION
     assert room_model.suggestions == []
     assert room_model.tools == {}
+    assert room_model.skills == {}
 
     agent_model = room_model.agent
 
@@ -665,13 +804,14 @@ def test_room_from_config_bare(which_agent):
     assert room_model.welcome_message == ROOM_DESCRIPTION
 
 
-def test_room_from_config_w_welcome(default_agent):
+def test_room_from_config_w_welcome(room_ic, default_agent):
     room_config = config.RoomConfig(
         id=ROOM_ID,
         name=ROOM_NAME,
         description=ROOM_DESCRIPTION,
         agent_config=default_agent,
         welcome_message=ROOM_WELCOME,
+        _installation_config=room_ic,
     )
 
     room_model = models.Room.from_config(room_config)
@@ -679,13 +819,14 @@ def test_room_from_config_w_welcome(default_agent):
     assert room_model.welcome_message == ROOM_WELCOME
 
 
-def test_room_from_config_w_suggestions(default_agent):
+def test_room_from_config_w_suggestions(room_ic, default_agent):
     room_config = config.RoomConfig(
         id=ROOM_ID,
         name=ROOM_NAME,
         description=ROOM_DESCRIPTION,
         agent_config=default_agent,
         suggestions=[ROOM_SUGGESTION],
+        _installation_config=room_ic,
     )
 
     room_model = models.Room.from_config(room_config)
@@ -693,13 +834,14 @@ def test_room_from_config_w_suggestions(default_agent):
     assert room_model.suggestions == [ROOM_SUGGESTION]
 
 
-def test_room_from_config_w_tools(default_agent, gcd_tool_config):
+def test_room_from_config_w_tools(room_ic, default_agent, gcd_tool_config):
     room_config = config.RoomConfig(
         id=ROOM_ID,
         name=ROOM_NAME,
         description=ROOM_DESCRIPTION,
         agent_config=default_agent,
         tool_configs={"get_current_datetime": gcd_tool_config},
+        _installation_config=room_ic,
     )
 
     room_model = models.Room.from_config(room_config)
@@ -711,13 +853,66 @@ def test_room_from_config_w_tools(default_agent, gcd_tool_config):
     assert room_model.agui_feature_names == [FEATURE_NAME]
 
 
-def test_room_from_config_w_quizzes(default_agent, a_quiz):
+def test_room_from_config_w_fs_skills(
+    room_ic,
+    default_agent,
+    filesystem_skill_config,
+):
+    room_ic._skill_configs[SKILL_NAME] = filesystem_skill_config
+
+    room_config = config.RoomConfig(
+        id=ROOM_ID,
+        name=ROOM_NAME,
+        description=ROOM_DESCRIPTION,
+        agent_config=default_agent,
+        skills=config.RoomSkillsConfig(
+            installation_skill_names=[SKILL_NAME],
+            _installation_config=room_ic,
+        ),
+        _installation_config=room_ic,
+    )
+
+    room_model = models.Room.from_config(room_config)
+
+    assert room_model.skills == {
+        SKILL_NAME: models.Skill.from_config(filesystem_skill_config),
+    }
+
+
+def test_room_from_config_w_ep_skills(
+    room_ic,
+    default_agent,
+    entrypoint_skill_config,
+):
+    room_ic._skill_configs[SKILL_NAME] = entrypoint_skill_config
+
+    room_config = config.RoomConfig(
+        id=ROOM_ID,
+        name=ROOM_NAME,
+        description=ROOM_DESCRIPTION,
+        agent_config=default_agent,
+        skills=config.RoomSkillsConfig(
+            installation_skill_names=[SKILL_NAME],
+            _installation_config=room_ic,
+        ),
+        _installation_config=room_ic,
+    )
+
+    room_model = models.Room.from_config(room_config)
+
+    assert room_model.skills == {
+        SKILL_NAME: models.Skill.from_config(entrypoint_skill_config),
+    }
+
+
+def test_room_from_config_w_quizzes(room_ic, default_agent, a_quiz):
     room_config = config.RoomConfig(
         id=ROOM_ID,
         name=ROOM_NAME,
         description=ROOM_DESCRIPTION,
         agent_config=default_agent,
         quizzes=[a_quiz],
+        _installation_config=room_ic,
     )
 
     room_model = models.Room.from_config(room_config)
@@ -725,13 +920,14 @@ def test_room_from_config_w_quizzes(default_agent, a_quiz):
     assert room_model.quizzes == {a_quiz.id: models.Quiz.from_config(a_quiz)}
 
 
-def test_room_from_config_w_allow_mcp(default_agent, room_allow_mcp):
+def test_room_from_config_w_allow_mcp(room_ic, default_agent, room_allow_mcp):
     room_config = config.RoomConfig(
         id=ROOM_ID,
         name=ROOM_NAME,
         description=ROOM_DESCRIPTION,
         agent_config=default_agent,
         **room_allow_mcp,
+        _installation_config=room_ic,
     )
 
     room_model = models.Room.from_config(room_config)
@@ -1081,6 +1277,21 @@ def test_aguirunmetadata_from_run_metadata(run_metadata, exp_label):
         assert found is None
     else:
         assert found.label == exp_label
+
+
+def test_aguirunusage_from_tuple():
+    ru_stats = agui_package.RunUsageStats(
+        input_tokens=13,
+        output_tokens=17,
+        requests=23,
+        tool_calls=29,
+    )
+    ru_model = models.AGUI_RunUsage.from_tuple(ru_stats)
+
+    assert ru_model.input_tokens == 13
+    assert ru_model.output_tokens == 17
+    assert ru_model.requests == 23
+    assert ru_model.tool_calls == 29
 
 
 @pytest.mark.parametrize(

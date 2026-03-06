@@ -319,6 +319,38 @@ Incompatible with '--no-auth-mode'.
         uvicorn.run(app, **uvicorn_kw)
 
 
+def _find_skill_paths(to_search: pathlib.Path):
+    """Yield a sequence of skill paths under 'to_search'
+
+    Yielded values are paths, suitable for passing to
+    'skill_parser.read_properties'.
+
+    If 'to_search' has its own copy of 'SKILL.md', just yield the one
+    config parsed from it.
+
+    Otherwise, iterate over immediate subdirectories, yielding configs
+    parsed from any which have copies of 'SKILL.md'
+    """
+    filename = "SKILL.md"
+    config_file = to_search / filename
+
+    if config_file.is_file():
+        yield to_search
+
+    else:
+        for sub in sorted(to_search.glob("*")):
+            # See #233
+            if sub.name.startswith("."):
+                continue
+
+            if sub.is_dir():
+                sub_config = sub / filename
+                if sub_config.is_file():
+                    yield sub
+            else:  # pragma: NO COVER
+                pass
+
+
 @the_cli.command(
     "check-config",
 )
@@ -477,9 +509,9 @@ def check_config(
     the_console.line()
     the_console.rule("Validating skills")
     the_console.line()
-    for skills_path in the_installation._config.skills_paths:
-        the_console.print(f"Skills path: {skills_path}")
-        for skill_path in config._find_skill_paths(skills_path):
+    for skills_path in the_installation._config.filesystem_skills_paths:
+        the_console.print(f"Filesystem skills path: {skills_path}")
+        for skill_path in _find_skill_paths(skills_path):
             the_console.print(f"- {skill_path.name}")
             errors = skill_validator.validate(skill_path)
             if errors:
@@ -534,6 +566,14 @@ def list_secrets(
 def list_environment(
     ctx: typer.Context,
     installation_path: installation_path_type,
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="""\
+Show available sources, and which is selected.
+""",
+    ),
 ):
     """List environment variables defined in the installation"""
     the_installation = get_installation(installation_path)
@@ -553,6 +593,17 @@ def list_environment(
             value = "MISSING"
 
         the_console.print(f"- {key:25}: {value}")
+
+        if verbose:
+            for i_source, source in enumerate(
+                the_installation.get_environment_sources(key)
+            ):
+                mark = " " if i_source else "*"
+                the_console.print(
+                    f"  {mark}{str(source.source_type):24}: {source.value}"
+                )
+
+        the_console.print()
 
     the_console.print()
 
@@ -636,10 +687,11 @@ def list_skills(
 
     available_skills = the_installation._config.skill_configs
     for skill_name, skill_config in available_skills.items():
-        the_console.print(f"- [ {skill_name} ]")
-        if skill_config.errors:
+        the_console.print(f"- [ {skill_config.kind}:{skill_name}  ]")
+        errors = getattr(skill_config, "errors", None)
+        if errors:
             the_console.print("  Validation errors:")
-            for error in skill_config.errors:
+            for error in errors:
                 the_console.print(f"  - {error}")
         else:
             the_console.print(f"  {skill_config.description}")
@@ -1054,6 +1106,165 @@ def pull_models(
                     "successfully"
                 )
                 the_console.line()
+
+
+@the_cli.command(
+    "spike-test",
+)
+def spike_test(
+    ctx: typer.Context,
+    installation_path: installation_path_type,
+    room_id: str = typer.Argument(
+        help="Room ID to use for code generation (e.g. spike-20b)",
+    ),
+    prompt: str = typer.Option(
+        None,
+        "-p",
+        "--prompt",
+        help="Inline prompt string",
+    ),
+    prompt_file: pathlib.Path = typer.Option(
+        None,
+        "-f",
+        "--prompt-file",
+        help="Path to a prompt file",
+    ),
+    prompt_dir: pathlib.Path = typer.Option(
+        None,
+        "-d",
+        "--prompt-dir",
+        help="Directory of .txt prompt files to run in batch",
+    ),
+    output_dir: pathlib.Path = typer.Option(
+        None,
+        "-o",
+        "--output-dir",
+        help="Save generated code to this directory",
+    ),
+    no_validate: bool = typer.Option(
+        False,
+        "--no-validate",
+        help="Skip code validation",
+    ),
+    temperature: float = typer.Option(
+        0.1,
+        "-t",
+        "--temperature",
+        help="LLM temperature",
+    ),
+):
+    """Send prompts to a room's LLM and validate the generated code.
+
+    Requires exactly one of --prompt, --prompt-file, or --prompt-dir.
+    """
+    import asyncio
+
+    from soliplex import agents
+    from soliplex import spike
+
+    sources = [prompt, prompt_file, prompt_dir]
+    if sum(s is not None for s in sources) != 1:
+        the_console.print(
+            "Provide exactly one of --prompt, --prompt-file, "
+            "or --prompt-dir"
+        )
+        raise typer.Exit(1)
+
+    the_installation = get_installation(installation_path)
+
+    room_configs = the_installation._config.room_configs
+    if room_id not in room_configs:
+        the_console.print(f"Room '{room_id}' not found.")
+        the_console.print(
+            f"Available: {', '.join(room_configs.keys())}"
+        )
+        raise typer.Exit(1)
+
+    room_config = room_configs[room_id]
+    agent = agents.get_agent_from_configs(
+        agent_config=room_config.agent_config,
+        tool_configs={},
+        mcp_client_toolset_configs={},
+    )
+
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Collect prompts
+    prompt_items: list[tuple[str, str]] = []  # (name, text)
+
+    if prompt is not None:
+        prompt_items.append(("inline", prompt))
+    elif prompt_file is not None:
+        prompt_items.append(
+            (prompt_file.stem, prompt_file.read_text())
+        )
+    else:
+        for pf in sorted(prompt_dir.glob("*.txt")):
+            prompt_items.append((pf.stem, pf.read_text()))
+
+    if not prompt_items:
+        the_console.print("No prompt files found.")
+        raise typer.Exit(1)
+
+    the_console.line()
+    the_console.rule(
+        f"Spike test: {room_id} "
+        f"({len(prompt_items)} prompt(s))"
+    )
+    the_console.line()
+
+    pass_count = 0
+    fail_count = 0
+
+    async def run_prompt(name, text):
+        result = await agent.run(
+            text,
+            model_settings={"temperature": temperature},
+        )
+        return result.output
+
+    for name, text in prompt_items:
+        the_console.rule(f"[{name}]", style="dim")
+
+        try:
+            code = asyncio.run(run_prompt(name, text))
+        except Exception as exc:
+            the_console.print(f"LLM error: {exc}", style="red")
+            fail_count += 1
+            continue
+
+        the_console.print(code)
+        the_console.line()
+
+        if not no_validate:
+            errors = spike.validate_monty_code(code)
+            if errors:
+                for err in errors:
+                    the_console.print(f"  FAIL: {err}", style="red")
+                fail_count += 1
+            else:
+                the_console.print(
+                    "  PASS: validation OK", style="green"
+                )
+                pass_count += 1
+        else:
+            pass_count += 1
+
+        if output_dir is not None:
+            out_path = output_dir / f"{name}.py"
+            out_path.write_text(code)
+            the_console.print(f"  Saved: {out_path}", style="dim")
+
+        the_console.line()
+
+    the_console.rule(
+        f"Results: {pass_count} passed, {fail_count} failed"
+    )
+    the_console.line()
+
+    if fail_count > 0:
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

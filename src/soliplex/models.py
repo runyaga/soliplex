@@ -7,6 +7,7 @@ import typing
 
 import pydantic
 from ag_ui import core as agui_core
+from haiku.skills import models as hs_models
 
 from soliplex import agui as agui_package
 from soliplex import authz as authz_package
@@ -125,6 +126,48 @@ class MCPClientToolset(pydantic.BaseModel):
 ConfiguredMCPClientToolsets = dict[str, MCPClientToolset]
 
 
+#
+# XXX See: https://github.com/ggozad/haiku.skills/issues/19
+# SkillAllowedTools = list[str] | None
+#
+SkillAllowedTools = str | None
+SkillMetadata = dict[str, typing.Any] | None
+
+
+class Skill(pydantic.BaseModel):
+    source: hs_models.SkillSource | None = None
+    name: str
+    description: str
+    license: str | None
+    compatibility: str | None
+    allowed_tools: SkillAllowedTools = None
+    metadata: SkillMetadata = None
+    state_type_schema: dict[str, typing.Any] | None = None
+    state_namespace: str | None = None
+
+    @classmethod
+    def from_config(cls, skill_config: config.SkillConfigTypes):
+        kwargs = {}
+        if skill_config.state_type is not None:
+            kwargs["state_type_schema"] = (
+                skill_config.state_type.model_json_schema()
+            )
+        return cls(
+            source=skill_config.source,
+            name=skill_config.name,
+            description=skill_config.description,
+            license=skill_config.license,
+            compatibility=skill_config.compatibility,
+            allowed_tools=" ".join(skill_config.allowed_tools),
+            metadata=skill_config.metadata,
+            state_namespace=skill_config.state_namespace,
+            **kwargs,
+        )
+
+
+ConfiguredSkills = dict[str, Skill]
+
+
 class DefaultAgent(pydantic.BaseModel):
     id: str
     model_name: str
@@ -211,6 +254,7 @@ class Room(pydantic.BaseModel):
     enable_attachments: bool
     tools: ConfiguredTools
     mcp_client_toolsets: ConfiguredMCPClientToolsets
+    skills: ConfiguredSkills
     quizzes: ConfiguredQuizzes
     agent: Agent
     agui_feature_names: list[str]
@@ -246,6 +290,10 @@ class Room(pydantic.BaseModel):
                     key,
                     mcp_ct_config,
                 ) in room_config.mcp_client_toolset_configs.items()
+            },
+            skills={
+                key: Skill.from_config(skill_config)
+                for key, skill_config in room_config.skill_configs.items()
             },
             quizzes={
                 quiz.id: Quiz.from_config(quiz) for quiz in room_config.quizzes
@@ -348,10 +396,12 @@ class Installation(pydantic.BaseModel):
     haiku_rag_config_file: pathlib.Path | None = None
     agents: list[Agent] = []
     agui_features: list[AGUI_Feature] = []
+    skills: ConfiguredSkills
     oidc_paths: list[pathlib.Path] = []
     room_paths: list[pathlib.Path] = []
     completion_paths: list[pathlib.Path] = []
     quizzes_paths: list[pathlib.Path] = []
+    filesystem_skills_paths: list[pathlib.Path] = []
     oidc_auth_systems: list[OIDCAuthSystem] = []
     thread_persistence_dburi_sync: str | None = None
     thread_persistence_dburi_async: str | None = None
@@ -383,6 +433,10 @@ class Installation(pydantic.BaseModel):
             AGUI_Feature.from_config(agui_feature)
             for agui_feature in installation_config.agui_features
         ]
+        skills = {
+            key: Skill.from_config(skill_config)
+            for key, skill_config in installation_config.skill_configs.items()
+        }
         return cls(
             id=installation_config.id,
             secrets=secrets,
@@ -390,6 +444,10 @@ class Installation(pydantic.BaseModel):
             haiku_rag_config_file=installation_config._haiku_rag_config_file,
             agents=agents,
             agui_features=agui_features,
+            skills=skills,
+            filesystem_skills_paths=(
+                installation_config.filesystem_skills_paths
+            ),
             oidc_paths=installation_config.oidc_paths,
             room_paths=installation_config.room_paths,
             completion_paths=installation_config.completion_paths,

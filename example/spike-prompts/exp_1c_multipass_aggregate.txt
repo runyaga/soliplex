@@ -1,0 +1,10 @@
+TASK: Calculate and print the mean salary from the filtered data.
+
+Available functions:
+- df_mean(handle, column) -> float.
+
+Current state:
+- Handle 0: 5 rows, columns: [name, department, salary] (original)
+- Handle 1: 3 rows, columns: [name, department, salary] (filtered to Engineering)
+
+Use handle 1 (the filtered data).

@@ -63,7 +63,7 @@ def test_get_model_from_config(
     agent_config.provider_type = provider_type
     agent_config.llm_provider_kw = llm_provider_kw
 
-    model = agents.get_model_from_config(agent_config)
+    model = agents.get_model_from_config(agent_config=agent_config)
 
     if provider_type == config.LLMProviderType.GOOGLE:
         assert model is google_model_klass.return_value
@@ -155,15 +155,19 @@ def mcp_ct_configs_tools(request):
     return request.param
 
 
+@pytest.mark.parametrize("w_room_skills", [False, True])
 @pytest.mark.parametrize("w_model_settings", [None, MODEL_SETTINGS])
 @mock.patch("soliplex.agents.get_model_from_config")
+@mock.patch("haiku.skills.prompts.build_system_prompt")
 @mock.patch("pydantic_ai.Agent")
 def test_get_default_agent_from_configs(
     agent_klass,
+    build_system_prompt,
     gmfc,
     tool_configs_tools,
     mcp_ct_configs_tools,
     w_model_settings,
+    w_room_skills,
 ):
     agent_config = mock.create_autospec(config.AgentConfig)
     agent_config.kind = "default"
@@ -179,10 +183,23 @@ def test_get_default_agent_from_configs(
     }
     exp_toolsets = [tool for (_, tool) in mcp_ct_configs_tools]
 
+    room_skills = mock.create_autospec(agents.SkillToolsetConfig)
+    kwargs = {}
+
+    exp_instructions = SYSTEM_PROMPT
+
+    if w_room_skills:
+        kwargs["skill_toolset_config"] = room_skills
+        exp_toolsets.append(room_skills.skill_toolset)
+        exp_instructions = build_system_prompt.return_value
+    else:
+        exp_instructions = SYSTEM_PROMPT
+
     found = agents.get_default_agent_from_configs(
         agent_config=agent_config,
         tool_configs=tool_configs,
         mcp_client_toolset_configs=mcp_tc_configs,
+        **kwargs,
     )
 
     assert found is agent_klass.return_value
@@ -195,9 +212,18 @@ def test_get_default_agent_from_configs(
     akc_kw = akc.kwargs
 
     assert akc_kw["model"] is gmfc.return_value
-    gmfc.assert_called_once_with(agent_config)
+    gmfc.assert_called_once_with(agent_config=agent_config)
 
-    assert akc_kw["instructions"] == SYSTEM_PROMPT
+    assert akc_kw["instructions"] == exp_instructions
+
+    if w_room_skills:
+        build_system_prompt.assert_called_once_with(
+            preamble=SYSTEM_PROMPT,
+            skill_catalog=room_skills.skill_toolset.skill_catalog,
+        )
+    else:
+        build_system_prompt.assert_not_called()
+
     assert akc_kw["model_settings"] == w_model_settings
 
     for akc_tool, exp_tool in zip(akc_kw["tools"], exp_tools, strict=True):
@@ -213,11 +239,13 @@ def test_get_default_agent_from_configs(
     assert akc_kw["deps_type"] is agents.AgentDependencies
 
 
+@pytest.mark.parametrize("w_room_skills", [False, True])
 @mock.patch("soliplex.agents.get_default_agent_from_configs")
 def test_get_agent_from_configs_wo_hit_w_default_kind(
     gdafc,
     tool_configs_tools,
     mcp_ct_configs_tools,
+    w_room_skills,
 ):
     agent_config = mock.create_autospec(config.AgentConfig)
     agent_config.id = ROOM_ID
@@ -230,13 +258,22 @@ def test_get_agent_from_configs_wo_hit_w_default_kind(
         for mctc_id, (mctc, _) in enumerate(mcp_ct_configs_tools)
     }
 
+    room_skills = mock.create_autospec(agents.SkillToolsetConfig)
+    kwargs = {}
+
+    if w_room_skills:
+        kwargs["skill_toolset_config"] = room_skills
+    else:
+        kwargs["skill_toolset_config"] = None
+
     with (
         mock.patch.dict("soliplex.agents._agent_cache", clear=True) as cache,
     ):
         found = agents.get_agent_from_configs(
-            agent_config,
-            tool_configs,
-            mcp_tc_configs,
+            agent_config=agent_config,
+            tool_configs=tool_configs,
+            mcp_client_toolset_configs=mcp_tc_configs,
+            **kwargs,
         )
 
         assert cache[ROOM_ID] is found
@@ -247,10 +284,12 @@ def test_get_agent_from_configs_wo_hit_w_default_kind(
         agent_config=agent_config,
         tool_configs=tool_configs,
         mcp_client_toolset_configs=mcp_tc_configs,
+        **kwargs,
     )
 
 
-def test_get_agent_from_configs_wo_hit_w_python_kind():
+@pytest.mark.parametrize("w_room_skills", [False, True])
+def test_get_agent_from_configs_wo_hit_w_python_kind(w_room_skills):
     agent_config = mock.create_autospec(config.FactoryAgentConfig)
     agent_config.kind = "factory"
     agent_config.id = ROOM_ID
@@ -261,13 +300,22 @@ def test_get_agent_from_configs_wo_hit_w_python_kind():
     mcpcts = mock.create_autospec(config.MCP_ClientToolsetConfig)
     mcpcts_configs = {"test_mcpcts": mcpcts}
 
+    room_skills = mock.create_autospec(agents.SkillToolsetConfig)
+    kwargs = {}
+
+    if w_room_skills:
+        kwargs["skill_toolset_config"] = room_skills
+    else:
+        kwargs["skill_toolset_config"] = None
+
     with (
         mock.patch.dict("soliplex.agents._agent_cache", clear=True) as cache,
     ):
         found = agents.get_agent_from_configs(
-            agent_config,
+            agent_config=agent_config,
             tool_configs=tool_configs,
             mcp_client_toolset_configs=mcpcts_configs,
+            **kwargs,
         )
 
         assert cache[ROOM_ID] is found
@@ -277,6 +325,7 @@ def test_get_agent_from_configs_wo_hit_w_python_kind():
     agent_config.factory.assert_called_once_with(
         tool_configs=tool_configs,
         mcp_client_toolset_configs=mcpcts_configs,
+        **kwargs,
     )
 
 
@@ -288,6 +337,10 @@ def test_get_agent_from_configs_w_hit():
     with mock.patch.dict("soliplex.agents._agent_cache", clear=True) as ac:
         ac[ROOM_ID] = expected
 
-        found = agents.get_agent_from_configs(a_config, [], {})
+        found = agents.get_agent_from_configs(
+            agent_config=a_config,
+            tool_configs={},
+            mcp_client_toolset_configs={},
+        )
 
     assert found is expected

@@ -14,20 +14,24 @@ import re
 import ssl
 import sys
 import typing
+import warnings
 from collections import abc
 from urllib import parse as url_parse
 
 import dotenv
 import logfire
+import pydantic
 import yaml
 from haiku.rag import config as hr_config
+from haiku.rag.skills import rag as hr_skills_rag
+from haiku.rag.skills import rlm as hr_skills_rlm
+from haiku.skills import agent as hs_agent
+from haiku.skills import discovery as hs_discovery
+from haiku.skills import models as hs_models
 from pydantic_ai import settings as ai_settings
 from pydantic_ai.agent import abstract as ai_ag_abstract
-from skills_ref import models as skill_models
-from skills_ref import parser as skill_parser
-from skills_ref import validator as skill_validator
 
-from soliplex.agui import features
+from soliplex.agui import features as agui_features_module  # noqa F401
 
 FILE_PREFIX = "file:"
 
@@ -119,6 +123,68 @@ class InvalidAgentTemplateID(KeyError):
         )
 
 
+class OnlyOneOfToolNamesRagFeatures(ValueError):
+    def __init__(self, _config_path):
+        self._config_path = _config_path
+        super().__init__(
+            f"Pass only one of 'tool_names' and 'rag_features' "
+            f"(configured in {_config_path})"
+        )
+
+
+class Invalid_RAG_Feature(ValueError):
+    def __init__(
+        self,
+        *,
+        rag_feature: str,
+        suggestion: str,
+        _config_path: pathlib.Path,
+    ):
+        self.rag_feature = rag_feature
+        self.suggestion = suggestion
+        self._config_path = _config_path
+        super().__init__(
+            f"Invalid RAG feature '{rag_feature}'; "
+            f"{suggestion}; "
+            f"(configured in {_config_path})"
+        )
+
+
+class InvalidSkillKind(KeyError):
+    def __init__(
+        self,
+        *,
+        invalid_skill_kind: str,
+        available_skill_kinds: typing.Sequence[str],
+        _config_path: pathlib.Path,
+    ):
+        self.invalid_skill_kind = invalid_skill_kind
+        self.available_skill_kinds = available_skill_kinds
+        self._config_path = _config_path
+        super().__init__(
+            f"Skill kind '{invalid_skill_kind}' unknown; "
+            f"available kinds: {list(available_skill_kinds)}; "
+            f"(configured in {_config_path})",
+        )
+
+
+class MissingSkillNames(KeyError):
+    def __init__(
+        self,
+        _config_path: pathlib.Path,
+        missing_skill_names: typing.Sequence[str],
+        available_skill_names: typing.Sequence[str],
+    ):
+        self.missing_skill_names = missing_skill_names
+        self.available_skill_names = available_skill_names
+        self._config_path = _config_path
+        super().__init__(
+            f"Required skills {list(missing_skill_names)} not found "
+            f"in available skills: {list(available_skill_names)} "
+            f"(configured in {_config_path})",
+        )
+
+
 class QCExactlyOneOfStemOrOverride(TypeError):
     def __init__(self, _config_path):
         self._config_path = _config_path
@@ -189,6 +255,10 @@ def _no_repr_no_compare(**kw):
 
 def _no_repr_no_compare_none(**kw):
     return _no_repr_no_compare(default=None, **kw)
+
+
+def _no_repr_no_compare_dict(**kw):
+    return _no_repr_no_compare(default_factory=dict, **kw)
 
 
 def _default_list_field() -> dataclasses.field:
@@ -398,6 +468,7 @@ class _RAGConfigBase:
     # Normally set via subclass 'from_yaml'
     _installation_config: InstallationConfig = _no_repr_no_compare_none()
     _config_path: pathlib.Path = None
+    _haiku_rag_config: hr_config.AppConfig | None = None
 
     def __post_init__(self):
         exclusive_required = [
@@ -417,22 +488,25 @@ class _RAGConfigBase:
         directory holds a 'haiku.rag.yaml' file, load it's mapping, and
         treat it as overrides.
         """
-        if self._config_path is None:
-            raise NoConfigPath()
+        if self._haiku_rag_config is None:
+            if self._config_path is None:
+                raise NoConfigPath()
 
-        base_config = self._installation_config.haiku_rag_config
+            base_config = self._installation_config.haiku_rag_config
 
-        hr_config_file = self._config_path.parent / "haiku.rag.yaml"
+            hr_config_file = self._config_path.parent / "haiku.rag.yaml"
 
-        if hr_config_file.is_file():
-            base_config_yaml = base_config.model_dump()
-            room_config_yaml = hr_config.load_yaml_config(hr_config_file)
+            if hr_config_file.is_file():
+                base_config_yaml = base_config.model_dump()
+                room_config_yaml = hr_config.load_yaml_config(hr_config_file)
 
-            return hr_config.AppConfig.model_validate(
-                base_config_yaml | room_config_yaml
-            )
-        else:
-            return base_config
+                self._haiku_rag_config = hr_config.AppConfig.model_validate(
+                    base_config_yaml | room_config_yaml
+                )
+            else:
+                self._haiku_rag_config = base_config
+
+        return self._haiku_rag_config
 
     @property
     def rag_lancedb_path(self) -> pathlib.Path:
@@ -675,6 +749,406 @@ class WithQueryMCPWrapper:
 
 
 MCP_TOOL_CONFIG_WRAPPERS_BY_TOOL_NAME = {}
+
+
+# ============================================================================
+#   Skill configuration types
+# ============================================================================
+
+
+SkillKind = hs_models.SkillSource
+SkillStateType = type[pydantic.BaseModel] | None
+
+
+@dataclasses.dataclass(kw_only=True)
+class _SkillConfigBase:
+    """Base for configuration for an agent skill."""
+
+    model_name: str | None = None
+
+
+class _SkillPropertiesFromMetadata(typing.Protocol):
+    @property
+    def skill_metadata(self) -> hs_models.SkillMetadata:
+        return self._skill_metadata
+
+    @property
+    def name(self) -> str:
+        return self._skill_metadata.name
+
+    @property
+    def description(self) -> str:
+        return self._skill_metadata.description
+
+    @property
+    def license(self) -> str | None:
+        return self._skill_metadata.license
+
+    @property
+    def compatibility(self) -> str | None:
+        return self._skill_metadata.compatibility
+
+    @property
+    def allowed_tools(self) -> str:
+        return self._skill_metadata.allowed_tools
+
+    @property
+    def metadata(self) -> dict:
+        return self._skill_metadata.metadata
+
+
+@dataclasses.dataclass(kw_only=True)
+class _DiscoveredSkillConfigBase(
+    _SkillConfigBase,
+    _SkillPropertiesFromMetadata,
+):
+    """Configuration for an agent skill discovered by the installation"""
+
+    kind: typing.ClassVar[hs_models.SkillSource]  # quasi- @abstractproperty
+
+    _skill_metadata: hs_models.SkillMetadata
+    state_namespace: str | None = None
+    state_type: SkillStateType = None
+
+    @property
+    def source(self) -> hs_models.SkillSource | None:
+        return self.kind
+
+    @classmethod
+    def from_skill(cls, skill: hs_models.Skill):
+        return cls(
+            _skill_metadata=skill.metadata,
+            state_type=skill.state_type,
+            state_namespace=skill.state_namespace,
+        )
+
+    @property
+    def agui_feature_names(self) -> tuple[str]:
+        if self.state_namespace is not None:
+            return (self.state_namespace,)
+        else:
+            return ()
+
+    @property
+    def skill(self) -> hs_models.Skill:
+        return hs_models.Skill(
+            source=self.kind,
+            metadata=self._skill_metadata,
+            state_type=self.state_type,
+            state_namespace=self.state_namespace,
+        )
+
+
+@dataclasses.dataclass(kw_only=True)
+class FilesystemSkillConfig(_DiscoveredSkillConfigBase):
+    """Configuration for an agent skill loaded from a filesystem directory"""
+
+    kind: typing.ClassVar[hs_models.SkillSource] = SkillKind.FILESYSTEM
+
+    _skill_path: pathlib.Path
+    _validation_errors: list[str] = _default_list_field()
+
+    @classmethod
+    def from_skill(cls, skill: hs_models.Skill):
+        return cls(
+            _skill_metadata=skill.metadata,
+            _skill_path=skill.path,
+            state_type=skill.state_type,
+            state_namespace=skill.state_namespace,
+        )
+
+    @classmethod
+    def from_path(cls, skill_path: pathlib.Path):
+        """Parse a skill from its 'SKILLS.md', capturing validation errors
+
+        Used in CLI's '--list-skills', where we want to display those
+        errors.
+
+        'skill_path' must be the path for a single filesystem skill.
+        """
+        skills, validation_errors = hs_discovery.discover_from_paths(
+            [skill_path],
+        )
+        if validation_errors:
+            skill_metadata = hs_models.SkillMetadata(
+                name=skill_path.name,
+                description=f"Invalid filesystem skill: {skill_path}",
+            )
+            return cls(
+                _skill_path=skill_path,
+                _skill_metadata=skill_metadata,
+                _validation_errors=[str(ve) for ve in validation_errors],
+            )
+        else:
+            (skill,) = skills
+            result = cls.from_skill(skill)
+            result._skill_path = skill_path
+            return result
+
+    @property
+    def path(self) -> pathlib.Path | None:
+        return self._skill_path
+
+    @property
+    def errors(self) -> list[str]:
+        return self._validation_errors
+
+    @property
+    def skill(self) -> hs_models.Skill:
+        return hs_models.Skill(
+            source=self.kind,
+            metadata=self._skill_metadata,
+            path=self._skill_path,
+            state_type=self.state_type,
+            state_namespace=self.state_namespace,
+        )
+
+
+@dataclasses.dataclass(kw_only=True)
+class EntrypointSkillConfig(_DiscoveredSkillConfigBase):
+    """Configuration for an agent skill loaded from an entrypoint"""
+
+    kind: typing.ClassVar[hs_models.SkillSource] = SkillKind.ENTRYPOINT
+
+
+@dataclasses.dataclass(kw_only=True)
+class _HR_SkillConfigBase(
+    _SkillConfigBase,
+    _RAGConfigBase,
+    _SkillPropertiesFromMetadata,
+):
+    """Base class for 'haiku-rag' skll configs"""
+
+    source: typing.ClassVar[hs_models.SkillSource] = SkillKind.ENTRYPOINT
+
+    _haiku_rag_config: hr_config.AppConfig = None
+
+    @property
+    def _skill_metadata(self) -> hs_models.SkillMetadata:
+        return self._hr_skill_module.skill_metadata()
+
+    @property
+    def state_namespace(self) -> str:
+        return self._hr_skill_module.STATE_NAMESPACE
+
+    @property
+    def state_type(self) -> type[pydantic.BaseModel]:
+        return self._hr_skill_module.STATE_TYPE
+
+    @property
+    def agui_feature_names(self):
+        return [self.state_namespace]
+
+    @classmethod
+    def from_yaml(
+        cls,
+        installation_config: InstallationConfig,
+        config_path: pathlib.Path,
+        config_dict: dict,
+    ):
+        try:
+            _kind = config_dict.pop("kind", None)
+            config_dict["_installation_config"] = installation_config
+            config_dict["_config_path"] = config_path
+
+            return cls(**config_dict)
+        except Exception as exc:
+            raise FromYamlException(
+                config_path,
+                cls._hr_skill_module.STATE_NAMESPACE,
+                config_dict,
+            ) from exc
+
+    @property
+    def skill(self) -> hs_models.Skill:
+        return self._hr_skill_module.create_skill(
+            db_path=self.rag_lancedb_path,
+            config=self.haiku_rag_config,
+        )
+
+
+class HR_RAG_Tools(enum.StrEnum):
+    SEARCH = "search"
+    LIST_DOCUMENTS = "list_documents"
+    GET_DOCUMENT = "get_document"
+    ASK = "ask"
+    RESEARCH = "research"
+
+
+DEFAULT_RAG_TOOLS = [
+    HR_RAG_Tools.SEARCH,
+    HR_RAG_Tools.LIST_DOCUMENTS,
+    HR_RAG_Tools.GET_DOCUMENT,
+    HR_RAG_Tools.ASK,
+]
+
+
+RAG_FEATURE_NAMES_TO_TOOLS: dict[str | None, list[HR_RAG_Tools]] = {
+    "search": [HR_RAG_Tools.SEARCH],
+    "documents": [
+        HR_RAG_Tools.LIST_DOCUMENTS,
+        HR_RAG_Tools.GET_DOCUMENT,
+    ],
+    "qa": [HR_RAG_Tools.ASK],
+}
+
+USE_HR_SKILLS_RLM = "Use 'haiku.rag.skills.rlm' skill instead"
+
+REMOVED_HR_RAG_FEATURES = {
+    "analysis": USE_HR_SKILLS_RLM,
+}
+
+
+def _rag_feature_to_tools(
+    rag_feature: str | None,
+    _config_path: pathlib.Path,
+) -> list[HR_RAG_Tools]:
+    """Map legacy 'rag_features' entry to tools names"""
+    suggestion = REMOVED_HR_RAG_FEATURES.get(rag_feature)
+
+    if suggestion is not None:
+        raise Invalid_RAG_Feature(
+            rag_feature=rag_feature,
+            _config_path=_config_path,
+            suggestion=suggestion,
+        )
+
+    try:
+        return RAG_FEATURE_NAMES_TO_TOOLS[rag_feature]
+    except KeyError:
+        raise Invalid_RAG_Feature(
+            rag_feature=rag_feature,
+            _config_path=_config_path,
+            suggestion=(
+                f"Available features: {list(RAG_FEATURE_NAMES_TO_TOOLS)}"
+            ),
+        ) from None
+
+
+def _default_rag_tools() -> list[HR_RAG_Tools]:
+    return DEFAULT_RAG_TOOLS[:]
+
+
+@dataclasses.dataclass(kw_only=True)
+class HR_RAG_SkillConfig(_HR_SkillConfigBase):
+    """Configuration for an agent skill from 'haiku.rag.skills.rag"""
+
+    kind: typing.ClassVar[hs_models.SkillSource] = "haiku.rag.skills.rag"
+    _hr_skill_module = hr_skills_rag
+
+    _tool_names: list[HR_RAG_Tools] = dataclasses.field(
+        default_factory=_default_rag_tools,
+    )
+
+    @property
+    def tool_names(self):
+        return self._tool_names
+
+    @classmethod
+    def from_yaml(
+        cls,
+        installation_config: InstallationConfig,
+        config_path: pathlib.Path,
+        config_dict: dict,
+    ):
+        tool_names = config_dict.pop("tool_names", None)
+        rag_features = config_dict.pop("rag_features", None)
+
+        if tool_names is not None and rag_features is not None:
+            raise OnlyOneOfToolNamesRagFeatures(
+                _config_path=config_path,
+            )
+
+        if tool_names is not None:
+            rag_tools = [HR_RAG_Tools(tool_name) for tool_name in tool_names]
+
+        elif rag_features is not None:
+            warnings.warn(
+                "'rag_features' is deprecated. Use 'tool_names'",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            rag_tools = sum(
+                (
+                    _rag_feature_to_tools(rag_feature, config_path)
+                    for rag_feature in rag_features
+                ),
+                [],
+            )
+        else:
+            rag_tools = DEFAULT_RAG_TOOLS
+
+        config_dict["_tool_names"] = rag_tools
+
+        return super().from_yaml(
+            installation_config=installation_config,
+            config_path=config_path,
+            config_dict=config_dict,
+        )
+
+    @property
+    def skill(self) -> hs_models.Skill:
+        skill = super().skill
+        skill.tools = [
+            tool for tool in skill.tools if tool.__name__ in self.tool_names
+        ]
+        return skill
+
+
+@dataclasses.dataclass(kw_only=True)
+class HR_RLM_SkillConfig(_HR_SkillConfigBase):
+    """Configuration for an agent skill from 'haiku.rag.skills.rlm"""
+
+    kind: typing.ClassVar[hs_models.SkillSource] = "haiku.rag.skills.rlm"
+    _hr_skill_module = hr_skills_rlm
+
+
+SKILL_CONFIG_CLASSES_BY_KIND = {
+    klass.kind: klass
+    for klass in [
+        FilesystemSkillConfig,
+        EntrypointSkillConfig,
+        HR_RAG_SkillConfig,
+        HR_RLM_SkillConfig,
+    ]
+}
+
+SkillConfigTypes = (
+    FilesystemSkillConfig
+    | EntrypointSkillConfig
+    | HR_RAG_SkillConfig
+    | HR_RLM_SkillConfig
+)
+SkillConfigMap = dict[str, SkillConfigTypes]
+SkillMap = dict[str, hs_models.Skill]
+
+
+def extract_skill_configs(
+    installation_config: InstallationConfig,
+    config_path: pathlib.Path,
+    config_dict: dict,
+):
+    skill_configs = {}
+
+    for s_config in config_dict.pop("skill_configs", ()):
+        kind = s_config.get("kind")
+        try:
+            sc_klass = SKILL_CONFIG_CLASSES_BY_KIND[kind]
+        except KeyError:
+            raise InvalidSkillKind(
+                invalid_skill_kind=kind,
+                available_skill_kinds=SKILL_CONFIG_CLASSES_BY_KIND.keys(),
+                _config_path=config_path,
+            ) from None
+
+        skill_config = sc_klass.from_yaml(
+            installation_config,
+            config_path,
+            s_config,
+        )
+        skill_configs[skill_config.name] = skill_config
+
+    return skill_configs
 
 
 # ============================================================================
@@ -1147,8 +1621,101 @@ class QuizConfig:
 
 
 @dataclasses.dataclass(kw_only=True)
+class RoomSkillsConfig:
+    """Configure skills in a room"""
+
+    #
+    # Use skills defined in the installation, identified by name
+    #
+    installation_skill_names: list[str] = _default_list_field()
+    model_name: str | None = None
+
+    # Set by `from_yaml` factory
+    _skill_configs: SkillConfigMap = _default_dict_field()
+    _installation_config: InstallationConfig = _no_repr_no_compare_none()
+    _config_path: pathlib.Path = None
+
+    @staticmethod
+    def _check_skill_configs(
+        installation_config: InstallationConfig,
+        config_path: pathlib.Path,
+        config_dict: dict,
+    ):
+        config_skill_names = set(
+            config_dict.get("installation_skill_names", ())
+        )
+        installation_skill_names = set(installation_config.skill_configs)
+        missing_skill_names = config_skill_names - installation_skill_names
+
+        if missing_skill_names:
+            raise MissingSkillNames(
+                _config_path=config_path,
+                missing_skill_names=missing_skill_names,
+                available_skill_names=installation_skill_names,
+            )
+
+    @classmethod
+    def from_yaml(
+        cls,
+        installation_config: InstallationConfig,
+        config_path: pathlib.Path,
+        config_dict: dict,
+    ):
+        try:
+            cls._check_skill_configs(
+                installation_config,
+                config_path,
+                config_dict,
+            )
+
+            config_dict["_skill_configs"] = extract_skill_configs(
+                installation_config=installation_config,
+                config_path=config_path,
+                config_dict=config_dict,
+            )
+
+            config_dict["_installation_config"] = installation_config
+            config_dict["_config_path"] = config_path
+
+            return cls(**config_dict)
+
+        except FromYamlException:  # pragma: NO COVER
+            raise
+
+        except Exception as exc:
+            raise FromYamlException(
+                config_path,
+                "room_skills",
+                config_dict,
+            ) from exc
+
+    @property
+    def skill_configs(self) -> SkillConfigMap:
+        ic_skill_configs = self._installation_config.skill_configs
+        return {
+            skill_name: ic_skill_configs[skill_name]
+            for skill_name in self.installation_skill_names
+        } | (self._skill_configs)
+
+    @property
+    def skills(self) -> SkillMap:
+        return {
+            name: skill_config.skill
+            for name, skill_config in self.skill_configs.items()
+        }
+
+    @property
+    def skill_toolset(self) -> hs_agent.SkillToolset:
+        skill_map = self.skills
+        return hs_agent.SkillToolset(
+            skills=skill_map.values(),
+            skill_model=self.model_name,
+        )
+
+
+@dataclasses.dataclass(kw_only=True)
 class RoomConfig:
-    """Configuration for a chat room."""
+    """Configuration for a chat room"""
 
     #
     # Required room metadata
@@ -1178,6 +1745,11 @@ class RoomConfig:
     # MCP options
     #
     allow_mcp: bool = False
+
+    #
+    # Skills options
+    #
+    skills: RoomSkillsConfig = None
 
     #
     # Quiz-specific options
@@ -1233,6 +1805,14 @@ class RoomConfig:
                 )
             )
 
+            skills_config_yaml = config_dict.pop("skills", None)
+            if skills_config_yaml is not None:
+                config_dict["skills"] = RoomSkillsConfig.from_yaml(
+                    installation_config,
+                    config_path,
+                    skills_config_yaml,
+                )
+
             quizzes_config_yaml = config_dict.pop("quizzes", None)
             if quizzes_config_yaml is not None:
                 config_dict["quizzes"] = [
@@ -1267,6 +1847,10 @@ class RoomConfig:
         return self.id
 
     @property
+    def skill_configs(self) -> SkillConfigMap:
+        return self.skills.skill_configs if self.skills is not None else {}
+
+    @property
     def agui_feature_names(self) -> tuple[str]:
         agent_features = set(self.agent_config.agui_feature_names)
         room_features = set(self._agui_feature_names)
@@ -1275,7 +1859,13 @@ class RoomConfig:
         for tool_config in self.tool_configs.values():
             tool_features |= set(tool_config.agui_feature_names)
 
-        return tuple(agent_features | tool_features | room_features)
+        skill_features = set()
+        for skill_config in self.skill_configs.values():
+            skill_features |= set(skill_config.agui_feature_names)
+
+        return tuple(
+            agent_features | tool_features | skill_features | room_features
+        )
 
     @property
     def quiz_map(self) -> dict[str, QuizConfig]:
@@ -1360,57 +1950,6 @@ class CompletionConfig:
         )
 
         return cls(**config_dict)
-
-
-# ============================================================================
-#   Skill configuration types
-# ============================================================================
-
-
-@dataclasses.dataclass(kw_only=True)
-class SkillConfig:
-    """Configuration for an agent skill."""
-
-    _skill_properties: skill_models.SkillProperties | None
-    _validation_errors: list[str] = dataclasses.field(default_factory=list)
-
-    # Set by `from_markdown` factory
-    _installation_config: InstallationConfig = _no_repr_no_compare_none()
-    _skill_path: pathlib.Path = None
-
-    @property
-    def name(self) -> str:
-        if self._skill_properties is not None:
-            return self._skill_properties.name
-
-    @property
-    def description(self) -> str:
-        if self._skill_properties is not None:
-            return self._skill_properties.description
-
-    @property
-    def license(self) -> str | None:
-        if self._skill_properties is not None:
-            return self._skill_properties.license
-
-    @property
-    def compatibility(self) -> str | None:
-        if self._skill_properties is not None:
-            return self._skill_properties.compatibility
-
-    @property
-    def allowed_tools(self) -> str | None:
-        if self._skill_properties is not None:
-            return self._skill_properties.allowed_tools
-
-    @property
-    def metadata(self) -> dict:
-        if self._skill_properties is not None:
-            return self._skill_properties.metadata
-
-    @property
-    def errors(self) -> list[str]:
-        return self._validation_errors
 
 
 # ============================================================================
@@ -1613,7 +2152,11 @@ class AGUI_Feature:
 
     @property
     def description(self) -> str:
-        return self.model_klass.model_json_schema()["description"]
+        schema = self.model_klass.model_json_schema()
+        if "description" not in schema:
+            return self.model_klass.__name__
+        else:
+            return schema["description"]
 
     @property
     def as_yaml(self):
@@ -1631,11 +2174,7 @@ class AGUI_Feature:
 AGUI_FEATURES_BY_NAME = {
     agui_feature.name: agui_feature
     for agui_feature in [
-        AGUI_Feature(
-            name=features.HAIKU_CHAT_FEATURE,
-            model_klass=features.hr_chat_state.ChatSessionState,
-            source=AGUI_FeatureSource.SERVER,
-        ),
+        # Add features here as needed
     ]
 }
 
@@ -1949,38 +2488,6 @@ _find_completion_configs = functools.partial(
 )
 
 
-def _find_skill_paths(to_search: pathlib.Path):
-    """Yield a sequence of skill paths under 'to_search'
-
-    Yielded values are paths, suitable for passing to
-    'skill_parser.read_properties'.
-
-    If 'to_search' has its own copy of 'SKILL.md', just yield the one
-    config parsed from it.
-
-    Otherwise, iterate over immediate subdirectories, yielding configs
-    parsed from any which have copies of 'SKILL.md'
-    """
-    filename = "SKILL.md"
-    config_file = to_search / filename
-
-    if config_file.is_file():
-        yield to_search
-
-    else:
-        for sub in sorted(to_search.glob("*")):
-            # See #233
-            if sub.name.startswith("."):
-                continue
-
-            if sub.is_dir():
-                sub_config = sub / filename
-                if sub_config.is_file():
-                    yield sub
-            else:  # pragma: NO COVER
-                pass
-
-
 def strip_secret_prefix(config_str: str) -> str:
     if not config_str.startswith(SECRET_PREFIX):
         raise NotASecret(config_str)
@@ -2126,6 +2633,11 @@ class InstallationConfigMeta:
         server tool wrapper classes) or `ConfigMeta' mappings, defining
         the types of MCP server tool wrappers which can be configured.
 
+    'skill_configs'
+        a list consisting of strings (importable dotted names of skill
+        config classes) or `ConfigMeta' mappings, defining the types
+        of skills which can be configured.
+
     'agent_configs'
         a list consisting of strings (importable dotted names of agent
         config classes) or `ConfigMeta' mappings, defining the
@@ -2145,6 +2657,7 @@ class InstallationConfigMeta:
     tool_configs: list[str | ConfigMeta] = ()
     mcp_toolset_configs: list[str | ConfigMeta] = ()
     mcp_server_tool_wrappers: list[ConfigMeta] = ()
+    skill_configs: list[str | ConfigMeta] = ()
     agent_configs: list[str | ConfigMeta] = ()
     secret_sources: list[str | ConfigMeta] = ()
 
@@ -2180,6 +2693,11 @@ class InstallationConfigMeta:
                     "mcp_server_tool_wrappers",
                     (),
                 )
+            ]
+
+            config_dict["skill_configs"] = [
+                ConfigMeta.from_yaml(sc_yaml)
+                for sc_yaml in config_dict.get("skill_configs", ())
             ]
 
             config_dict["agent_configs"] = [
@@ -2230,6 +2748,11 @@ class InstallationConfigMeta:
             wrapper_klass = mstw_meta.wrapper_klass
             MCP_TOOL_CONFIG_WRAPPERS_BY_TOOL_NAME[tool_name] = wrapper_klass
 
+        self.skill_configs = list(self.skill_configs)
+        for sc_meta in self.skill_configs:
+            klass = sc_meta.config_klass
+            SKILL_CONFIG_CLASSES_BY_KIND[klass.kind] = klass
+
         self.agent_configs = list(self.agent_configs)
         for ac_meta in self.agent_configs:
             klass = ac_meta.config_klass
@@ -2269,6 +2792,10 @@ class InstallationConfigMeta:
             }
             for tool_name, wrapper_klass in mcptcw_items
         ]
+        skill_config_entries = [
+            _dotted_name(klass)
+            for klass in SKILL_CONFIG_CLASSES_BY_KIND.values()
+        ]
         agent_config_entries = [
             _dotted_name(klass)
             for klass in AGENT_CONFIG_CLASSES_BY_KIND.values()
@@ -2285,9 +2812,75 @@ class InstallationConfigMeta:
             "tool_configs": tool_config_entries,
             "mcp_toolset_configs": mcp_toolset_config_entries,
             "mcp_server_tool_wrappers": mcp_server_tool_wrapper_entries,
+            "skill_configs": skill_config_entries,
             "agent_configs": agent_config_entries,
             "secret_sources": secret_source_entries,
         }
+
+
+def _load_filesystem_skill_configs(i_config) -> SkillConfigMap:
+    fs_skill_configs = {}
+
+    skills, validation_errors = hs_discovery.discover_from_paths(
+        i_config.filesystem_skills_paths,
+    )
+    for skill in skills:
+        skill_config = FilesystemSkillConfig.from_skill(skill)
+
+        if skill_config.name not in fs_skill_configs:
+            fs_skill_configs[skill_config.name] = skill_config
+
+    for validation_error in validation_errors:
+        skill_path = validation_error.path
+        skill_name = skill_path.name
+        message = str(validation_error)
+        skill_metadata = hs_models.SkillMetadata(
+            name=skill_name,
+            description=f"Invalid filesystem skill: {skill_path}",
+        )
+        fs_skill_configs[skill_name] = FilesystemSkillConfig(
+            _skill_metadata=skill_metadata,
+            _skill_path=skill_path,
+            _validation_errors=[message],
+        )
+
+    return fs_skill_configs
+
+
+def _load_entrypoint_skill_configs() -> SkillConfigMap:
+    ep_skill_configs = {}
+
+    for skill in hs_discovery.discover_from_entrypoints():
+        feature_name = skill.state_namespace
+
+        if (
+            feature_name is not None
+            and feature_name not in AGUI_FEATURES_BY_NAME
+        ):
+            AGUI_FEATURES_BY_NAME[feature_name] = AGUI_Feature(
+                name=feature_name,
+                model_klass=skill.state_type,
+                source=AGUI_FeatureSource.SERVER,
+            )
+
+        skill_config = EntrypointSkillConfig.from_skill(skill)
+
+        if skill_config.name not in ep_skill_configs:
+            ep_skill_configs[skill_config.name] = skill_config
+
+    return ep_skill_configs
+
+
+class EnvironmentSourceType(enum.StrEnum):
+    CONFIG_YAML = "config-yaml"
+    DOT_ENV = "dot-env"
+    OS_ENV = "os-environment"
+
+
+@dataclasses.dataclass
+class EnvironmentSource:
+    source_type: EnvironmentSourceType
+    value: str | None
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -2395,7 +2988,41 @@ class InstallationConfig:
     #
     # Map values similar to 'os.environ'.
     #
+
+    # Values from installation config file.
+    _environment_from_config: dict[str, str] = _no_repr_no_compare_dict()
+
     environment: dict[str, typing.Any] = _default_dict_field()
+
+    def get_environment_sources(self, key) -> list[EnvironmentSource]:
+        """Return sources available for an environment key
+
+        First in the list will be the source whose value is used.
+        """
+        EST = EnvironmentSourceType
+        ES = EnvironmentSource
+
+        result = []
+
+        from_config = self._environment_from_config.get(key)
+
+        if from_config is not None:
+            result.append(ES(EST.CONFIG_YAML, from_config))
+
+        if self._from_dotenv is not None:
+            from_dotenv = self._from_dotenv.get(key)
+
+            if from_dotenv is not None:
+                result.append(ES(EST.DOT_ENV, from_dotenv))
+            else:  # pragma: NO COVER
+                pass
+
+        from_osenv = os.getenv(key)
+
+        if from_osenv is not None:
+            result.append(ES(EST.OS_ENV, from_osenv))
+
+        return result
 
     def get_environment(self, key, default=None):
         """Find the configured value for a given quasi-envvar"""
@@ -2455,6 +3082,45 @@ class InstallationConfig:
             }
 
         return self._agent_configs_map
+
+    # Path(s) to filesystm AI skills:  each item must be a single
+    # directory containing matching the spec:
+    # https://agentskills.io/specification
+    #
+    # or a directory whose subdirectories match that spec.
+    #
+    # Defaults to one path: './skills' (set in '__post_init__').
+    #
+    filesystem_skills_paths: list[pathlib.Path] = None
+
+    _available_filesystem_skill_configs: SkillConfigMap = None
+    _available_entrypoint_skill_configs: SkillConfigMap = None
+    _skill_configs: SkillConfigMap = None
+
+    @property
+    def available_filesystem_skill_configs(self) -> SkillConfigMap:
+        if self._available_filesystem_skill_configs is None:
+            self._available_filesystem_skill_configs = (
+                _load_filesystem_skill_configs(self)
+            )
+
+        return self._available_filesystem_skill_configs.copy()
+
+    @property
+    def available_entrypoint_skill_configs(self) -> SkillConfigMap:
+        if self._available_entrypoint_skill_configs is None:
+            self._available_entrypoint_skill_configs = (
+                _load_entrypoint_skill_configs()  # no 'self' needed
+            )
+
+        return self._available_entrypoint_skill_configs.copy()
+
+    @property
+    def skill_configs(self) -> SkillConfigMap:
+        if self._skill_configs is not None:
+            return self._skill_configs.copy()
+        else:
+            return {}
 
     #
     # Path(s) to OIDC Authentication System configs
@@ -2556,15 +3222,6 @@ class InstallationConfig:
 
         return result
 
-    # Path(s) to AI skills:  each item must be a single directory containing
-    # matching the spec:  https://agentskills.io/specification
-    #
-    # Defaults to one path: './skills' (set in '__post_init__').
-    #
-    skills_paths: list[pathlib.Path] = None
-
-    _skill_configs: dict[str, SkillConfig] = None
-
     #
     # Logfire configuration
     #
@@ -2651,6 +3308,8 @@ class InstallationConfig:
                     entry["name"]: entry.get("value") for entry in environment
                 }
 
+            # Preserve values as read for later introspection.
+            config_dict["_environment_from_config"] = environment
             config_dict["environment"] = environment
 
             hr_config_file = config_dict.pop(
@@ -2670,6 +3329,10 @@ class InstallationConfig:
                 for a_config in config_dict.get("agent_configs", ())
             ]
             config_dict["agent_configs"] = agent_configs
+
+            skill_configs = config_dict.pop("skill_configs", None)
+            if skill_configs is not None:
+                config_dict["_skill_configs"] = skill_configs
 
             logging_config_file = config_dict.pop("logging_config_file", None)
 
@@ -2771,8 +3434,8 @@ class InstallationConfig:
         if self.quizzes_paths is None:
             self.quizzes_paths = ["./quizzes"]
 
-        if self.skills_paths is None:
-            self.skills_paths = ["./skills"]
+        if self.filesystem_skills_paths is None:
+            self.filesystem_skills_paths = ["./skills"]
 
         if self._config_path is not None:
             parent_dir = self._config_path.parent
@@ -2801,11 +3464,32 @@ class InstallationConfig:
                 if quizzes_path is not None
             ]
 
-            self.skills_paths = [
+            self.filesystem_skills_paths = [
                 parent_dir / skills_path
-                for skills_path in self.skills_paths
+                for skills_path in self.filesystem_skills_paths
                 if skills_path is not None
             ]
+
+        # Resolve skills after resolving paths
+        if self._skill_configs is not None:
+            available_fs = self.available_filesystem_skill_configs
+            available_ep = self.available_entrypoint_skill_configs
+
+            fs_skills = {}
+
+            if isinstance(self._skill_configs, list):
+                for skill_config_dict in self._skill_configs:
+                    if skill_config_dict["kind"] == SkillKind.FILESYSTEM:
+                        skill_name = skill_config_dict["skill_name"]
+                        fs_skills[skill_name] = available_fs[skill_name]
+
+                ep_skills = {}
+                for skill_config_dict in self._skill_configs:
+                    if skill_config_dict["kind"] == SkillKind.ENTRYPOINT:
+                        skill_name = skill_config_dict["skill_name"]
+                        ep_skills[skill_name] = available_ep[skill_name]
+
+                self._skill_configs = ep_skills | fs_skills
 
     @property
     def as_yaml(self) -> dict:
@@ -2813,15 +3497,18 @@ class InstallationConfig:
             "id": self.id,
             "meta": self.meta.as_yaml,
             "secrets": [secret.as_yaml for secret in self.secrets],
+            # Dump the resolved version, not the original config
             "environment": self.environment,
             "haiku_rag_config_file": str(self._haiku_rag_config_file),
             "agent_configs": [ac.as_yaml for ac in self.agent_configs],
+            "filesystem_skills_paths": [
+                str(path) for path in self.filesystem_skills_paths
+            ],
             "logging_config_file": str(self._logging_config_file),
             "oidc_paths": [str(path) for path in self.oidc_paths],
             "room_paths": [str(path) for path in self.room_paths],
             "completion_paths": [str(path) for path in self.completion_paths],
             "quizzes_paths": [str(path) for path in self.quizzes_paths],
-            "skills_paths": [str(path) for path in self.skills_paths],
         }
 
         if self.logfire_config is not None:
@@ -2913,51 +3600,15 @@ class InstallationConfig:
 
         return self._completion_configs.copy()
 
-    def _load_skill_configs(self) -> dict[str, SkillConfig]:
-        skill_configs = {}
-
-        for skills_path in self.skills_paths:
-            for skill_path in _find_skill_paths(skills_path):
-                errors = skill_validator.validate(skill_path)
-                if errors:
-                    skill_name = skill_path.name
-
-                    if skill_name not in skill_configs:
-                        skill_configs[skill_name] = SkillConfig(
-                            _installation_config=self,
-                            _skill_path=skill_path,
-                            _skill_properties=None,
-                            _validation_errors=errors,
-                        )
-                else:
-                    skill_properties = skill_parser.read_properties(skill_path)
-
-                    # XXX  order of 'skill_paths' controls
-                    #      first-past-the-post for any conflict on skill ID.
-                    skill_name = skill_properties.name
-
-                    if skill_name not in skill_configs:
-                        skill_configs[skill_name] = SkillConfig(
-                            _installation_config=self,
-                            _skill_path=skill_path,
-                            _skill_properties=skill_properties,
-                        )
-
-        return skill_configs
-
-    @property
-    def skill_configs(self) -> dict[str, SkillConfig]:
-        if self._skill_configs is None:
-            self._skill_configs = self._load_skill_configs()
-
-        return self._skill_configs.copy()
-
     def reload_configurations(self):
         """Load all dependent configuration sets"""
+        self._available_filesystem_configs = _load_filesystem_skill_configs(
+            self
+        )
+        self._available_entrypoint_configs = _load_entrypoint_skill_configs()
         self._oidc_auth_system_configs = self._load_oidc_auth_system_configs()
         self._room_configs = self._load_room_configs()
         self._completion_configs = self._load_completion_configs()
-        self._skill_configs = self._load_skill_configs()
 
 
 def load_installation(config_path: pathlib.Path) -> InstallationConfig:

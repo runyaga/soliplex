@@ -1,0 +1,7 @@
+TASK: Create a DataFrame of employees with name, department, and salary.
+Data: Alice/Engineering/95000, Bob/Marketing/72000, Carol/Engineering/105000, Dave/Marketing/68000, Eve/Engineering/88000
+
+Available functions:
+- df_create(data) -> handle (int). data is a list of row dicts.
+
+Current state: No DataFrames exist.

@@ -80,7 +80,7 @@ the first attempt.
 **Prompt:** "Extract the df_filter parameters from this request: 'filter
 where amount is greater than 500'. Print the column, operator, and value."
 
-**Generated code (120B, first attempt):**
+**Generated code (120B, first attempt) -- pure Python, no host functions:**
 
 ```python
 text = 'filter where amount is greater than 500'
@@ -148,15 +148,17 @@ products = [
     {"product_name":"Chocolate","category":"Food","amount":600,"quantity":15}
 ]
 
-h = df_create(products)
-filtered = df_filter(h, "amount", ">", 500)
+h = df_create(products)                                  # HOST: create DataFrame -> handle 0
+filtered = df_filter(h, "amount", ">", 500)              # HOST: filter rows -> handle 1
 agg_map = {"amount":"sum"}
-grouped = df_group_agg(filtered, ["category"], agg_map)
-sorted_df = df_sort(grouped, "amount", False)
-top5 = df_head(sorted_df, 5)
+grouped = df_group_agg(filtered, ["category"], agg_map)  # HOST: group + sum -> handle 2
+sorted_df = df_sort(grouped, "amount", False)             # HOST: sort desc -> handle 3
+top5 = df_head(sorted_df, 5)                              # HOST: get rows -> list of dicts
 print(top5)
-chart_handle = chart_create({"handle": sorted_df, "type": "bar",
-                             "x": "category", "y": "amount"})
+chart_handle = chart_create({"handle": sorted_df,         # HOST: render chart -> handle
+                             "type": "bar",
+                             "x": "category",
+                             "y": "amount"})
 print("Chart handle:", chart_handle)
 ```
 
@@ -195,18 +197,18 @@ products = [
     {"product_name": "Coffee Beans", "category": "Food", "base_price": 15, "units_sold": 60},
     {"product_name": "Tea", "category": "Food", "base_price": 4, "units_sold": 150}
 ]
-handle = df_create(products)
+handle = df_create(products)              # HOST: create DataFrame -> handle 0
 
 # Step 2: add revenue column
-rows = df_to_list(handle)
-revenues = []
+rows = df_to_list(handle)                 # HOST: get all rows as list of dicts
+revenues = []                             # --- pure Python from here ---
 for r in rows:
     revenues.append(r["base_price"] * r["units_sold"])
-handle = df_add_column(handle, "revenue", revenues)
+handle = df_add_column(handle, "revenue", revenues)   # HOST: add computed column
 
 # Step 3: add margin column based on category
-rows = df_to_list(handle)
-margin_vals = []
+rows = df_to_list(handle)                 # HOST: re-read rows (now includes revenue)
+margin_vals = []                          # --- pure Python: conditional logic ---
 for r in rows:
     if r["category"] == "Tech":
         factor = 0.3
@@ -215,28 +217,18 @@ for r in rows:
     else:
         factor = 0.15
     margin_vals.append(r["revenue"] * factor)
-handle = df_add_column(handle, "margin", margin_vals)
+handle = df_add_column(handle, "margin", margin_vals)  # HOST: add margin column
 
-# Step 4: filter revenue > 1000
-handle = df_filter(handle, "revenue", ">", 1000)
-
-# Step 5: drop base_price column
-handle = df_drop(handle, ["base_price"])
-
-# Step 6: rename margin to gross_profit
-handle = df_rename(handle, {"margin": "gross_profit"})
-
-# Step 7: group by category summing revenue and gross_profit
+# Steps 4-9: chained host function calls
+handle = df_filter(handle, "revenue", ">", 1000)      # HOST: filter
+handle = df_drop(handle, ["base_price"])               # HOST: drop column
+handle = df_rename(handle, {"margin": "gross_profit"}) # HOST: rename column
 agg_map = {"revenue": "sum", "gross_profit": "sum"}
-handle = df_group_agg(handle, ["category"], agg_map)
+handle = df_group_agg(handle, ["category"], agg_map)   # HOST: group + aggregate
+handle = df_sort(handle, "gross_profit", False)         # HOST: sort descending
+top = df_head(handle, 3)                               # HOST: top 3 rows
 
-# Step 8: sort by gross_profit descending
-handle = df_sort(handle, "gross_profit", False)
-
-# Step 9: top 3 categories
-top = df_head(handle, 3)
-
-# Step 10: print final report
+# Step 10: print
 print(top)
 ```
 
@@ -257,9 +249,11 @@ sum. 5) Classifies each as 'small' (< 5), 'medium' (5-15), or 'large'
 
 **Generated code (120B, self-corrected once):**
 
-First attempt hit a Monty limitation (`summary[cls] += 1` -- subscript
-store with variable key). The LLM received the error and rewrote using
-flat counter variables:
+This is **all pure Python** -- no host functions at all. It defines
+functions (`is_prime`, `fib_sequence`), uses loops, conditionals, and
+string conversion. First attempt hit a Monty limitation (`summary[cls] += 1`
+-- subscript store with variable key). The LLM received the error and
+rewrote using flat counter variables:
 
 ```python
 def is_prime(n):

@@ -15,14 +15,28 @@ CRITICAL: Do NOT invent functions. If it is not listed below, it does NOT exist.
 - df_sort(handle, column_str, ascending_bool) -> handle
 - df_group_agg(handle, group_cols_list, agg_map) -> handle  # agg_map: {"col": "sum"|"mean"|"min"|"max"|"count"}
 - df_head(handle, n_int) -> list of row dicts
+- df_tail(handle, n_int) -> list of row dicts
 - df_to_list(handle) -> list of row dicts
+- df_columns(handle) -> list of column name strings
+- df_shape(handle) -> [rows, cols]
+- df_describe(handle) -> dict of stats per numeric column
 - df_select(handle, columns_list) -> handle
 - df_drop(handle, columns_list) -> handle
 - df_rename(handle, mapping_dict) -> handle  # {"old_name": "new_name"}
 - df_add_column(handle, name_str, values_list) -> handle
-- df_merge(handle1, handle2, on_list, how_str) -> handle  # on: ["col"], how: "inner"|"left"|"right"|"outer"
-- df_concat(handle1, handle2) -> handle
-- chart_create(handle, type_str, x_str, y_str) -> handle  # type: "bar"|"line"|"scatter"
+- df_merge(handle1, handle2, on_list, how_str) -> handle  # on: ["col"], how: "inner"|"left"
+- df_concat(handles_list) -> handle  # takes a list of handles, e.g. [0, 1]
+- df_fillna(handle, value) -> handle
+- df_nlargest(handle, n_int, column_str) -> handle
+- df_nsmallest(handle, n_int, column_str) -> handle
+- df_mean(handle, column_str) -> float
+- df_sum(handle, column_str) -> float
+- df_min(handle, column_str) -> float or str
+- df_max(handle, column_str) -> float or str
+- df_std(handle, column_str) -> float
+- df_unique(handle, column_str) -> list
+- df_value_counts(handle, column_str) -> dict
+- chart_create(config_dict) -> handle  # {"handle": 0, "type": "bar"|"line"|"scatter", "x": "col", "y": "col"}
 
 ### Pure Python is fine too:
 You can solve tasks entirely with Python lists, dicts, and loops.

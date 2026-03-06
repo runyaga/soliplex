@@ -13,6 +13,37 @@ LLM retries (up to 10 attempts).
 
 The question: **how small can the LLM be and still produce working code?**
 
+## What the LLM can call
+
+Monty supports basic Python (variables, loops, if/else, functions, dicts,
+lists) but **no imports** -- not even `math` or `collections`. To compensate,
+we inject a set of **host functions** into the Python namespace. These are
+Dart functions callable from Python as if they were built-in:
+
+```
+df_create(data_list) -> handle          # Create a DataFrame from list of dicts
+df_filter(handle, col, op, value)       # Filter rows (==, >, <, contains, etc.)
+df_sort(handle, col, ascending)         # Sort by column
+df_group_agg(handle, cols, agg_map)     # Group + aggregate (sum, mean, count...)
+df_merge(h1, h2, on_cols, how)          # Join two DataFrames
+df_rename(handle, mapping)              # Rename columns
+df_add_column(handle, name, values)     # Add computed column
+df_head(handle, n) -> list of dicts     # Get first N rows
+df_to_list(handle) -> list of dicts     # Get all rows
+chart_create(config) -> handle          # Create a chart visualization
+```
+
+Plus 17 more (`df_mean`, `df_std`, `df_nlargest`, `df_unique`, etc.).
+Full list in the [system prompt](../rooms/spike-120b/prompt.txt).
+
+A "handle" is just an integer ID. The LLM creates data with `df_create`,
+gets back handle `0`, then pipes it through transformations -- each
+returning a new handle. Think of it like Unix pipes but for DataFrames.
+
+The LLM can also skip the `df_*` API entirely and use pure Python loops
+and dicts. Both approaches work. The 20B model often prefers pure Python;
+the 120B model uses the API more idiomatically.
+
 ## Results
 
 We ran 71 trials across 9 experiment types on two model sizes.

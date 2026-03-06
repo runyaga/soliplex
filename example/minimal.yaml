@@ -209,15 +209,15 @@ agent_configs:
 # Thread peristence:  SQLAlchemy DBURIs
 #==========================================================================
 thread_persistence_dburi:
-  sync: "sqlite://"
-  async: "sqlite+aiosqlite://"
+  sync: "postgresql://soliplex:soliplex@localhost:5432/soliplex"
+  async: "postgresql+asyncpg://soliplex:soliplex@localhost:5432/soliplex"
 
 #==========================================================================
 # Authorization policy:  SQLAlchemy DBURIs
 #==========================================================================
 authorization_dburi:
-  sync: "sqlite://"
-  async: "sqlite+aiosqlite://"
+  sync: "postgresql://soliplex:soliplex@localhost:5432/soliplex"
+  async: "postgresql+asyncpg://soliplex:soliplex@localhost:5432/soliplex"
 
 #==========================================================================
 # OIDC authentication provider configuration
@@ -265,6 +265,8 @@ room_paths:
   - "./rooms/faux"
   - "./rooms/quiztest"
   - "./rooms/skillstest"
+  - "./rooms/spike-20b"
+  - "./rooms/spike-120b"
 
 #==========================================================================
 # Completions configuration

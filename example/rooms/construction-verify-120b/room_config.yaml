@@ -1,0 +1,9 @@
+id: "construction-verify-120b"
+name: "Construction: Verify 120B (T5)"
+description: "Tier 5 — reverse verification of generated schedules"
+agent:
+  model_name: "gpt-oss:120b"
+  provider_type: "ollama"
+  provider_base_url: "http://bizon:11435"
+  system_prompt: "./prompt.txt"
+allow_mcp: false

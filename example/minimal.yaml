@@ -239,6 +239,15 @@ room_paths:
   - "./rooms/spike-120b"
   - "./rooms/kernel-20b"
   - "./rooms/kernel-120b"
+  - "./rooms/construction-prescriptive-20b"
+  - "./rooms/construction-prescriptive-120b"
+  - "./rooms/construction-scheduler-20b"
+  - "./rooms/construction-scheduler-120b"
+  - "./rooms/construction-dispatcher-20b"
+  - "./rooms/construction-dispatcher-120b"
+  - "./rooms/construction-recovery-20b"
+  - "./rooms/construction-recovery-120b"
+  - "./rooms/construction-verify-120b"
 #
 #==========================================================================
 # Completions configuration

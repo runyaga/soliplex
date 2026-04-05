@@ -14,6 +14,7 @@ from textual import widgets as t_widgets
 
 from soliplex.agui import parser as agui_parser
 from soliplex.config.agui import AGUI_FEATURES_BY_NAME
+from soliplex.tui import client_tools
 from soliplex.tui import rest_api
 
 
@@ -841,9 +842,21 @@ class RoomView(t_screen.Screen):
     run_agent_input: agui_core.RunAgentInput | None = None
     run_count: int = 0
 
-    def __init__(self, room_id, room_info, *args, **kwargs):
+    def __init__(
+        self,
+        room_id,
+        room_info,
+        *args,
+        local_tools: bool = False,
+        **kwargs,
+    ):
         self.room_id = room_id
         self.room_info = room_info
+        self.tool_registry = (
+            client_tools.build_default_registry()
+            if local_tools
+            else client_tools.ClientToolRegistry()
+        )
         super().__init__()
 
     @property
@@ -1040,12 +1053,16 @@ class RoomView(t_screen.Screen):
         """Get the AG-UI response in a thread."""
         self.run_count += 1
         response_content = ""
+        tool_defs = self.tool_registry.tool_definitions
 
         if self.run_agent_input is None:
             request = {
                 "name": f"{self.room_id}: {prompt}",
             }
-            new_thread = self.rest_api.post_new_thread(self.room_id, request)
+            new_thread = self.rest_api.post_new_thread(
+                self.room_id,
+                request,
+            )
 
             self.thread_id = thread_id = new_thread["thread_id"]
             self.thread_name = None
@@ -1058,9 +1075,13 @@ class RoomView(t_screen.Screen):
                 run_id=run_id,
                 state=empty_rai["state"],
                 messages=[
-                    {"id": "user_001", "role": "user", "content": prompt}
+                    {
+                        "id": "user_001",
+                        "role": "user",
+                        "content": prompt,
+                    }
                 ],
-                tools=[],
+                tools=tool_defs,
                 context=[],
                 forwarded_props={},
             )
@@ -1082,6 +1103,45 @@ class RoomView(t_screen.Screen):
                 )
             )
 
+        max_tool_depth = 10
+        for _depth in range(max_tool_depth):
+            response_content = self._stream_run(
+                thread_id,
+                run_id,
+                response,
+                response_content,
+            )
+
+            # Check for client-side tool calls to execute.
+            pending = self._extract_pending_tool_calls()
+            if not pending:
+                break
+
+            # Execute each pending tool call locally.
+            response_content = self._execute_client_tools(
+                pending,
+                response,
+                response_content,
+            )
+
+            # Resume: create a new run with tool results.
+            new_run = self.rest_api.post_new_run(
+                self.room_id,
+                thread_id,
+                request={},
+            )
+            run_id = new_run["run_id"]
+            self.run_agent_input.parent_run_id = new_run["parent_run_id"]
+            self.run_agent_input.run_id = run_id
+
+    def _stream_run(
+        self,
+        thread_id: str,
+        run_id: str,
+        response: Response,
+        response_content: str,
+    ) -> str:
+        """Stream a single AG-UI run, updating the response widget."""
         event_log = []
 
         esp = agui_parser.EventStreamParser(
@@ -1100,7 +1160,7 @@ class RoomView(t_screen.Screen):
             if line:
                 decoded = line.decode("utf-8")
 
-                if decoded.startswith(":"):  # comment, i.e., keepalive
+                if decoded.startswith(":"):
                     continue
 
                 if decoded.startswith("data: "):
@@ -1110,57 +1170,134 @@ class RoomView(t_screen.Screen):
                 event = agui_parser.agui_event_from_json(chunk)
                 esp(event)
 
-                if chunk["type"] == "THINKING_START":
-                    response_content += "\n\n** thinking **\n\n"
+                response_content = self._render_event(
+                    chunk,
+                    response_content,
+                )
 
-                elif chunk["type"] == "THINKING_TEXT_MESSAGE_CONTENT":
-                    response_content += chunk["delta"]
+                self.app.call_from_thread(
+                    response.update,
+                    response_content,
+                )
 
-                elif chunk["type"] == "TOOL_CALL_START":
-                    response_content += (
-                        f"\n\n** calling tool {chunk['toolCallName']} **"
-                    )
+        new_rai = esp.as_run_agent_input
+        self.run_agent_input.messages[:] = new_rai.messages[:]
+        self.run_agent_input.state = new_rai.state
 
-                elif chunk["type"] == "TEXT_MESSAGE_START":
-                    response_content += "\n\n** response **\n\n"
+        return response_content
 
-                elif chunk["type"] == "TEXT_MESSAGE_CONTENT":
-                    response_content += chunk["delta"]
+    def _render_event(
+        self,
+        chunk: dict,
+        response_content: str,
+    ) -> str:
+        """Append a human-readable representation of an SSE event."""
+        event_type = chunk["type"]
 
-                elif chunk["type"] == "STATE_SNAPSHOT" and self.verbose:
-                    response_content += (
-                        f"\n\n** state snapshot **\n\n{chunk['snapshot']}\n\n"
-                    )
+        if event_type == "THINKING_START":
+            response_content += "\n\n** thinking **\n\n"
 
-                elif chunk["type"] == "STATE_DELTA" and self.verbose:
-                    response_content += (
-                        f"\n\n** state delta **\n\n{chunk['delta']}\n\n"
-                    )
+        elif event_type == "THINKING_TEXT_MESSAGE_CONTENT":
+            response_content += chunk["delta"]
 
-                elif chunk["type"] == "ACTIVITY_SNAPSHOT" and self.verbose:
-                    response_content += (
-                        f"\n\n** activity snapshot "
-                        f"**\n\n{chunk['content']}\n\n"
-                    )
+        elif event_type == "TOOL_CALL_START":
+            response_content += (
+                f"\n\n** calling tool {chunk['toolCallName']} **"
+            )
 
-                elif chunk["type"] == "ACTIVITY_DELTA" and self.verbose:
-                    response_content += (
-                        f"\n\n** activity delta**\n\n{chunk['patch']}\n\n"
-                    )
+        elif event_type == "TEXT_MESSAGE_START":
+            response_content += "\n\n** response **\n\n"
 
-                elif chunk["type"] == "RUN_FINISHED":
-                    response_content += "\n\n** done **"
+        elif event_type == "TEXT_MESSAGE_CONTENT":
+            response_content += chunk["delta"]
 
-                elif chunk["type"] == "RUN_ERROR":
-                    response_content += (
-                        f"\n\n** error **\n\n{chunk['message']}"
-                    )
+        elif event_type == "STATE_SNAPSHOT" and self.verbose:
+            response_content += (
+                f"\n\n** state snapshot **\n\n{chunk['snapshot']}\n\n"
+            )
 
-                self.app.call_from_thread(response.update, response_content)
+        elif event_type == "STATE_DELTA" and self.verbose:
+            response_content += (
+                f"\n\n** state delta **\n\n{chunk['delta']}\n\n"
+            )
 
-        new_run_agent_input = esp.as_run_agent_input
-        self.run_agent_input.messages[:] = new_run_agent_input.messages[:]
-        self.run_agent_input.state = new_run_agent_input.state
+        elif event_type == "ACTIVITY_SNAPSHOT" and self.verbose:
+            response_content += (
+                f"\n\n** activity snapshot **\n\n{chunk['content']}\n\n"
+            )
+
+        elif event_type == "ACTIVITY_DELTA" and self.verbose:
+            response_content += (
+                f"\n\n** activity delta**\n\n{chunk['patch']}\n\n"
+            )
+
+        elif event_type == "RUN_FINISHED":
+            response_content += "\n\n** done **"
+
+        elif event_type == "RUN_ERROR":
+            response_content += f"\n\n** error **\n\n{chunk['message']}"
+
+        return response_content
+
+    def _extract_pending_tool_calls(
+        self,
+    ) -> list[agui_core.ToolCall]:
+        """Find tool calls with no corresponding ToolMessage result."""
+        tool_call_ids_with_results = set()
+        all_tool_calls = []
+
+        for msg in self.run_agent_input.messages:
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                all_tool_calls.extend(msg.tool_calls)
+            if hasattr(msg, "tool_call_id"):
+                tool_call_ids_with_results.add(msg.tool_call_id)
+
+        pending = []
+        for tc in all_tool_calls:
+            if (
+                tc.id not in tool_call_ids_with_results
+                and self.tool_registry.contains(tc.function.name)
+            ):
+                pending.append(tc)
+
+        return pending
+
+    def _execute_client_tools(
+        self,
+        pending: list[agui_core.ToolCall],
+        response: Response,
+        response_content: str,
+    ) -> str:
+        """Execute pending tool calls and append ToolMessages."""
+        for tc in pending:
+            name = tc.function.name
+            args = tc.function.arguments
+
+            response_content += f"\n\n** executing tool {name} locally **"
+            self.app.call_from_thread(
+                response.update,
+                response_content,
+            )
+
+            try:
+                result = self.tool_registry.execute(name, args)
+            except Exception as exc:
+                result = f"Error: {exc}"
+
+            tool_msg = agui_core.ToolMessage(
+                id=f"tool-result-{tc.id}",
+                tool_call_id=tc.id,
+                content=result,
+            )
+            self.run_agent_input.messages.append(tool_msg)
+
+            response_content += f"\n** tool result: {result} **"
+            self.app.call_from_thread(
+                response.update,
+                response_content,
+            )
+
+        return response_content
 
 
 class RoomListView(t_screen.Screen):
@@ -1202,7 +1339,11 @@ class RoomListView(t_screen.Screen):
     ) -> None:
         room_id = event.button.name
         room_info = self.rooms[room_id]
-        room_view = RoomView(room_id, room_info)
+        room_view = RoomView(
+            room_id,
+            room_info,
+            local_tools=self.app.local_tools,
+        )
         await self.app.push_screen(room_view)
 
 
@@ -1331,11 +1472,13 @@ class SoliplexTUI(t_app.App):
         self,
         soliplex_url: str = "http://localhost:8000",
         verbose: bool = False,
+        local_tools: bool = False,
         *args,
         **kw,
     ):
         self.soliplex_url = soliplex_url
         self.verbose = verbose
+        self.local_tools = local_tools
         self.rest_api = rest_api.TUI_REST_API(soliplex_url)
         self._oidc_providers = None
 

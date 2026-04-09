@@ -38,10 +38,16 @@ def tui(
     version: bool = typer.Option(None, "--version", "-V"),
     soliplex_url: str = BASE_URL,
     verbose: bool = typer.Option(False, "--verbose", "-v"),
+    local_tools: bool = typer.Option(
+        False,
+        "--local-tools",
+        help="Enable client-side tool execution.",
+    ),
 ):
     tui_app = main.SoliplexTUI(
         soliplex_url=soliplex_url,
         verbose=verbose,
+        local_tools=local_tools,
     )
 
     tui_app.run()

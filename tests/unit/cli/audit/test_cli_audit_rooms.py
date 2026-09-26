@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest import mock
 
 import pytest
+from haiku.rag.store import exceptions as hr_store_exc
 
 from soliplex.cli.audit import rooms as audit_rooms
 from soliplex.config import rag as config_rag
@@ -109,6 +110,23 @@ def test__count_rag_documents(w_count, exp_result):
 
     assert found == exp_result
     rag_a.count_documents.assert_awaited_once_with()
+
+
+def test__count_rag_documents_w_unmigrated_db():
+    # haiku.rag >= 0.89 refuses to open an unmigrated database, even
+    # read-only; the audit must pass on the remedy the error names.
+    message = (
+        "Database requires migration from 0.87.0 to 0.89.0. "
+        "1 migration(s) pending. Run 'haiku-rag migrate' to upgrade."
+    )
+    rag = mock.AsyncMock()
+    rag.__aenter__.side_effect = hr_store_exc.MigrationRequiredError(message)
+
+    display, error = audit_rooms._count_rag_documents(rag)
+
+    assert error == message
+    assert display == f"ERROR: {message}"
+    assert "haiku-rag migrate" in error
 
 
 @pytest.mark.parametrize(

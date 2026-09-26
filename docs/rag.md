@@ -34,6 +34,18 @@ See the `haiku.rag` documentation to determine:
 
 - [How to configure `haiku-rag` to run in "remote processing" mode?](https://ggozad.github.io/haiku.rag/remote-processing/)
 
+### Upgrading existing databases
+
+Soliplex requires `haiku-rag` 0.89, which refuses to open a database written
+by an earlier release, even read-only, until it is migrated.  With every
+process using it stopped, run `haiku-rag migrate --db <path>` once per
+database, using a `haiku-rag` of the same version; `soliplex-cli audit rooms`
+reports any database still needing it.  Databases from releases before 0.89
+store the full `haiku-rag` configuration, credentials included: see the
+`haiku-rag` 0.89.0
+[changelog](https://github.com/ggozad/haiku.rag/blob/main/CHANGELOG.md)
+for purging old table versions afterwards.
+
 ## Adding a single document
 
 ```bash

@@ -284,12 +284,23 @@ def ask_remote():
         yield patched
 
 
+def _plain(text: str) -> str:
+    """Rich error text without ANSI styling, panel borders or wrapping.
+
+    CI forces color and a narrow terminal, so the message can arrive
+    styled and split across the lines of a boxed panel.
+    """
+    for border in "│╭╮╰╯─":
+        text = text.replace(border, " ")
+    return " ".join(click.unstyle(text).split())
+
+
 @pytest.mark.parametrize("args", [["room"], ["install.yaml", "room", "hi"]])
 def test_ask_remote_w_bad_arguments(cli_runner, ask_remote, args):
     result = cli_runner.invoke(cli_ask.app, ["--url", URL, *args])
 
     assert result.exit_code == 2
-    assert "With '--url'" in result.stderr
+    assert "With '--url'" in _plain(result.stderr)
     ask_remote.assert_not_called()
 
 

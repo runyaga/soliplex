@@ -37,11 +37,19 @@ class TUI_REST_API:
         return f"{self.api_base}/v1"
 
     @property
-    def api_v1_headers(self) -> dict[str, str]:
+    def access_token(self) -> str | None:
         token_data = self.oidc_token_data
 
         if token_data is not None:
-            access_token = token_data["access_token"]
+            return token_data["access_token"]
+
+        return None
+
+    @property
+    def api_v1_headers(self) -> dict[str, str]:
+        access_token = self.access_token
+
+        if access_token is not None:
             return {"Authorization": f"Bearer {access_token}"}
         else:
             return {}

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import enum
 import fnmatch
 import json
 import os
@@ -43,6 +44,7 @@ import shlex
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import typing
 import uuid
@@ -83,7 +85,15 @@ _WINDOWS_SWITCH = re.compile(r"/[^\\/]*")
 
 
 class ClientToolsError(Exception):
-    """A client-tools run which could not complete"""
+    """A client-tools run which could not complete
+
+    When raised from 'run_loop', 'result' is the 'LoopResult' so far:  its
+    'run_input' is the last consistent history (every tool call in it has
+    its result), so a client can carry on from there without repeating a
+    call which already ran.
+    """
+
+    result: LoopResult | None = None
 
 
 class PathRefused(ValueError):
@@ -125,7 +135,18 @@ class MaxTurnsExceeded(ClientToolsError):
         )
 
 
-class CommandCancelled(ClientToolsError):
+class Cancelled(ClientToolsError):
+    """The caller cancelled a client tool call;  'run_loop' stops
+
+    'call_outcome' is the error the cancelled call's result reports.
+    """
+
+    call_outcome = "Cancelled"
+
+
+class CommandCancelled(Cancelled):
+    call_outcome = "Cancelled while it ran:  the command was killed"
+
     def __init__(self):
         super().__init__(
             "Cancelled while running a client tool call (it was killed)",
@@ -139,6 +160,18 @@ class HTTPFailure(ClientToolsError):
             f"HTTP {response.status_code} from {response.url}: "
             f"{response.text}",
         )
+
+
+class TransportFailure(ClientToolsError):
+    def __init__(self, exc: httpx.HTTPError):
+        super().__init__(f"Could not talk to the server: {exc!r}")
+
+
+class ConfirmationCancelled(Cancelled):
+    call_outcome = "Cancelled before it could run"
+
+    def __init__(self):
+        super().__init__("Cancelled while confirming a client tool call")
 
 
 class RunFailed(ClientToolsError):
@@ -867,6 +900,202 @@ def parse_tool_args(arguments: str) -> typing.Any:
 Confirm = abc.Callable[[str, typing.Any], bool]
 
 
+class Approval(enum.Enum):
+    """A user's answer to 'run this tool call?'"""
+
+    DECLINE = "decline"
+    RUN_ONCE = "run"
+    RUN_ALL = "run-all"  # this call, and every later one this session
+
+    @classmethod
+    def of(cls, answer: typing.Any) -> Approval:
+        """An 'Approval', from one or from a yes / no (e.g., None:  no)"""
+        if isinstance(answer, cls):
+            return answer
+
+        return cls.RUN_ONCE if answer else cls.DECLINE
+
+
+Reply = abc.Callable[[Approval | bool | None], None]
+
+AUTO_APPROVE_NOTICE = "auto-approve ON: commands run without asking"
+
+
+@dataclasses.dataclass
+class AutoApprove:
+    """Whether client tool calls run without asking, for a UI's session
+
+    On from the start ('enabled'), or once the user answers 'RUN_ALL';
+    'on_enabled' is called then (from the thread asking), e.g. for the UI
+    to show 'AUTO_APPROVE_NOTICE' for the rest of the session.  Only the
+    question goes:  the path check, the scrubbed environment, the timeout
+    and the tool log apply as ever.
+    """
+
+    enabled: bool = False
+    on_enabled: abc.Callable[[], None] | None = None
+
+    def enable(self) -> None:
+        if self.enabled:
+            return
+
+        self.enabled = True
+
+        if self.on_enabled is not None:
+            self.on_enabled()
+
+
+def describe_tool_call(name: str, args: typing.Any) -> str:
+    """One line saying what a tool call would do, for a confirmation"""
+    if name == SHELL_TOOL.name and isinstance(args, dict):
+        return f"{name}: {args.get('command')}"
+
+    return f"{name}: {json.dumps(args)}"
+
+
+#   How much of a call's output a UI shows:  its first lines, cut short.
+PREVIEW_LINES = 20
+PREVIEW_LINE_CHARS = 200
+
+
+def _preview(text: str, max_lines: int) -> list[str]:
+    lines = text.splitlines()
+    shown = [
+        line
+        if len(line) <= PREVIEW_LINE_CHARS
+        else line[:PREVIEW_LINE_CHARS] + " [...]"
+        for line in lines[:max_lines]
+    ]
+
+    if len(lines) > max_lines:
+        shown.append(f"[... {len(lines) - max_lines} more lines]")
+
+    return shown
+
+
+def describe_tool_result(record: ToolCallRecord, result: dict) -> str:
+    """A few words saying how a tool call ended, e.g. 'ran, exit code 0'
+
+    Made of fixed words (and the exit code) only:  nothing the model or
+    the command chose.
+    """
+    if result.get("killed"):
+        return "killed while it ran (it may have made changes)"
+
+    if result.get("error"):
+        return "not run"
+
+    if result.get("timed_out"):
+        return "ran, and timed out"
+
+    return f"ran, exit code {record.exit_code}"
+
+
+def render_tool_result(
+    record: ToolCallRecord,
+    result: dict,
+    *,
+    max_lines: int = PREVIEW_LINES,
+) -> str:
+    """Markdown for a UI's chat:  the call, how it ended, and its output
+
+    A heading of fixed words ('describe_tool_result'), then a code block
+    holding everything the model or the command chose -- the call itself,
+    why it did not run, and the first 'max_lines' lines of each of stdout
+    and stderr (each line cut at 'PREVIEW_LINE_CHARS') -- behind a fence
+    longer than any run of backquotes in it, so none of it is markup.
+    """
+    heading = (
+        f"** client tool call -- {describe_tool_result(record, result)} **"
+    )
+
+    if record.name == SHELL_TOOL.name and isinstance(record.args, dict):
+        call = [f"$ {record.args.get('command')}"]
+    else:
+        call = [describe_tool_call(record.name, record.args)]
+
+    block = _preview("\n".join(call), max_lines)
+
+    if result.get("error"):
+        block.append(f"[error] {result['error']}")
+
+    for stream in ("stdout", "stderr"):
+        shown = _preview(result.get(stream) or "", max_lines)
+
+        if shown:
+            block.extend([f"[{stream}]", *shown])
+
+    if result.get("truncated"):
+        block.append("[output truncated before it reached the model]")
+
+    body = "\n".join(block)
+    longest = max(
+        (len(run) for run in re.findall(r"`+", body)),
+        default=0,
+    )
+    fence = "`" * max(3, longest + 1)
+
+    return f"\n\n{heading}\n\n{fence}text\n{body}\n{fence}"
+
+
+def confirm_via_callback(
+    request: abc.Callable[[str, typing.Any, Reply], None],
+    *,
+    is_cancelled: abc.Callable[[], bool] = lambda: False,
+    poll_secs: float = 0.1,
+    auto_approve: AutoApprove | None = None,
+) -> Confirm:
+    """Adapt a callback-style confirmation (e.g., a UI dialog) to 'Confirm'
+
+    'run_loop' asks for confirmation synchronously, from the thread it
+    runs in;  a UI answers later, on its own thread.  The returned
+    'Confirm' calls 'request(name, args, reply)' (which should show the
+    question and return at once) and waits until 'reply' is called with
+    the answer.
+
+    If 'is_cancelled()' is true (e.g., the UI is shutting down) before
+    asking, while waiting, or once answered, it raises
+    'ConfirmationCancelled', which ends 'run_loop':  a cancelled caller
+    never runs a call, whatever the answer.
+
+    The answer is an 'Approval' (or a yes / no).  With 'auto_approve',
+    'RUN_ALL' enables it, and once it is enabled nothing is asked:  every
+    call is approved (unless cancelled).  Without, 'RUN_ALL' is 'RUN_ONCE'.
+    """
+
+    def confirm(name: str, args: typing.Any) -> bool:
+        if is_cancelled():
+            raise ConfirmationCancelled()
+
+        if auto_approve is not None and auto_approve.enabled:
+            return True
+
+        answered = threading.Event()
+        answers: list[Approval] = []
+
+        def reply(answer: Approval | bool | None) -> None:
+            answers.append(Approval.of(answer))
+            answered.set()
+
+        request(name, args, reply)
+
+        while not answered.wait(poll_secs):
+            if is_cancelled():
+                raise ConfirmationCancelled()
+
+        if is_cancelled():
+            raise ConfirmationCancelled()
+
+        (answer,) = answers
+
+        if answer is Approval.RUN_ALL and auto_approve is not None:
+            auto_approve.enable()
+
+        return answer is not Approval.DECLINE
+
+    return confirm
+
+
 def execute_tool_call(
     name: str,
     args: typing.Any,
@@ -1025,19 +1254,24 @@ class SoliplexClient:
             response.read()
             raise HTTPFailure(response)
 
-    def new_thread(self, metadata: dict | None = None) -> dict:
-        body = {"metadata": metadata} if metadata else {}
-        response = self.http.post(self.agui_url, json=body)
+    def _post(self, url: str, body: dict) -> dict:
+        try:
+            response = self.http.post(url, json=body)
+        except httpx.HTTPError as exc:
+            raise TransportFailure(exc) from exc
+
         self._check(response)
         return response.json()
 
+    def new_thread(self, metadata: dict | None = None) -> dict:
+        body = {"metadata": metadata} if metadata else {}
+        return self._post(self.agui_url, body)
+
     def new_run(self, thread_id: str, parent_run_id: str) -> dict:
-        response = self.http.post(
+        return self._post(
             f"{self.agui_url}/{thread_id}",
-            json={"parent_run_id": parent_run_id},
+            {"parent_run_id": parent_run_id},
         )
-        self._check(response)
-        return response.json()
 
     def stream_run(
         self,
@@ -1045,16 +1279,20 @@ class SoliplexClient:
     ) -> abc.Iterator[agui_core.Event]:
         url = f"{self.agui_url}/{run_input.thread_id}/{run_input.run_id}"
 
-        with self.http.stream(
-            "POST",
-            url,
-            json=run_input.model_dump(mode="json", by_alias=True),
-            headers={"Accept": "text/event-stream"},
-        ) as response:
-            self._check(response)
+        try:
+            with self.http.stream(
+                "POST",
+                url,
+                json=run_input.model_dump(mode="json", by_alias=True),
+                headers={"Accept": "text/event-stream"},
+            ) as response:
+                self._check(response)
 
-            for event_json in iter_sse_json(response.iter_lines()):
-                yield agui_parser.agui_event_from_json(event_json)
+                for event_json in iter_sse_json(response.iter_lines()):
+                    yield agui_parser.agui_event_from_json(event_json)
+
+        except httpx.HTTPError as exc:  # e.g., the read timed out
+            raise TransportFailure(exc) from exc
 
 
 def initial_run_input(
@@ -1082,6 +1320,11 @@ def initial_run_input(
 #
 #   Run loop
 #
+#   The state sent back after a run whose 'STATE_DELTA's could not be
+#   applied (and no 'STATE_SNAPSHOT' healed them):  see #1260.
+INVALID_STATE = {"error": "'STATE_DELTA' without final 'STATE_SNAPSHOT'"}
+
+
 @dataclasses.dataclass
 class ToolCallRecord:
     name: str
@@ -1162,6 +1405,9 @@ def _parse_run(
     if esp.active_tool_calls:
         raise IncompleteToolCall()
 
+    if esp.invalid_state_deltas:  # see #1260
+        esp.state = dict(INVALID_STATE)
+
     return esp.as_run_agent_input
 
 
@@ -1175,6 +1421,7 @@ def run_loop(
     max_turns_option: str | None = None,
     confirm: Confirm | None = None,
     on_event: abc.Callable[[agui_core.Event], None] | None = None,
+    on_tool_result: (abc.Callable[[ToolCallRecord, dict], None] | None) = None,
     tool_log: ToolLog | None = None,
 ) -> LoopResult:
     """Run 'run_input', executing client tool calls, until a final answer
@@ -1191,11 +1438,50 @@ def run_loop(
     not know still gets a result (an error), so the history stays
     consistent.
 
-    Returns the result, whose 'run_input' is the final history (e.g., for
-    the TUI's next prompt).
-    """
-    result = LoopResult(thread_id=run_input.thread_id)
+    'on_event' sees every event of every run;  'on_tool_result' each
+    executed (or refused) call and its result, e.g. for a UI to show.
 
+    Returns the result, whose 'run_input' is the final history (e.g., for
+    the TUI's next prompt).  A 'ClientToolsError' carries the result so
+    far as its 'result' (see there).
+    """
+    result = LoopResult(thread_id=run_input.thread_id, run_input=run_input)
+
+    try:
+        _run_loop(
+            result,
+            client,
+            run_input,
+            context,
+            tools=tools,
+            max_turns=max_turns,
+            max_turns_option=max_turns_option,
+            confirm=confirm,
+            on_event=on_event,
+            on_tool_result=on_tool_result,
+            tool_log=tool_log,
+        )
+    except ClientToolsError as exc:
+        exc.result = result
+        raise
+
+    return result
+
+
+def _run_loop(
+    result: LoopResult,
+    client: SoliplexClient,
+    run_input: agui_core.RunAgentInput,
+    context: ToolContext,
+    *,
+    tools: ClientTools,
+    max_turns: int,
+    max_turns_option: str | None,
+    confirm: Confirm | None,
+    on_event: abc.Callable[[agui_core.Event], None] | None,
+    on_tool_result: abc.Callable[[ToolCallRecord, dict], None] | None,
+    tool_log: ToolLog | None,
+) -> None:
     turn = 0
 
     while True:
@@ -1214,21 +1500,32 @@ def run_loop(
                 and message.id not in previous_ids
             )
             result.run_input = run_input
-            return result
+            return
 
         if turn >= max_turns:
             raise MaxTurnsExceeded(max_turns, max_turns_option)
 
+        cancelled = None
+
         for call in pending:
             args = parse_tool_args(call.function.arguments)
             started = time.monotonic()
-            tool_result = execute_tool_call(
-                call.function.name,
-                args,
-                context,
-                tools=tools,
-                confirm=confirm,
-            )
+
+            if cancelled is not None:  # answer the rest, but run nothing
+                tool_result = _not_run(ConfirmationCancelled.call_outcome)
+            else:
+                try:
+                    tool_result = execute_tool_call(
+                        call.function.name,
+                        args,
+                        context,
+                        tools=tools,
+                        confirm=confirm,
+                    )
+                except Cancelled as exc:  # in confirming, or while it ran
+                    cancelled = exc
+                    tool_result = _not_run(exc.call_outcome)
+                    tool_result["killed"] = isinstance(exc, CommandCancelled)
 
             if tool_log is not None:
                 tool_log.record(
@@ -1239,13 +1536,16 @@ def run_loop(
                     duration_secs=time.monotonic() - started,
                 )
 
-            result.tool_calls.append(
-                ToolCallRecord(
-                    name=call.function.name,
-                    args=args,
-                    exit_code=tool_result["exit_code"],
-                ),
+            record = ToolCallRecord(
+                name=call.function.name,
+                args=args,
+                exit_code=tool_result["exit_code"],
             )
+            result.tool_calls.append(record)
+
+            if on_tool_result is not None:
+                on_tool_result(record, tool_result)
+
             run_input.messages.append(
                 agui_core.ToolMessage(
                     id=uuid.uuid4().hex,
@@ -1253,6 +1553,13 @@ def run_loop(
                     content=tool_result_content(tool_result),
                 ),
             )
+
+        # Every call has its result:  a consistent history to carry on
+        # from, should what follows fail.
+        result.run_input = run_input
+
+        if cancelled is not None:
+            raise cancelled
 
         new_run = client.new_run(
             run_input.thread_id,

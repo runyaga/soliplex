@@ -376,8 +376,9 @@ is never repeated behind the user's back.
   command runs) the command is killed, with every process it started,
   before `ask` exits. A command which already finished may have left
   background processes running (`server &`); those are not tracked.
-- **The CLI does not confirm unless `--confirm` is given;** the TUI,
-  when it advertises client tools, always confirms.
+- **The CLI does not confirm unless `--confirm` is given;** the TUI
+  confirms unless auto-approve is on (`--auto-approve`, or **Run all**;
+  see [Auto-approve](../tui.md#auto-approve)).
 - **The per-run limit is 50 model requests**, from pydantic-ai's default
   usage limit; a run which needs more fails.
 - **Long output is capped** (16 KiB per stream) before it reaches the

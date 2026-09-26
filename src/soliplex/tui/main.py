@@ -1,4 +1,6 @@
+import dataclasses
 import json
+import pathlib
 
 import requests
 import textual
@@ -11,6 +13,7 @@ from textual import reactive as t_reactive
 from textual import screen as t_screen
 from textual import widget as t_widget
 from textual import widgets as t_widgets
+from textual import worker as t_worker
 
 from soliplex.agui import client_tools
 from soliplex.agui import parser as agui_parser
@@ -165,6 +168,76 @@ class OIDCProviderSelectView(t_screen.Screen):
             self.dismiss((token_url, token_data))
         else:
             self.dismiss(None)
+
+
+class ConfirmToolCallDialog(t_screen.ModalScreen[client_tools.Approval]):
+    """Ask before a client tool call runs on this machine
+
+    Dismisses with a 'client_tools.Approval':  run it once, run it and
+    every later call this session ("Run all":  auto-approve), or decline
+    (the default).
+    """
+
+    BINDINGS = [
+        t_binding.Binding("y", "run", "Run"),
+        t_binding.Binding("a", "run_all", "Run all"),
+        t_binding.Binding("n,escape", "decline", "Decline"),
+    ]
+
+    DEFAULT_CSS = """
+    ConfirmToolCallDialog {
+        align: center middle;
+    }
+
+    ConfirmToolCallDialog > Vertical {
+        width: 80%;
+        height: auto;
+        border: thick $warning;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    ConfirmToolCallDialog Horizontal {
+        height: auto;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(self, description: str, root, *args, **kwargs):
+        self.description = description
+        self.root = root
+        super().__init__(*args, **kwargs)
+
+    def compose(self) -> t_app.ComposeResult:
+        with t_containers.Vertical():
+            yield t_widgets.Label(
+                "The model wants to run this on THIS machine:",
+            )
+            yield t_widgets.Static(self.description, markup=False)
+            yield t_widgets.Static(f"in {self.root}", markup=False)
+            with t_containers.Horizontal():
+                yield t_widgets.Button("Run (y)", id="run", variant="warning")
+                yield t_widgets.Button(
+                    "Run all (a)",
+                    id="run-all",
+                    variant="error",
+                )
+                yield t_widgets.Button("Decline (n)", id="decline")
+
+    def on_mount(self) -> None:
+        self.query_one("#decline").focus()
+
+    def on_button_pressed(self, event: t_widgets.Button.Pressed) -> None:
+        self.dismiss(client_tools.Approval(event.button.id))
+
+    def action_run(self) -> None:
+        self.dismiss(client_tools.Approval.RUN_ONCE)
+
+    def action_run_all(self) -> None:
+        self.dismiss(client_tools.Approval.RUN_ALL)
+
+    def action_decline(self) -> None:
+        self.dismiss(client_tools.Approval.DECLINE)
 
 
 class EditRunMetadataDialog(t_screen.Screen):
@@ -1045,7 +1118,6 @@ class RoomView(t_screen.Screen):
     def send_agui_prompt(self, prompt: str, response: Response) -> None:
         """Get the AG-UI response in a thread."""
         self.run_count += 1
-        response_content = ""
 
         if self.run_agent_input is None:
             request = {
@@ -1088,87 +1160,138 @@ class RoomView(t_screen.Screen):
                 )
             )
 
-        event_log = []
+        # Every prompt advertises the client tools (if enabled), including
+        # one in a thread loaded from the server (whose input may not).
+        tools = self.app.client_tools if self.app.client_tools_enabled else {}
+        self.run_agent_input.tools = client_tools.agui_tools(tools)
 
-        esp = agui_parser.EventStreamParser(
-            self.run_agent_input,
-            event_log=event_log,
-        )
+        response_content = ""
 
-        streaming_response = self.rest_api.post_start_run(
-            self.room_id,
-            thread_id,
-            run_id,
-            self.run_agent_input,
-        )
-
-        sse_events = client_tools.iter_sse_json(
-            streaming_response.iter_lines(),
-        )
-
-        for chunk in sse_events:
-            event = agui_parser.agui_event_from_json(chunk)
-            esp(event)
-
-            if chunk["type"] == "THINKING_START":
-                response_content += "\n\n** thinking **\n\n"
-
-            elif chunk["type"] == "THINKING_TEXT_MESSAGE_CONTENT":
-                response_content += chunk["delta"]
-
-            if chunk["type"] == "REASONING_START":
-                response_content += "\n\n** reasoning **\n\n"
-
-            elif chunk["type"] == "REASONING_MESSAGE_CONTENT":
-                response_content += chunk["delta"]
-
-            elif chunk["type"] == "TOOL_CALL_START":
-                response_content += (
-                    f"\n\n** calling tool {chunk['toolCallName']} **"
-                )
-
-            elif chunk["type"] == "TEXT_MESSAGE_START":
-                response_content += "\n\n** response **\n\n"
-
-            elif chunk["type"] == "TEXT_MESSAGE_CONTENT":
-                response_content += chunk["delta"]
-
-            elif chunk["type"] == "STATE_SNAPSHOT" and self.verbose:
-                response_content += (
-                    f"\n\n** state snapshot **\n\n{chunk['snapshot']}\n\n"
-                )
-
-            elif chunk["type"] == "STATE_DELTA" and self.verbose:
-                response_content += (
-                    f"\n\n** state delta **\n\n{chunk['delta']}\n\n"
-                )
-
-            elif chunk["type"] == "ACTIVITY_SNAPSHOT" and self.verbose:
-                response_content += (
-                    f"\n\n** activity snapshot **\n\n{chunk['content']}\n\n"
-                )
-
-            elif chunk["type"] == "ACTIVITY_DELTA" and self.verbose:
-                response_content += (
-                    f"\n\n** activity delta**\n\n{chunk['patch']}\n\n"
-                )
-
-            elif chunk["type"] == "RUN_FINISHED":
-                response_content += "\n\n** done **"
-
-            elif chunk["type"] == "RUN_ERROR":
-                response_content += f"\n\n** error **\n\n{chunk['message']}"
-
+        def on_event(event: agui_core.Event) -> None:
+            nonlocal response_content
+            chunk = event.model_dump(mode="json", by_alias=True)
+            response_content += self._render_chunk(chunk)
             self.app.call_from_thread(response.update, response_content)
 
-        if esp.invalid_state_deltas:  # see #1260
-            esp.state = {
-                "error": "'STATE_DELTA' without final 'STATE_SNAPSHOT'",
-            }
+        def on_tool_result(record, tool_result) -> None:
+            nonlocal response_content
+            response_content += client_tools.render_tool_result(
+                record,
+                tool_result,
+            )
+            self.app.call_from_thread(response.update, response_content)
 
-        new_run_agent_input = esp.as_run_agent_input
-        self.run_agent_input.messages[:] = new_run_agent_input.messages[:]
-        self.run_agent_input.state = new_run_agent_input.state
+        worker = t_worker.get_current_worker()
+
+        def is_cancelled() -> bool:
+            return worker.is_cancelled
+
+        confirm = client_tools.confirm_via_callback(
+            self._request_confirmation,
+            is_cancelled=is_cancelled,
+            auto_approve=self.app.auto_approve,
+        )
+        # A command running when the worker is cancelled (e.g., on quit)
+        # is killed.
+        tool_context = dataclasses.replace(
+            self.app.tool_context,
+            is_cancelled=is_cancelled,
+        )
+
+        try:
+            with client_tools.SoliplexClient(
+                self.rest_api.soliplex_url,
+                self.room_id,
+                token=self.rest_api.access_token,
+            ) as client:
+                result = client_tools.run_loop(
+                    client,
+                    self.run_agent_input,
+                    tool_context,
+                    tools=tools,
+                    max_turns=self.app.max_turns,
+                    max_turns_option="--max-turns",
+                    confirm=confirm,
+                    on_event=on_event,
+                    on_tool_result=on_tool_result,
+                    tool_log=self.app.tool_log,
+                )
+
+        except client_tools.ClientToolsError as exc:
+            # Carry on from the history so far:  a call which already ran
+            # must not be asked for again.
+            self.run_agent_input = exc.result.run_input
+
+            if not isinstance(exc, client_tools.RunErrored):  # else shown
+                response_content += f"\n\n** error **\n\n{exc}"
+                self.app.call_from_thread(response.update, response_content)
+
+            return
+
+        self.run_agent_input = result.run_input
+
+    def _request_confirmation(self, name, args, reply) -> None:
+        """Ask, in a dialog, before a client tool call runs (from a thread)"""
+        dialog = ConfirmToolCallDialog(
+            client_tools.describe_tool_call(name, args),
+            root=self.app.tool_context.root,
+        )
+        self.app.call_from_thread(self.app.push_screen, dialog, reply)
+
+    def _render_chunk(self, chunk: dict) -> str:
+        """The text to add to the response for one AG-UI event"""
+        response_content = ""
+
+        if chunk["type"] == "THINKING_START":
+            response_content += "\n\n** thinking **\n\n"
+
+        elif chunk["type"] == "THINKING_TEXT_MESSAGE_CONTENT":
+            response_content += chunk["delta"]
+
+        if chunk["type"] == "REASONING_START":
+            response_content += "\n\n** reasoning **\n\n"
+
+        elif chunk["type"] == "REASONING_MESSAGE_CONTENT":
+            response_content += chunk["delta"]
+
+        elif chunk["type"] == "TOOL_CALL_START":
+            response_content += (
+                f"\n\n** calling tool {chunk['toolCallName']} **"
+            )
+
+        elif chunk["type"] == "TEXT_MESSAGE_START":
+            response_content += "\n\n** response **\n\n"
+
+        elif chunk["type"] == "TEXT_MESSAGE_CONTENT":
+            response_content += chunk["delta"]
+
+        elif chunk["type"] == "STATE_SNAPSHOT" and self.verbose:
+            response_content += (
+                f"\n\n** state snapshot **\n\n{chunk['snapshot']}\n\n"
+            )
+
+        elif chunk["type"] == "STATE_DELTA" and self.verbose:
+            response_content += (
+                f"\n\n** state delta **\n\n{chunk['delta']}\n\n"
+            )
+
+        elif chunk["type"] == "ACTIVITY_SNAPSHOT" and self.verbose:
+            response_content += (
+                f"\n\n** activity snapshot **\n\n{chunk['content']}\n\n"
+            )
+
+        elif chunk["type"] == "ACTIVITY_DELTA" and self.verbose:
+            response_content += (
+                f"\n\n** activity delta**\n\n{chunk['patch']}\n\n"
+            )
+
+        elif chunk["type"] == "RUN_FINISHED":
+            response_content += "\n\n** done **"
+
+        elif chunk["type"] == "RUN_ERROR":
+            response_content += f"\n\n** error **\n\n{chunk['message']}"
+
+        return response_content
 
 
 class RoomListView(t_screen.Screen):
@@ -1339,19 +1462,47 @@ class SoliplexTUI(t_app.App):
         self,
         soliplex_url: str = "http://localhost:8000",
         verbose: bool = False,
+        tool_context: client_tools.ToolContext | None = None,
+        client_tools_enabled: bool = True,
+        max_turns: int = client_tools.DEFAULT_MAX_TURNS,
+        tool_log: client_tools.ToolLog | None = None,
+        auto_approve: bool = False,
         *args,
         **kw,
     ):
         self.soliplex_url = soliplex_url
         self.verbose = verbose
+        # Whether, and where, the room's model may run client tools
+        # ('shell') on this machine:  after the user confirms each call,
+        # unless auto-approve is on (from the start, or once the user
+        # answers "Run all").
+        self.client_tools = client_tools.CLIENT_TOOLS
+        self.client_tools_enabled = client_tools_enabled
+        self.tool_context = tool_context or client_tools.ToolContext(
+            root=pathlib.Path.cwd(),
+        )
+        self.max_turns = max_turns
+        self.tool_log = tool_log
+        self.auto_approve = client_tools.AutoApprove(
+            enabled=auto_approve,
+            on_enabled=lambda: self.call_from_thread(self._show_auto_approve),
+        )
         self.rest_api = rest_api.TUI_REST_API(soliplex_url)
         self._oidc_providers = None
 
         super().__init__(*args, **kw)
 
+    def _show_auto_approve(self) -> None:
+        """Say, for the rest of the session, that commands run unasked"""
+        self.sub_title = client_tools.AUTO_APPROVE_NOTICE
+        self.notify(client_tools.AUTO_APPROVE_NOTICE, severity="warning")
+
     @textual.work
     async def on_mount(self) -> None:
         self.border_subtitle = self.soliplex_url
+
+        if self.client_tools_enabled and self.auto_approve.enabled:
+            self._show_auto_approve()
         self._oidc_providers = self.rest_api.get_oidc_providers()
 
         if self._oidc_providers:

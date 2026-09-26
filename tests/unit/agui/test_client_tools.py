@@ -15,6 +15,7 @@ import types
 from unittest import mock
 
 import httpx
+import markdown_it
 import pytest
 from ag_ui import core as agui_core
 from fastapi import testclient
@@ -1716,3 +1717,560 @@ def test_run_loop_end_to_end(e2e_client, root, prompt):
 
 def test_scripted_shell_room_server_tool():
     assert scripted_shell_room.server_tool() == "server-tool-ran"
+
+
+# -- confirmation helpers ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name, args, expected",
+    [
+        ("shell", {"command": "ls -la"}, "shell: ls -la"),
+        ("shell", "{bad", 'shell: "{bad"'),
+        ("other", {"a": 1}, 'other: {"a": 1}'),
+    ],
+)
+def test_describe_tool_call(name, args, expected):
+    assert client_tools.describe_tool_call(name, args) == expected
+
+
+@pytest.mark.parametrize("answer", [False, True])
+def test_confirm_via_callback_w_answer_later(answer):
+    requests = []
+
+    def request(name, args, reply):
+        requests.append((name, args))
+        # A UI answers on its own thread, after the request returns.
+        threading.Timer(0.2, reply, args=(answer,)).start()
+
+    confirm = client_tools.confirm_via_callback(request, poll_secs=0.05)
+
+    assert confirm("shell", {"command": "ls"}) is answer
+    assert requests == [("shell", {"command": "ls"})]
+
+
+def test_confirm_via_callback_w_answer_at_once():
+    confirm = client_tools.confirm_via_callback(
+        lambda name, args, reply: reply(1),
+    )
+
+    assert confirm("shell", {}) is True
+
+
+def test_confirm_via_callback_w_cancelled_before_asking():
+    request = mock.Mock()
+    confirm = client_tools.confirm_via_callback(
+        request,
+        is_cancelled=lambda: True,
+    )
+
+    with pytest.raises(client_tools.ConfirmationCancelled):
+        confirm("shell", {})
+
+    request.assert_not_called()
+
+
+def test_confirm_via_callback_w_cancelled_while_waiting():
+    checks = []
+
+    def is_cancelled():
+        checks.append(None)
+        return len(checks) > 2  # before asking;  first poll;  second poll
+
+    confirm = client_tools.confirm_via_callback(
+        lambda name, args, reply: None,  # never answers
+        is_cancelled=is_cancelled,
+        poll_secs=0.01,
+    )
+
+    with pytest.raises(client_tools.ConfirmationCancelled):
+        confirm("shell", {})
+
+    assert len(checks) == 3
+
+
+def test_confirm_via_callback_w_cancelled_once_answered():
+    cancelled = []
+
+    def request(name, args, reply):
+        cancelled.append(True)  # e.g., the UI quits as the user says yes
+        reply(True)
+
+    confirm = client_tools.confirm_via_callback(
+        request,
+        is_cancelled=lambda: bool(cancelled),
+    )
+
+    with pytest.raises(client_tools.ConfirmationCancelled):
+        confirm("shell", {})
+
+
+# -- run loop:  state, and tool result callback ------------------------------
+
+
+def test_run_loop_w_invalid_state_delta(root):
+    bad_delta = {
+        "type": "STATE_DELTA",
+        "delta": [{"op": "replace", "path": "/missing/x", "value": 1}],
+    }
+    server = ScriptedServer(
+        {RUN_ID: [_started(), bad_delta, *_text("a1", "Hi"), _finished()]},
+    )
+
+    found = _loop(server, root)
+
+    assert found.run_input.state == client_tools.INVALID_STATE
+    assert found.run_input.state is not client_tools.INVALID_STATE
+
+
+def test_run_loop_w_on_tool_result(root):
+    first = [
+        _started(),
+        *_call("c1", "shell", '{"command": "exit 4"}'),
+        _finished(),
+    ]
+    second = [
+        _started(CHILD_RUN_ID),
+        *_text("a", "ok"),
+        _finished(CHILD_RUN_ID),
+    ]
+    server = ScriptedServer(
+        {RUN_ID: first, CHILD_RUN_ID: second},
+        child_ids=[CHILD_RUN_ID],
+    )
+    on_tool_result = mock.Mock()
+
+    found = _loop(server, root, on_tool_result=on_tool_result)
+
+    (record, tool_result), _ = on_tool_result.call_args
+    assert record is found.tool_calls[0]
+    assert record.exit_code == 4
+    assert tool_result["exit_code"] == 4
+
+
+# -- run loop:  progress survives a failure ---------------------------------
+
+
+def _shell_then(second, *, commands=('{"command": "echo hi"}',)):
+    first = [_started()]
+    for index, args in enumerate(commands):
+        first += _call(f"c{index}", "shell", args)
+    first.append(_finished())
+    return ScriptedServer(
+        {RUN_ID: first, CHILD_RUN_ID: second},
+        child_ids=[CHILD_RUN_ID],
+    )
+
+
+def _results(run_input):
+    return {
+        message.tool_call_id: json.loads(message.content)
+        for message in run_input.messages
+        if isinstance(message, agui_core.ToolMessage)
+    }
+
+
+def test_run_loop_w_failed_continuation_keeps_progress(root):
+    second = [
+        _started(CHILD_RUN_ID),
+        {"type": "RUN_ERROR", "message": "boom"},
+    ]
+    server = _shell_then(second)
+
+    with pytest.raises(client_tools.RunErrored) as exc_info:
+        _loop(server, root)
+
+    progress = exc_info.value.result
+    assert progress.run_ids == [RUN_ID, CHILD_RUN_ID]
+    assert [call.exit_code for call in progress.tool_calls] == [0]
+    # The call and its result:  the next prompt will not ask for it again.
+    assert client_tools.pending_tool_calls(progress.run_input.messages) == []
+    assert _results(progress.run_input)["c0"]["stdout"].strip() == "hi"
+
+
+def test_run_loop_w_failed_first_run_keeps_input(root):
+    server = ScriptedServer({RUN_ID: [_started()]})
+    client = _mock_client(server)
+    run_input = _run_input()
+
+    with pytest.raises(client_tools.RunNotFinished) as exc_info:
+        client_tools.run_loop(
+            client,
+            run_input,
+            client_tools.ToolContext(root=root),
+        )
+
+    assert exc_info.value.result.run_input is run_input
+    assert exc_info.value.result.tool_calls == []
+
+
+def test_run_loop_w_cancelled_confirmation(root):
+    server = _shell_then(
+        [],
+        commands=('{"command": "echo one"}', '{"command": "echo two"}'),
+    )
+    confirm = mock.Mock(side_effect=client_tools.ConfirmationCancelled())
+    on_tool_result = mock.Mock()
+
+    with mock.patch.object(client_tools, "run_shell") as run_shell:
+        with pytest.raises(client_tools.ConfirmationCancelled) as exc_info:
+            _loop(server, root, confirm=confirm, on_tool_result=on_tool_result)
+
+    run_shell.assert_not_called()
+    confirm.assert_called_once()  # not asked again, for the second call
+    assert server.new_run_bodies == []  # no further run
+
+    progress = exc_info.value.result
+    results = _results(progress.run_input)
+    assert set(results) == {"c0", "c1"}
+    assert all("Cancelled" in result["error"] for result in results.values())
+    assert [call.exit_code for call in progress.tool_calls] == [None, None]
+    assert on_tool_result.call_count == 2
+
+
+def test_soliplexclient_w_transport_error_on_post():
+    def handler(request):
+        raise httpx.ConnectError("refused", request=request)
+
+    client = _mock_client(handler)
+
+    with pytest.raises(client_tools.TransportFailure, match="refused"):
+        client.new_run(THREAD_ID, parent_run_id=RUN_ID)
+
+
+def test_soliplexclient_w_transport_error_on_stream():
+    def handler(request):
+        raise httpx.ReadTimeout("slow", request=request)
+
+    client = _mock_client(handler)
+
+    with pytest.raises(client_tools.TransportFailure, match="slow"):
+        list(client.stream_run(_run_input()))
+
+
+class _StalledStream(httpx.SyncByteStream):
+    """Sends 'body', then times out, as a dead connection would"""
+
+    def __init__(self, body: str):
+        self.body = body
+
+    def __iter__(self):
+        yield self.body.encode()
+        raise httpx.ReadTimeout("stalled")
+
+
+def test_run_loop_w_timeout_mid_continuation_keeps_progress(root):
+    server = _shell_then([])
+    scripted = server.__call__
+
+    def handler(request):
+        if request.url.path.endswith(f"/{CHILD_RUN_ID}"):
+            body = f"data: {json.dumps(_started(CHILD_RUN_ID))}\n\n"
+            return httpx.Response(200, stream=_StalledStream(body))
+        return scripted(request)
+
+    client = _mock_client(handler)
+
+    with pytest.raises(client_tools.TransportFailure, match="stalled") as ei:
+        client_tools.run_loop(
+            client,
+            _run_input(),
+            client_tools.ToolContext(root=root),
+        )
+
+    progress = ei.value.result
+    assert progress.run_ids == [RUN_ID, CHILD_RUN_ID]
+    assert _results(progress.run_input)["c0"]["exit_code"] == 0
+
+
+def test_run_loop_w_command_cancelled(root):
+    # E.g. the TUI quits while a command runs:  it is killed, and nothing
+    # more runs.
+    server = _shell_then(
+        [],
+        commands=('{"command": "echo one"}', '{"command": "echo two"}'),
+    )
+
+    run_shell = mock.Mock(side_effect=client_tools.CommandCancelled())
+    tools = {
+        "shell": dataclasses.replace(
+            client_tools.SHELL_TOOL, execute=run_shell
+        )
+    }
+
+    on_tool_result = mock.Mock()
+
+    with pytest.raises(client_tools.CommandCancelled) as exc_info:
+        _loop(server, root, tools=tools, on_tool_result=on_tool_result)
+
+    assert on_tool_result.call_count == 2
+    assert on_tool_result.call_args_list[0].args[1]["killed"] is True
+    assert on_tool_result.call_args_list[1].args[1].get("killed") is None
+
+    run_shell.assert_called_once()  # not the second call
+    assert server.new_run_bodies == []
+
+    results = _results(exc_info.value.result.run_input)
+    assert results["c0"]["error"] == (
+        client_tools.CommandCancelled.call_outcome
+    )
+    assert "killed" not in results["c0"]  # for the UI, not the model
+    assert results["c1"]["error"] == (
+        client_tools.ConfirmationCancelled.call_outcome
+    )
+    assert isinstance(exc_info.value, client_tools.Cancelled)
+
+
+# -- auto-approve ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "answer, expected",
+    [
+        (client_tools.Approval.RUN_ALL, client_tools.Approval.RUN_ALL),
+        (client_tools.Approval.DECLINE, client_tools.Approval.DECLINE),
+        (True, client_tools.Approval.RUN_ONCE),
+        (False, client_tools.Approval.DECLINE),
+        (None, client_tools.Approval.DECLINE),  # e.g., a dismissed dialog
+    ],
+)
+def test_approval_of(answer, expected):
+    assert client_tools.Approval.of(answer) is expected
+
+
+@pytest.mark.parametrize("w_callback", [False, True])
+def test_auto_approve_enable(w_callback):
+    on_enabled = mock.Mock() if w_callback else None
+    auto = client_tools.AutoApprove(on_enabled=on_enabled)
+
+    auto.enable()
+    auto.enable()  # once is enough
+
+    assert auto.enabled is True
+    if w_callback:
+        on_enabled.assert_called_once_with()
+
+
+def _answering(*answers):
+    requests = []
+    answers = list(answers)
+
+    def request(name, args, reply):
+        requests.append(name)
+        reply(answers.pop(0))
+
+    return request, requests
+
+
+def test_confirm_via_callback_w_auto_approve_on():
+    request, requests = _answering()
+    confirm = client_tools.confirm_via_callback(
+        request,
+        auto_approve=client_tools.AutoApprove(enabled=True),
+    )
+
+    assert confirm("shell", {}) is True
+    assert confirm("shell", {}) is True
+    assert requests == []  # never asked
+
+
+def test_confirm_via_callback_w_run_all():
+    request, requests = _answering(client_tools.Approval.RUN_ALL)
+    on_enabled = mock.Mock()
+    auto = client_tools.AutoApprove(on_enabled=on_enabled)
+    confirm = client_tools.confirm_via_callback(request, auto_approve=auto)
+
+    assert confirm("shell", {}) is True  # this call
+    assert confirm("shell", {}) is True  # and every later one
+    assert confirm("shell", {}) is True
+
+    assert requests == ["shell"]  # asked once
+    assert auto.enabled is True
+    on_enabled.assert_called_once_with()
+
+
+def test_confirm_via_callback_w_run_all_without_auto_approve():
+    request, requests = _answering(
+        client_tools.Approval.RUN_ALL,
+        client_tools.Approval.DECLINE,
+    )
+    confirm = client_tools.confirm_via_callback(request)
+
+    assert confirm("shell", {}) is True  # just this one
+    assert confirm("shell", {}) is False
+
+    assert requests == ["shell", "shell"]
+
+
+@pytest.mark.parametrize(
+    "answer, expected",
+    [
+        (client_tools.Approval.RUN_ONCE, True),
+        (client_tools.Approval.DECLINE, False),
+    ],
+)
+def test_confirm_via_callback_w_run_once_or_decline(answer, expected):
+    request, requests = _answering(answer, client_tools.Approval.DECLINE)
+    auto = client_tools.AutoApprove()
+    confirm = client_tools.confirm_via_callback(request, auto_approve=auto)
+
+    assert confirm("shell", {}) is expected
+    assert confirm("shell", {}) is False  # still asks
+
+    assert requests == ["shell", "shell"]
+    assert auto.enabled is False
+
+
+def test_confirm_via_callback_w_auto_approve_and_cancelled():
+    request = mock.Mock()
+    confirm = client_tools.confirm_via_callback(
+        request,
+        is_cancelled=lambda: True,
+        auto_approve=client_tools.AutoApprove(enabled=True),
+    )
+
+    with pytest.raises(client_tools.ConfirmationCancelled):
+        confirm("shell", {})
+
+    request.assert_not_called()
+
+
+def test_run_loop_w_auto_approve_still_checks_paths(root, tmp_path):
+    # Auto-approve skips only the question:  the path check, and the log,
+    # still apply.
+    server = _shell_then(
+        [_started(CHILD_RUN_ID), *_text("a2", "ok"), _finished(CHILD_RUN_ID)],
+        commands=('{"command": "cat /outside/file"}',),
+    )
+    request = mock.Mock()
+    confirm = client_tools.confirm_via_callback(
+        request,
+        auto_approve=client_tools.AutoApprove(enabled=True),
+    )
+    log_path = tmp_path / "tools.jsonl"
+
+    found = _loop(
+        server,
+        root,
+        confirm=confirm,
+        tool_log=client_tools.ToolLog(log_path),
+    )
+
+    request.assert_not_called()
+    assert found.tool_calls[0].exit_code is None
+    (message,) = [
+        m
+        for m in found.run_input.messages
+        if isinstance(m, agui_core.ToolMessage)
+    ]
+    assert "outside --root" in json.loads(message.content)["error"]
+    (entry,) = log_path.read_text(encoding="utf-8").splitlines()
+    assert "outside --root" in json.loads(entry)["error"]
+
+
+# -- rendering a tool result, for a UI ----------------------------------------
+
+
+def _record(exit_code=0, command="ls -la"):
+    return client_tools.ToolCallRecord(
+        name="shell",
+        args={"command": command},
+        exit_code=exit_code,
+    )
+
+
+@pytest.mark.parametrize(
+    "result, exit_code, expected",
+    [
+        ({"error": "Refused: x"}, None, "not run"),
+        (
+            {"error": "Cancelled", "killed": True},
+            None,
+            "killed while it ran (it may have made changes)",
+        ),
+        ({"timed_out": True}, -9, "ran, and timed out"),
+        ({}, 3, "ran, exit code 3"),
+    ],
+)
+def test_describe_tool_result(result, exit_code, expected):
+    found = client_tools.describe_tool_result(_record(exit_code), result)
+
+    assert found == expected
+
+
+def _fences(markdown):
+    """The parsed Markdown's top-level tokens, and its code blocks' text"""
+    tokens = markdown_it.MarkdownIt().parse(markdown)
+    return (
+        [token.type for token in tokens],
+        [token.content for token in tokens if token.type == "fence"],
+    )
+
+
+def test_render_tool_result_w_no_output():
+    found = client_tools.render_tool_result(
+        _record(),
+        {"stdout": "", "stderr": ""},
+    )
+
+    assert found == (
+        "\n\n** client tool call -- ran, exit code 0 **"
+        "\n\n```text\n$ ls -la\n```"
+    )
+
+
+def test_render_tool_result_previews_output():
+    stdout = "".join(f"line {n}\n" for n in range(25))
+    long_line = "x" * (client_tools.PREVIEW_LINE_CHARS + 10)
+    result = {
+        "stdout": stdout,
+        "stderr": f"{long_line}\n",
+        "truncated": True,
+    }
+
+    found = client_tools.render_tool_result(_record(), result)
+
+    heading, block = found.strip().split("\n\n", 1)
+    assert heading == "** client tool call -- ran, exit code 0 **"
+    lines = block.splitlines()
+    assert lines[0] == "```text"
+    assert lines[1] == "$ ls -la"
+    assert lines[2] == "[stdout]"
+    assert lines[3:23] == [f"line {n}" for n in range(20)]
+    assert lines[23] == "[... 5 more lines]"
+    assert lines[24] == "[stderr]"
+    assert lines[25] == "x" * client_tools.PREVIEW_LINE_CHARS + " [...]"
+    assert lines[26] == "[output truncated before it reached the model]"
+    assert lines[27] == "```"
+
+
+def test_render_tool_result_w_error_and_other_tool():
+    record = client_tools.ToolCallRecord(
+        name="other",
+        args={"a": 1},
+        exit_code=None,
+    )
+
+    found = client_tools.render_tool_result(record, {"error": "# no *x*"})
+
+    types_, fences = _fences(found)
+    assert types_ == ["paragraph_open", "inline", "paragraph_close", "fence"]
+    assert fences == ['other: {"a": 1}\n[error] # no *x*\n']
+
+
+def test_render_tool_result_markup_stays_in_the_block():
+    # The command and its output are the model's and the command's:  a
+    # heredoc holding a fence and a heading, echoed back, must not escape
+    # the code block.
+    command = "cat <<'EOF'\n```\n# heading\n````\nEOF"
+    record = _record(command=command)
+    result = {"stdout": "```\n# heading\n````\n", "stderr": "*bold*\n"}
+
+    found = client_tools.render_tool_result(record, result, max_lines=10)
+
+    types_, fences = _fences(found)
+    assert types_ == ["paragraph_open", "inline", "paragraph_close", "fence"]
+    assert fences == [
+        f"$ {command}\n[stdout]\n```\n# heading\n````\n[stderr]\n*bold*\n",
+    ]
+    assert "`````text\n" in found  # longer than any run within

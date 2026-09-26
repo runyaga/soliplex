@@ -37,6 +37,24 @@ Options:
 - `--url URL` -- base URL of the Soliplex backend
   (default: `http://127.0.0.1:8000`)
 - `-v` / `--verbose` -- enable verbose output
+- `--root PATH` -- working directory for [client tools](#client-tools)
+  (default: the current directory)
+- `--allow-anywhere` -- do not refuse client tool calls naming paths outside
+  `--root`
+- `--tool-timeout SECS` -- kill a client tool call after this long
+  (default: 60)
+- `--client-tools` / `--no-client-tools` -- advertise client tools to rooms
+  (default: on)
+- `--max-turns N` -- the most runs (model turns) to make for one prompt
+  (default: 10); if the model still calls tools on the last one, the TUI
+  stops without running them
+- `--pass-env` -- run client tool calls with your full environment (by
+  default, variables named like secrets are left out; see the
+  [limitations](server/cli.md#limitations))
+- `--tool-log PATH` -- append one JSON line per client tool call to `PATH`
+  (as for [`ask --url`](server/cli.md#remote-mode-client-tools))
+- `--auto-approve` / `--yolo` -- run client tool calls **without asking**
+  (default: off; see [Auto-approve](#auto-approve))
 - `-V` / `--version` -- print the version and exit
 - `-h` / `--help` -- show help and exit
 
@@ -81,6 +99,51 @@ Viewing a run:
 - `ctrl+f` -- submit feedback on the run
 - `ctrl+z` -- edit run metadata
 
+## Client tools
+
+The TUI advertises the same [client-side tools](server/client_tools.md) as
+`soliplex-cli ask --url`: a room's model may call `shell`, which runs a
+command **on the machine running the TUI**, in `--root`.
+
+**The TUI asks first**, unless auto-approve is on. Before each call it
+shows a dialog with the command and the directory it would run in:
+
+- `y` (or **Run**) runs this call;
+- `a` (or **Run all**) runs this call, and every later one for the rest of
+  the session, without asking (auto-approve);
+- `n` / `esc` (or **Decline**) refuses it -- **Decline** has the focus. A
+  declined call goes back to the model as a refusal, so it can carry on
+  without it.
+
+The response then shows each call: how it ended (`ran, exit code N`,
+`not run`, `ran, and timed out`, or `killed while it ran`), then, in a
+code block, the command, why it did not run, and the first 20 lines of
+its stdout and stderr (long lines cut short). The model receives up to
+16 KiB of each.
+
+The same safeguards as for `ask --url` apply: no stdin, a timeout (and a
+command still running when the TUI quits is killed), capped output, a
+scrubbed environment, and a path check that refuses commands naming paths
+outside `--root` -- a guard rail, **not a sandbox**. See the
+[limitations](server/cli.md#limitations). Start the TUI with
+`--no-client-tools` to advertise none.
+
+### Auto-approve
+
+With `--auto-approve` (or `--yolo`), or once you answer **Run all**, the
+model's commands run **without asking**, for the rest of the session. The
+header then says `auto-approve ON: commands run without asking`. Only the
+question goes: the path check, the scrubbed environment, the timeout and
+`--tool-log` still apply.
+
+**The risk:** the room's model -- and anything it reads (documents, web
+pages, the output of earlier commands) -- then decides what runs on your
+machine, as you, with your network access, and nothing stops a command
+the path check does not catch (see the
+[limitations](server/cli.md#limitations)). Use it only with a room and
+inputs you trust, with `--root` a scratch directory, ideally inside a
+container or VM, and keep a `--tool-log`.
+
 ## Serving the TUI over the web
 
 `soliplex-tui-serve` wraps the client with
@@ -93,7 +156,9 @@ soliplex-tui-serve
 ```
 
 This serves at <http://127.0.0.1:8002> by default and connects to a backend
-at <http://127.0.0.1:8000>. Options:
+at <http://127.0.0.1:8000>. The served client runs with `--no-client-tools`:
+client tools would run on the serving host, for anyone who can reach the
+page. Options:
 
 - `--backend-url URL` -- base URL of the Soliplex backend
   (default: `http://127.0.0.1:8000`)

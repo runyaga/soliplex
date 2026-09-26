@@ -47,7 +47,8 @@ def app(
 ):
     """soliplex TUI server"""
     server = server_module.Server(
-        f"soliplex-tui --url {soliplex_url}",
+        # Client tools would run on THIS host, for whoever reaches the page.
+        f"soliplex-tui --url {soliplex_url} --no-client-tools",
         host=host,
         port=port,
         public_url=public_url,

@@ -4,7 +4,8 @@ A room's model can call tools that run on the **user's own machine**,
 outside the Soliplex server. The client advertises them with each run;
 the server lets the model call them, but never runs them itself. Soliplex
 ships one such tool, `shell`, used by
-[`soliplex-cli ask --url`](cli.md#remote-mode-client-tools).
+[`soliplex-cli ask --url`](cli.md#remote-mode-client-tools) and by the
+[TUI](../tui.md#client-tools).
 
 The client side lives in `soliplex.agui.client_tools`: the tool registry,
 the `shell` executor, and the run loop described below.
@@ -111,7 +112,8 @@ network access**. Its safeguards:
 - **Output cap.** Each of stdout and stderr is capped (16 KiB by default)
   before it is sent to the model; the result says `"truncated": true`.
 - **Confirmation.** `soliplex-cli ask --url --confirm` asks before each
-  call.
+  call; the TUI asks in a dialog, unless auto-approve is on (see
+  [Auto-approve](../tui.md#auto-approve)).
 - **Tool log.** `--tool-log PATH` appends one JSON line per call: what
   ran, where, how it ended, how long it took, and its output sizes (not
   the output).

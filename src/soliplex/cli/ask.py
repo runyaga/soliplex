@@ -266,9 +266,9 @@ def _usage_error(message: str) -> typing.NoReturn:
 
 def _confirm_tool_call(name: str, args) -> bool:
     """Ask on the terminal (stderr) before running a client tool call"""
-    shown = args.get("command") if name == "shell" else json.dumps(args)
+    shown = client_tools.describe_tool_call(name, args)
     try:
-        return typer.confirm(f"Run {name}: {shown}?", err=True)
+        return typer.confirm(f"Run {shown}?", err=True)
     except click.Abort:  # e.g., stdin closed
         return False
 

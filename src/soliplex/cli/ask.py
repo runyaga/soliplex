@@ -8,6 +8,7 @@ import sys
 import typing
 import uuid
 
+import click
 import typer
 from ag_ui import core as agui_core
 from pydantic_ai.ui import ag_ui as ai_ag_ui
@@ -15,6 +16,7 @@ from sqlalchemy.ext import asyncio as sqla_asyncio
 
 from soliplex import loggers
 from soliplex import models
+from soliplex.agui import client_tools
 from soliplex.agui import persistence as agui_persistence
 from soliplex.cli import cli_util
 from soliplex.cli import types
@@ -239,21 +241,135 @@ async def _run_ask(the_installation, room_id, prompt, claims) -> _AskResult:
     return _AskResult(thread_id=thread_id, ok=False, error=reason)
 
 
+_ROOT_OPTION = typer.Option(
+    pathlib.Path("."),
+    "--root",
+    help=(
+        "With '--url': working directory for client tool calls;  commands "
+        "naming paths outside it are refused (a guard rail, not a sandbox)."
+    ),
+)
+
+_TOOL_LOG_OPTION = typer.Option(
+    None,
+    "--tool-log",
+    help=(
+        "With '--url': append one JSON line per client tool call (what ran, "
+        "its exit code, timing and output sizes) to this file."
+    ),
+)
+
+
+def _usage_error(message: str) -> typing.NoReturn:
+    raise click.UsageError(message)
+
+
+def _confirm_tool_call(name: str, args) -> bool:
+    """Ask on the terminal (stderr) before running a client tool call"""
+    shown = args.get("command") if name == "shell" else json.dumps(args)
+    try:
+        return typer.confirm(f"Run {name}: {shown}?", err=True)
+    except click.Abort:  # e.g., stdin closed
+        return False
+
+
+def _ask_remote(
+    *,
+    url: str,
+    room_id: str,
+    prompt: str,
+    token: str | None,
+    context: client_tools.ToolContext,
+    max_turns: int,
+    confirm: bool,
+    tool_log: pathlib.Path | None,
+) -> client_tools.LoopResult:
+    """Ask a room on a running server, executing its client tool calls"""
+    with client_tools.SoliplexClient(url, room_id, token=token) as client:
+        thread = client.new_thread()
+        run_input = client_tools.initial_run_input(thread, prompt)
+
+        return client_tools.run_loop(
+            client,
+            run_input,
+            context,
+            max_turns=max_turns,
+            max_turns_option="--max-turns",
+            confirm=_confirm_tool_call if confirm else None,
+            tool_log=(
+                client_tools.ToolLog(tool_log)
+                if tool_log is not None
+                else None
+            ),
+        )
+
+
 @app.command("ask")
 def ask(
     ctx: typer.Context,
-    installation_path: types.installation_path_type,
-    room_id: str,
-    prompt: str,
+    installation_path: types.installation_path_type = None,
+    room_id: str = typer.Argument(None),
+    prompt: str = typer.Argument(None),
     json_output: bool = typer.Option(
         False,
         "--json",
         help=(
             "Emit a JSON object (room_id, thread_id, prompt, response, "
-            "usage) instead of the plain-text response."
+            "usage) instead of the plain-text response.  With '--url': "
+            "(thread_id, run_ids, response, tool_calls)."
         ),
     ),
     cli_log_config: pathlib.Path | None = cli_util.CLI_LOG_CONFIG_OPTION,
+    url: str | None = typer.Option(
+        None,
+        "--url",
+        help=(
+            "Ask a room on the Soliplex server at this URL, instead of "
+            "running it in-process;  pass only ROOM_ID PROMPT.  The room's "
+            "model may call client tools ('shell'), which run on THIS "
+            "machine."
+        ),
+    ),
+    token: str | None = typer.Option(
+        None,
+        "--token",
+        envvar="SOLIPLEX_TOKEN",
+        help="With '--url': bearer token for the server.",
+    ),
+    root: pathlib.Path = _ROOT_OPTION,
+    allow_anywhere: bool = typer.Option(
+        False,
+        "--allow-anywhere",
+        help="With '--url': do not refuse paths outside '--root'.",
+    ),
+    max_turns: int = typer.Option(
+        client_tools.DEFAULT_MAX_TURNS,
+        "--max-turns",
+        min=1,
+        help="With '--url': the most runs (model turns) to make.",
+    ),
+    tool_timeout: float = typer.Option(
+        client_tools.DEFAULT_TOOL_TIMEOUT_SECS,
+        "--tool-timeout",
+        min=0.1,
+        help="With '--url': seconds before a client tool call is killed.",
+    ),
+    confirm: bool = typer.Option(
+        False,
+        "--confirm",
+        help="With '--url': ask before running each client tool call.",
+    ),
+    tool_log: pathlib.Path | None = _TOOL_LOG_OPTION,
+    pass_env: bool = typer.Option(
+        False,
+        "--pass-env",
+        help=(
+            "With '--url': run client tool calls with your full environment. "
+            " By default, variables named like secrets ('*TOKEN*', "
+            "'*SECRET*', '*PASSWORD*', '*_KEY', 'AWS_*', 'GITHUB_*', ...) "
+            "are left out;  'SOLIPLEX_TOKEN' always is."
+        ),
+    ),
 ):
     """Send a single prompt to a room's agent and print the response.
 
@@ -263,7 +379,59 @@ def ask(
     persists the thread/run so a follow-up turn can build on it. Exits 0 on
     success (response on stdout) and non-zero on failure (diagnostic on
     stderr), so the call can be scripted.
+
+    With ``--url``, asks the room on a running server instead (which
+    enforces its own authentication and room access), and executes the
+    model's client tool calls on this machine, in ``--root``.
     """
+    if url is not None:
+        # 'ROOM_ID PROMPT' fill the first two positional slots.
+        if prompt is not None:
+            _usage_error(
+                "With '--url', pass only ROOM_ID PROMPT "
+                "(no installation path).",
+            )
+
+        if room_id is None:
+            _usage_error("With '--url', ROOM_ID and PROMPT are required.")
+
+        room_id, prompt = str(installation_path), room_id
+
+        try:
+            context = client_tools.ToolContext(
+                root=root,
+                allow_anywhere=allow_anywhere,
+                timeout_secs=tool_timeout,
+                pass_env=pass_env,
+            )
+            result = _ask_remote(
+                url=url,
+                room_id=room_id,
+                prompt=prompt,
+                token=token,
+                context=context,
+                max_turns=max_turns,
+                confirm=confirm,
+                tool_log=tool_log,
+            )
+        except Exception as exc:
+            _fail(json_output, str(exc))
+
+        if json_output:
+            print(json.dumps(result.as_json()))
+        else:
+            print(result.response)
+
+        return
+
+    for value, name in [
+        (installation_path, "INSTALLATION_PATH"),
+        (room_id, "ROOM_ID"),
+        (prompt, "PROMPT"),
+    ]:
+        if value is None:
+            _usage_error(f"Missing argument '{name}'.")
+
     cli_util._configure_cli_logging(cli_log_config)
 
     the_installation = cli_util.get_installation(installation_path)

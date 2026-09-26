@@ -271,6 +271,121 @@ soliplex-cli ask example/installation.yaml haiku "ping" --json \
   | jq -r '.response'
 ```
 
+### Remote Mode: Client Tools
+
+With `--url`, `ask` does not load an installation: it is an AG-UI client
+of a **running** Soliplex server, and the room's model may call
+**client-side tools** that run on *this* machine. The one tool is
+`shell`, which runs a command line in `--root`.
+
+```bash
+soliplex-cli ask --url URL [OPTIONS] ROOM_ID PROMPT
+```
+
+```bash
+soliplex-cli ask --url http://localhost:8000 --root ~/projects/demo \
+  my-room "find the local files and show them sorted by size, descending"
+```
+
+Pass only `ROOM_ID` and `PROMPT` (no installation path). The server
+enforces its own authentication and room authorization; the in-process
+mode's audit records are not written (the server's own logs apply).
+Without `--url`, `ask` behaves exactly as described above.
+
+`ask` sends the prompt, then loops: whenever a run ends with the model
+calling `shell`, it executes the command, sends the call and its result
+back in a new run (a child of the last, via `parent_run_id`), and repeats
+until the model answers without calling a tool. See
+[Client-Side Tools](client_tools.md) for the protocol.
+
+Options, all only with `--url`:
+
+- `--url URL` — the server's base URL (e.g. `http://localhost:8000`).
+- `--token TOKEN` — a bearer token for the server (also read from
+  `SOLIPLEX_TOKEN`, which keeps it out of the process list). Not needed
+  for a server in `--no-auth-mode`.
+- `--root PATH` — the working directory for commands (default: the
+  current directory). Commands naming a path outside it are refused.
+- `--allow-anywhere` — do not refuse paths outside `--root`.
+- `--json` — print one JSON object instead of the answer:
+
+  ```json
+  {
+    "thread_id": "0f3c…",
+    "run_ids": ["a1…", "b2…"],
+    "response": "Here are the files, largest first: …",
+    "tool_calls": [
+      {"name": "shell", "args": {"command": "ls -laS"}, "exit_code": 0}
+    ]
+  }
+  ```
+
+  `run_ids` lists every run, in order; `exit_code` is `null` for a call
+  that did not run (refused, declined, or invalid).
+- `--max-turns N` — the most runs to make (default 10). If the model still
+  calls tools on the last one, `ask` fails without running them.
+- `--tool-timeout SECS` — kill a command after this long (default 60).
+- `--confirm` — ask on the terminal before running each command (off by
+  default: `ask` is meant to be scriptable). A declined command goes back
+  to the model as a refusal.
+- `--pass-env` — run commands with your full environment. By default
+  they get a scrubbed copy of it (see [Limitations](#limitations)).
+- `--tool-log PATH` — append one JSON line per tool call to `PATH`, with
+  `timestamp`, `tool`, `args`, `cwd`, `exit_code`, `duration_secs`,
+  `timed_out`, `truncated`, `stdout_bytes`, `stderr_bytes` and `error`.
+  Output sizes are recorded, not the output.
+
+A command's failure is **data for the model**, not an error of `ask`: a
+non-zero exit code, a timeout, or a refused path goes back to the model,
+which can try something else. `ask` itself exits `1` (with the message on
+stderr, or `{"error": …}` under `--json`) when the server refuses a
+request, a run fails (`RUN_ERROR`), the stream ends early, or
+`--max-turns` runs are not enough. Runs are never retried, so a command
+is never repeated behind the user's back.
+
+#### Limitations
+
+- **`--root` is a guard rail, not a sandbox.** The path check reads the
+  command's text; a command can still reach other paths at runtime
+  (command substitution, a script, `cd`). Commands run as you, with your
+  permissions and your network access. The check also errs the other
+  way: a word that only looks like an outside path is refused (see
+  [Client-Side Tools](client_tools.md#safety-model)).
+- **Anything the room's model reads can influence the commands it
+  proposes** — documents, web pages, tool output, and the output of
+  earlier commands. Treat a room with client tools as able to run what
+  its inputs suggest.
+- **Commands get a scrubbed environment, not a clean one.** They never
+  see `SOLIPLEX_TOKEN` (not even with `--pass-env`), and, unless
+  `--pass-env` is given, no variable whose name (in any case) matches
+  `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*PASSWD*`, `*_KEY`, `*API_KEY*`,
+  `AWS_*`, `GITHUB_*` or `GH_*`, nor `CDPATH` or `OLDPWD`. Everything
+  else is passed on (`PATH`, `HOME`, `LANG`, `TERM`, `SHELL`, ...), so
+  ordinary commands work — and so does anything reachable from them: a
+  secret under another name, `SSH_AUTH_SOCK`, and credential files such
+  as `~/.aws/credentials` or `~/.netrc`, which the path check refuses to
+  name but a command can still read at runtime.
+- **Side effects without a path are not caught.** The check only sees
+  paths written in the command. `pip install --break-system-packages
+  flask` changes your system Python, `npm install -g` your global
+  packages, and `git config --global` your settings, without naming a
+  path outside `--root`. Keep such work inside the root — a virtual
+  environment in it (`python -m venv .venv`, then `.venv/bin/pip`) — or
+  run `ask` in a container or VM.
+- **Interrupting stops the command.** On Ctrl-C (or any error while a
+  command runs) the command is killed, with every process it started,
+  before `ask` exits. A command which already finished may have left
+  background processes running (`server &`); those are not tracked.
+- **The CLI does not confirm unless `--confirm` is given;** the TUI,
+  when it advertises client tools, always confirms.
+- **The per-run limit is 50 model requests**, from pydantic-ai's default
+  usage limit; a run which needs more fails.
+- **Long output is capped** (16 KiB per stream) before it reaches the
+  model. On Ollama, a small default context window can also silently
+  truncate what the model sees.
+- **There is no stdin** (commands read end-of-file), **and there is a
+  timeout** (`--tool-timeout`, default 60 seconds).
+
 ## `audit`
 
 The `audit` group bundles read-only validation and listing commands —

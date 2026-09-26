@@ -376,6 +376,9 @@ below).
 - AG-UI protocol handles thread/run lifecycle with SSE event streaming
 - Authorization via a policy engine in `authz/`
 - MCP server exposes Soliplex tools; MCP client consumes external tool servers
+- Client-side tools (`shell`, run on the user's machine by `ask --url`)
+  live in `agui/client_tools.py`; see
+  [docs/server/client_tools.md](docs/server/client_tools.md)
 - Authentication via OIDC/JWT in `authn.py`
 - Public API models defined in `models.py`
 

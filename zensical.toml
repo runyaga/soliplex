@@ -17,6 +17,7 @@ nav = [
       { "Database Migrations" = "server/migrations.md" },
       { "Environment Variables" = "server/environment.md" },
       { "SSE Resume" = "server/sse_resume.md" },
+      { "Client-Side Tools" = "server/client_tools.md" },
     ]},
     { "Client" = "client.md" },
     { "TUI" = "tui.md" },

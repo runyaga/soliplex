@@ -4,9 +4,11 @@ import json
 from types import SimpleNamespace
 from unittest import mock
 
+import click
 import pytest
 
 from soliplex import loggers
+from soliplex.agui import client_tools
 from soliplex.cli import ask as cli_ask
 
 
@@ -232,3 +234,254 @@ def test_usage_as_dict(usage, expected):
     result = cli_ask._usage_as_dict(usage)
 
     assert result == expected
+
+
+# -- 'ask' without '--url':  arguments ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "args, missing",
+    [
+        ([], "INSTALLATION_PATH"),
+        (["installation.yaml"], "ROOM_ID"),
+        (["installation.yaml", "faux"], "PROMPT"),
+    ],
+)
+def test_ask_local_w_missing_argument(cli_runner, monkeypatch, args, missing):
+    monkeypatch.delenv("SOLIPLEX_INSTALLATION_PATH", raising=False)
+
+    result = cli_runner.invoke(cli_ask.app, args)
+
+    assert result.exit_code == 2
+    assert f"Missing argument '{missing}'" in result.stderr
+
+
+# -- 'ask --url' -------------------------------------------------------------
+
+URL = "http://server:8000"
+
+REMOTE_RESULT = client_tools.LoopResult(
+    thread_id="thread-1",
+    run_ids=["run-1", "run-2"],
+    response="The answer.",
+    tool_calls=[
+        client_tools.ToolCallRecord(
+            name="shell",
+            args={"command": "ls"},
+            exit_code=0,
+        ),
+    ],
+)
+
+
+@pytest.fixture
+def ask_remote():
+    with mock.patch.object(
+        cli_ask,
+        "_ask_remote",
+        return_value=REMOTE_RESULT,
+    ) as patched:
+        yield patched
+
+
+@pytest.mark.parametrize("args", [["room"], ["install.yaml", "room", "hi"]])
+def test_ask_remote_w_bad_arguments(cli_runner, ask_remote, args):
+    result = cli_runner.invoke(cli_ask.app, ["--url", URL, *args])
+
+    assert result.exit_code == 2
+    assert "With '--url'" in result.stderr
+    ask_remote.assert_not_called()
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_ask_remote_defaults(
+    cli_runner,
+    ask_remote,
+    monkeypatch,
+    tmp_path,
+    json_output,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SOLIPLEX_TOKEN", raising=False)
+    flags = ["--json"] if json_output else []
+
+    result = cli_runner.invoke(
+        cli_ask.app,
+        ["--url", URL, "a-room", "a prompt", *flags],
+    )
+
+    assert result.exit_code == 0, result.output
+    if json_output:
+        assert json.loads(result.stdout) == REMOTE_RESULT.as_json()
+    else:
+        assert result.stdout == "The answer.\n"
+
+    kwargs = ask_remote.call_args.kwargs
+    context = kwargs.pop("context")
+    assert kwargs == {
+        "url": URL,
+        "room_id": "a-room",
+        "prompt": "a prompt",
+        "token": None,
+        "max_turns": client_tools.DEFAULT_MAX_TURNS,
+        "confirm": False,
+        "tool_log": None,
+    }
+    assert context == client_tools.ToolContext(root=tmp_path)
+    assert context.pass_env is False  # scrubbed environment by default
+
+
+def test_ask_remote_w_options(cli_runner, ask_remote, tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    log_path = tmp_path / "tools.jsonl"
+
+    result = cli_runner.invoke(
+        cli_ask.app,
+        [
+            "a-room",
+            "a prompt",
+            "--url",
+            URL,
+            "--token",
+            "secret",
+            "--root",
+            str(root),
+            "--allow-anywhere",
+            "--max-turns",
+            "3",
+            "--tool-timeout",
+            "5",
+            "--confirm",
+            "--tool-log",
+            str(log_path),
+            "--pass-env",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    kwargs = ask_remote.call_args.kwargs
+    assert kwargs["token"] == "secret"
+    assert kwargs["max_turns"] == 3
+    assert kwargs["confirm"] is True
+    assert kwargs["tool_log"] == log_path
+    assert kwargs["context"] == client_tools.ToolContext(
+        root=root,
+        allow_anywhere=True,
+        timeout_secs=5.0,
+        pass_env=True,
+    )
+
+
+def test_ask_remote_w_token_from_env(cli_runner, ask_remote, monkeypatch):
+    monkeypatch.setenv("SOLIPLEX_TOKEN", "from-env")
+
+    result = cli_runner.invoke(cli_ask.app, ["--url", URL, "room", "hi"])
+
+    assert result.exit_code == 0, result.output
+    assert ask_remote.call_args.kwargs["token"] == "from-env"
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_ask_remote_w_error(cli_runner, ask_remote, json_output):
+    ask_remote.side_effect = client_tools.RunErrored("boom")
+    flags = ["--json"] if json_output else []
+
+    result = cli_runner.invoke(
+        cli_ask.app,
+        ["--url", URL, "room", "hi", *flags],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    if json_output:
+        assert json.loads(result.stderr) == {"error": "Run failed: boom"}
+    else:
+        assert "Error: Run failed: boom" in result.stderr
+
+
+def test_ask_remote_w_bad_root(cli_runner, ask_remote, tmp_path):
+    result = cli_runner.invoke(
+        cli_ask.app,
+        ["--url", URL, "room", "hi", "--root", str(tmp_path / "nonesuch")],
+    )
+
+    assert result.exit_code == 1
+    assert "nonesuch" in result.stderr
+    ask_remote.assert_not_called()
+
+
+@pytest.mark.parametrize("w_confirm", [False, True])
+@pytest.mark.parametrize("w_tool_log", [False, True])
+def test__ask_remote(tmp_path, w_confirm, w_tool_log):
+    context = client_tools.ToolContext(root=tmp_path)
+    tool_log = tmp_path / "tools.jsonl" if w_tool_log else None
+    thread = {"thread_id": "thread-1", "runs": {"run-1": {}}}
+
+    with (
+        mock.patch.object(client_tools, "SoliplexClient") as client_klass,
+        mock.patch.object(client_tools, "run_loop") as run_loop,
+    ):
+        client = client_klass.return_value.__enter__.return_value
+        client.new_thread.return_value = thread
+
+        found = cli_ask._ask_remote(
+            url=URL,
+            room_id="room",
+            prompt="hi",
+            token="secret",
+            context=context,
+            max_turns=4,
+            confirm=w_confirm,
+            tool_log=tool_log,
+        )
+
+    assert found is run_loop.return_value
+    client_klass.assert_called_once_with(URL, "room", token="secret")
+    (client_arg, run_input, context_arg), kwargs = run_loop.call_args
+    assert client_arg is client
+    assert context_arg is context
+    assert run_input.thread_id == "thread-1"
+    assert run_input.run_id == "run-1"
+    assert run_input.messages[0].content == "hi"
+    assert kwargs["max_turns"] == 4
+    assert kwargs["max_turns_option"] == "--max-turns"
+
+    if w_confirm:
+        assert kwargs["confirm"] is cli_ask._confirm_tool_call
+    else:
+        assert kwargs["confirm"] is None
+
+    if w_tool_log:
+        assert kwargs["tool_log"] == client_tools.ToolLog(tool_log)
+    else:
+        assert kwargs["tool_log"] is None
+
+
+@pytest.mark.parametrize(
+    "name, args, shown",
+    [
+        ("shell", {"command": "ls -la"}, "ls -la"),
+        ("other", {"a": 1}, '{"a": 1}'),
+    ],
+)
+@pytest.mark.parametrize("answer", [False, True])
+def test_confirm_tool_call(name, args, shown, answer):
+    with mock.patch.object(
+        cli_ask.typer,
+        "confirm",
+        return_value=answer,
+    ) as confirm:
+        found = cli_ask._confirm_tool_call(name, args)
+
+    assert found is answer
+    confirm.assert_called_once_with(f"Run {name}: {shown}?", err=True)
+
+
+def test_confirm_tool_call_w_abort():
+    with mock.patch.object(
+        cli_ask.typer,
+        "confirm",
+        side_effect=click.Abort(),
+    ):
+        assert cli_ask._confirm_tool_call("shell", {"command": "ls"}) is False

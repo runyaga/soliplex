@@ -12,6 +12,7 @@ from textual import screen as t_screen
 from textual import widget as t_widget
 from textual import widgets as t_widgets
 
+from soliplex.agui import client_tools
 from soliplex.agui import parser as agui_parser
 from soliplex.config.agui import AGUI_FEATURES_BY_NAME
 from soliplex.tui import rest_api
@@ -1101,76 +1102,64 @@ class RoomView(t_screen.Screen):
             self.run_agent_input,
         )
 
-        for line in streaming_response.iter_lines():
-            if line:
-                decoded = line.decode("utf-8")
+        sse_events = client_tools.iter_sse_json(
+            streaming_response.iter_lines(),
+        )
 
-                if decoded.startswith("id:"):  # SSE event indx
-                    continue
+        for chunk in sse_events:
+            event = agui_parser.agui_event_from_json(chunk)
+            esp(event)
 
-                if decoded.startswith(":"):  # comment, i.e., keepalive
-                    continue
+            if chunk["type"] == "THINKING_START":
+                response_content += "\n\n** thinking **\n\n"
 
-                if decoded.startswith("data: "):
-                    decoded = decoded[len("data: ") :]
+            elif chunk["type"] == "THINKING_TEXT_MESSAGE_CONTENT":
+                response_content += chunk["delta"]
 
-                chunk = json.loads(decoded)
-                event = agui_parser.agui_event_from_json(chunk)
-                esp(event)
+            if chunk["type"] == "REASONING_START":
+                response_content += "\n\n** reasoning **\n\n"
 
-                if chunk["type"] == "THINKING_START":
-                    response_content += "\n\n** thinking **\n\n"
+            elif chunk["type"] == "REASONING_MESSAGE_CONTENT":
+                response_content += chunk["delta"]
 
-                elif chunk["type"] == "THINKING_TEXT_MESSAGE_CONTENT":
-                    response_content += chunk["delta"]
+            elif chunk["type"] == "TOOL_CALL_START":
+                response_content += (
+                    f"\n\n** calling tool {chunk['toolCallName']} **"
+                )
 
-                if chunk["type"] == "REASONING_START":
-                    response_content += "\n\n** reasoning **\n\n"
+            elif chunk["type"] == "TEXT_MESSAGE_START":
+                response_content += "\n\n** response **\n\n"
 
-                elif chunk["type"] == "REASONING_MESSAGE_CONTENT":
-                    response_content += chunk["delta"]
+            elif chunk["type"] == "TEXT_MESSAGE_CONTENT":
+                response_content += chunk["delta"]
 
-                elif chunk["type"] == "TOOL_CALL_START":
-                    response_content += (
-                        f"\n\n** calling tool {chunk['toolCallName']} **"
-                    )
+            elif chunk["type"] == "STATE_SNAPSHOT" and self.verbose:
+                response_content += (
+                    f"\n\n** state snapshot **\n\n{chunk['snapshot']}\n\n"
+                )
 
-                elif chunk["type"] == "TEXT_MESSAGE_START":
-                    response_content += "\n\n** response **\n\n"
+            elif chunk["type"] == "STATE_DELTA" and self.verbose:
+                response_content += (
+                    f"\n\n** state delta **\n\n{chunk['delta']}\n\n"
+                )
 
-                elif chunk["type"] == "TEXT_MESSAGE_CONTENT":
-                    response_content += chunk["delta"]
+            elif chunk["type"] == "ACTIVITY_SNAPSHOT" and self.verbose:
+                response_content += (
+                    f"\n\n** activity snapshot **\n\n{chunk['content']}\n\n"
+                )
 
-                elif chunk["type"] == "STATE_SNAPSHOT" and self.verbose:
-                    response_content += (
-                        f"\n\n** state snapshot **\n\n{chunk['snapshot']}\n\n"
-                    )
+            elif chunk["type"] == "ACTIVITY_DELTA" and self.verbose:
+                response_content += (
+                    f"\n\n** activity delta**\n\n{chunk['patch']}\n\n"
+                )
 
-                elif chunk["type"] == "STATE_DELTA" and self.verbose:
-                    response_content += (
-                        f"\n\n** state delta **\n\n{chunk['delta']}\n\n"
-                    )
+            elif chunk["type"] == "RUN_FINISHED":
+                response_content += "\n\n** done **"
 
-                elif chunk["type"] == "ACTIVITY_SNAPSHOT" and self.verbose:
-                    response_content += (
-                        f"\n\n** activity snapshot "
-                        f"**\n\n{chunk['content']}\n\n"
-                    )
+            elif chunk["type"] == "RUN_ERROR":
+                response_content += f"\n\n** error **\n\n{chunk['message']}"
 
-                elif chunk["type"] == "ACTIVITY_DELTA" and self.verbose:
-                    response_content += (
-                        f"\n\n** activity delta**\n\n{chunk['patch']}\n\n"
-                    )
-
-                elif chunk["type"] == "RUN_FINISHED":
-                    response_content += "\n\n** done **"
-
-                elif chunk["type"] == "RUN_ERROR":
-                    response_content += (
-                        f"\n\n** error **\n\n{chunk['message']}"
-                    )
-
-                self.app.call_from_thread(response.update, response_content)
+            self.app.call_from_thread(response.update, response_content)
 
         if esp.invalid_state_deltas:  # see #1260
             esp.state = {

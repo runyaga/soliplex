@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import _thread
 import asyncio
+import ctypes
 import dataclasses
 import json
 import os
@@ -495,7 +496,7 @@ def test_kill_posix(monkeypatch, w_gone):
     monkeypatch.setattr(client_tools.os, "killpg", killpg, raising=False)
     proc = mock.Mock(pid=1234)
 
-    client_tools._kill(proc)
+    client_tools._kill(proc, None)
 
     killpg.assert_called_once_with(1234, 9)
     proc.kill.assert_not_called()
@@ -503,15 +504,319 @@ def test_kill_posix(monkeypatch, w_gone):
 
 def test_kill_windows(monkeypatch):
     monkeypatch.setattr(client_tools, "_POSIX", False)
-    proc = mock.Mock(pid=1234)
+    calls = mock.Mock()
 
-    with mock.patch.object(client_tools.subprocess, "run") as run:
-        client_tools._kill(proc)
+    client_tools._kill(calls.proc, calls.job)
 
-    (argv,), kwargs = run.call_args
-    assert argv == ["taskkill", "/F", "/T", "/PID", "1234"]
-    assert kwargs["check"] is False
-    proc.kill.assert_called_once_with()
+    # The job first:  killing the shell first would orphan the rest.
+    assert calls.mock_calls == [
+        mock.call.job.terminate(),
+        mock.call.proc.kill(),
+    ]
+
+
+@pytest.mark.parametrize(
+    "w_posix, expected",
+    [
+        (True, {"start_new_session": True}),
+        (False, {"creationflags": 0x4 | 0x200}),
+    ],
+)
+def test_popen_options(monkeypatch, w_posix, expected):
+    monkeypatch.setattr(client_tools, "_POSIX", w_posix)
+
+    assert client_tools._popen_options() == expected
+
+
+@pytest.mark.parametrize("w_posix", [True, False])
+def test_new_job(monkeypatch, w_posix):
+    monkeypatch.setattr(client_tools, "_POSIX", w_posix)
+    monkeypatch.setattr(client_tools, "_Job", mock.Mock(name="_Job"))
+
+    found = client_tools._new_job()
+
+    if w_posix:
+        assert found is None
+    else:
+        assert found is client_tools._Job.return_value
+
+
+# -- run_shell:  the Windows job object (mocked, so on any host) -------------
+
+
+def test_job_extended_limit_information_layout():
+    # As 'winnt.h' lays it out:  else 'SetInformationJobObject' fails.
+    pointer_size = ctypes.sizeof(ctypes.c_void_p)
+    expected = {8: 144, 4: 112}[pointer_size]
+
+    assert ctypes.sizeof(client_tools._JobExtendedLimitInformation) == expected
+
+
+def test_win32(monkeypatch):
+    dlls = {}
+
+    def win_dll(name, **kwargs):
+        dlls[name] = mock.Mock(name=name, kwargs=kwargs)
+        return dlls[name]
+
+    monkeypatch.setattr(client_tools.ctypes, "WinDLL", win_dll, raising=False)
+
+    kernel32, ntdll = client_tools._win32()
+
+    assert kernel32 is dlls["kernel32"]
+    assert ntdll is dlls["ntdll"]
+    assert kernel32.kwargs == {"use_last_error": True}
+    assert kernel32.CreateJobObjectW.restype is ctypes.c_void_p
+    assert kernel32.TerminateJobObject.argtypes == [
+        ctypes.c_void_p,
+        ctypes.c_uint,
+    ]
+    assert ntdll.NtResumeProcess.restype is ctypes.c_long
+    for name in [
+        "SetInformationJobObject",
+        "AssignProcessToJobObject",
+        "CloseHandle",
+    ]:
+        assert getattr(kernel32, name).restype is ctypes.c_int
+
+
+@pytest.fixture
+def win_error(monkeypatch):
+    monkeypatch.setattr(
+        client_tools.ctypes,
+        "get_last_error",
+        lambda: 5,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        client_tools.ctypes,
+        "WinError",
+        lambda code: OSError(code, "Access is denied"),
+        raising=False,
+    )
+
+
+def test_win_error(win_error):
+    error = client_tools._win_error("CreateJobObjectW")
+
+    assert error.args == (5, "Access is denied")
+    assert error.__notes__ == ["in CreateJobObjectW"]
+
+
+JOB_HANDLE = 42
+PROCESS_HANDLE = 7
+
+
+@pytest.fixture
+def win32(monkeypatch):
+    kernel32 = mock.Mock(name="kernel32")
+    kernel32.CreateJobObjectW.return_value = JOB_HANDLE
+    kernel32.SetInformationJobObject.return_value = 1
+    kernel32.AssignProcessToJobObject.return_value = 1
+    kernel32.TerminateJobObject.return_value = 1
+    kernel32.CloseHandle.return_value = 1
+    ntdll = mock.Mock(name="ntdll")
+    ntdll.NtResumeProcess.return_value = 0
+    monkeypatch.setattr(client_tools, "_win32", lambda: (kernel32, ntdll))
+    return types.SimpleNamespace(kernel32=kernel32, ntdll=ntdll)
+
+
+def test_job(win32):
+    limits = []
+
+    def set_information(handle, info_class, address, size):
+        # Copied out now:  the structure lives only as long as the call.
+        info = client_tools._JobExtendedLimitInformation.from_address(address)
+        flags = info.BasicLimitInformation.LimitFlags
+        limits.append((handle, info_class, size, flags))
+        return 1
+
+    win32.kernel32.SetInformationJobObject.side_effect = set_information
+    proc = mock.Mock(_handle=PROCESS_HANDLE)
+
+    job = client_tools._Job()
+
+    win32.kernel32.CreateJobObjectW.assert_called_once_with(None, None)
+    [(handle, info_class, size, flags)] = limits
+    assert (handle, info_class) == (JOB_HANDLE, 9)
+    assert size == ctypes.sizeof(client_tools._JobExtendedLimitInformation)
+    assert flags == 0x2000  # 'KILL_ON_JOB_CLOSE', and no other
+
+    job.adopt(proc)
+
+    win32.kernel32.AssignProcessToJobObject.assert_called_once_with(
+        JOB_HANDLE,
+        PROCESS_HANDLE,
+    )
+    win32.ntdll.NtResumeProcess.assert_called_once_with(PROCESS_HANDLE)
+
+    job.terminate()
+
+    win32.kernel32.TerminateJobObject.assert_called_once_with(JOB_HANDLE, 1)
+
+    job.close()
+    job.close()  # idempotent
+    job.terminate()  # closed:  nothing to terminate
+
+    win32.kernel32.CloseHandle.assert_called_once_with(JOB_HANDLE)
+    win32.kernel32.TerminateJobObject.assert_called_once()
+
+
+def test_job_w_create_failure(win32, win_error):
+    win32.kernel32.CreateJobObjectW.return_value = None  # 'NULL'
+
+    with pytest.raises(OSError, match="Access is denied") as raised:
+        client_tools._Job()
+
+    assert raised.value.__notes__ == ["in CreateJobObjectW"]
+    win32.kernel32.SetInformationJobObject.assert_not_called()
+    win32.kernel32.CloseHandle.assert_not_called()
+
+
+def test_job_w_set_information_failure(win32, win_error):
+    win32.kernel32.SetInformationJobObject.return_value = 0
+
+    with pytest.raises(OSError, match="Access is denied") as raised:
+        client_tools._Job()
+
+    assert raised.value.__notes__ == ["in SetInformationJobObject"]
+    win32.kernel32.CloseHandle.assert_called_once_with(JOB_HANDLE)  # no leak
+
+
+def test_job_adopt_w_assign_failure(win32, win_error):
+    win32.kernel32.AssignProcessToJobObject.return_value = 0
+    job = client_tools._Job()
+
+    with pytest.raises(OSError, match="Access is denied") as raised:
+        job.adopt(mock.Mock(_handle=PROCESS_HANDLE))
+
+    assert raised.value.__notes__ == ["in AssignProcessToJobObject"]
+    win32.ntdll.NtResumeProcess.assert_not_called()  # it never runs
+
+
+def test_job_adopt_w_resume_failure(win32):
+    win32.ntdll.NtResumeProcess.return_value = -0x3FFFFFFF  # 0xC0000001
+    job = client_tools._Job()
+
+    with pytest.raises(
+        client_tools.ResumeFailed,
+        match="0xc0000001",
+    ) as raised:
+        job.adopt(mock.Mock(_handle=PROCESS_HANDLE))
+
+    assert raised.value.status == -0x3FFFFFFF
+
+
+@pytest.fixture
+def windows_run(monkeypatch, context):
+    """'run_shell' as on Windows:  'Popen' and '_Job' mocked"""
+    monkeypatch.setattr(client_tools, "_POSIX", False)
+    calls = mock.Mock()
+    calls.proc.wait.return_value = 1
+    monkeypatch.setattr(client_tools, "_Job", calls.Job)
+    monkeypatch.setattr(
+        client_tools.subprocess,
+        "Popen",
+        mock.Mock(return_value=calls.proc),
+    )
+    return types.SimpleNamespace(calls=calls, context=context)
+
+
+def test_run_shell_windows_w_normal_exit(windows_run):
+    calls = windows_run.calls
+    job = calls.Job.return_value
+    calls.proc.poll.return_value = 0
+    calls.proc.wait.return_value = 0
+
+    found = client_tools.run_shell({"command": "echo hi"}, windows_run.context)
+
+    assert found["exit_code"] == 0
+    (_command,), kwargs = client_tools.subprocess.Popen.call_args
+    assert kwargs["creationflags"] == 0x4 | 0x200  # suspended, own group
+    assert "start_new_session" not in kwargs
+    assert calls.mock_calls == [
+        mock.call.Job(),
+        mock.call.Job().adopt(calls.proc),
+        mock.call.proc.poll(),
+        mock.call.proc.wait(),
+        mock.call.Job().close(),  # kills anything left behind
+    ]
+    job.terminate.assert_not_called()
+
+
+def test_run_shell_windows_w_adopt_failure(windows_run):
+    # The shell never ran:  it is killed (outside the job), reaped, and
+    # the job closed.
+    calls = windows_run.calls
+    calls.Job.return_value.adopt.side_effect = OSError("assign")
+
+    with pytest.raises(OSError, match="assign"):
+        client_tools.run_shell({"command": "echo hi"}, windows_run.context)
+
+    assert calls.mock_calls == [
+        mock.call.Job(),
+        mock.call.Job().adopt(calls.proc),
+        mock.call.Job().terminate(),
+        mock.call.proc.kill(),
+        mock.call.proc.wait(),
+        mock.call.Job().close(),
+    ]
+
+
+def test_run_shell_windows_w_interrupt(windows_run):
+    calls = windows_run.calls
+    calls.proc.poll.return_value = None
+
+    with mock.patch.object(
+        client_tools.time,
+        "sleep",
+        side_effect=KeyboardInterrupt,
+    ):
+        with pytest.raises(KeyboardInterrupt):
+            client_tools.run_shell({"command": "echo hi"}, windows_run.context)
+
+    assert calls.mock_calls[-4:] == [
+        mock.call.Job().terminate(),
+        mock.call.proc.kill(),
+        mock.call.proc.wait(),
+        mock.call.Job().close(),
+    ]
+
+
+def test_run_shell_windows_w_popen_failure(windows_run):
+    # No process to kill or reap;  the job is still closed.
+    calls = windows_run.calls
+    client_tools.subprocess.Popen.side_effect = OSError("no shell")
+
+    with pytest.raises(OSError, match="no shell"):
+        client_tools.run_shell({"command": "echo hi"}, windows_run.context)
+
+    assert calls.mock_calls == [mock.call.Job(), mock.call.Job().close()]
+
+
+def test_run_shell_windows_w_interrupted_reap(windows_run):
+    # The job is closed (killing all in it) however the reap ends.
+    calls = windows_run.calls
+    calls.Job.return_value.adopt.side_effect = RuntimeError("adopt")
+    calls.proc.wait.side_effect = KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        client_tools.run_shell({"command": "echo hi"}, windows_run.context)
+
+    assert calls.mock_calls[-2:] == [
+        mock.call.proc.wait(),
+        mock.call.Job().close(),
+    ]
+
+
+def test_run_shell_windows_w_job_failure(windows_run):
+    # Nothing runs without a job to hold it.
+    windows_run.calls.Job.side_effect = OSError("no job")
+
+    with pytest.raises(OSError, match="no job"):
+        client_tools.run_shell({"command": "echo hi"}, windows_run.context)
+
+    client_tools.subprocess.Popen.assert_not_called()
 
 
 # -- run_shell:  environment -------------------------------------------------
@@ -649,20 +954,34 @@ def _child_port(root) -> int:
     return int((root / "port.txt").read_text(encoding="utf-8"))
 
 
-def _connection_refused(port: int) -> bool:
-    """Is nothing listening on 'port'?  (Once the grandchild is dead.)"""
+#   Windows answers a connection to a closed loopback port only after
+#   retrying the SYN for about 2 seconds:  a shorter timeout would report
+#   a dead grandchild as alive.  (A live one accepts at once:  the backlog
+#   holds the connection.)
+CONNECT_TIMEOUT_SECS = 5.0
+
+
+def _connection_refused(port: int) -> bool | OSError:
+    """Is nothing listening on 'port'?  (Once the grandchild is dead.)
+
+    'True' if refused;  else the connection's error (any other), or
+    'False' if it connected.
+    """
     try:
-        socket.create_connection(("127.0.0.1", port), timeout=1.0).close()
-    except OSError as exc:  # e.g. reset:  it is going
-        return isinstance(exc, ConnectionRefusedError)
+        socket.create_connection(
+            ("127.0.0.1", port),
+            timeout=CONNECT_TIMEOUT_SECS,
+        ).close()
+    except OSError as exc:  # other than refused, e.g. reset:  it is going
+        return isinstance(exc, ConnectionRefusedError) or exc
 
     return False
 
 
-def _eventually(predicate, message, deadline_secs=10.0) -> None:
+def _eventually(predicate, message, deadline_secs=20.0) -> None:
     deadline = time.monotonic() + deadline_secs
-    while not predicate():
-        assert time.monotonic() < deadline, message
+    while (found := predicate()) is not True:
+        assert time.monotonic() < deadline, f"{message} (last: {found!r})"
         time.sleep(0.02)
 
 
@@ -686,7 +1005,7 @@ def _started_then(root, outcome):
             return False
 
         # Else '_assert_all_dead' would prove nothing.
-        assert not _connection_refused(_child_port(root))
+        assert _connection_refused(_child_port(root)) is False
 
         if isinstance(outcome, BaseException):
             raise outcome
@@ -837,9 +1156,34 @@ def test_run_shell_w_interrupt_after_the_shell_exited(root):
     _assert_all_dead(root)
 
 
-def test_run_shell_kills_before_reaping(context):
+def test_run_shell_w_interrupt_after_the_parent_exited(root):
+    # 'parent.py' starts 'child.py' and exits at once, orphaning it:  a
+    # walk of the process tree down from the shell (as 'taskkill /T' does)
+    # misses it, so on Windows only the job object can kill it.
+    (root / "child.py").write_text(_CHILD_SOURCE, encoding="utf-8")
+    command = _script(
+        root,
+        "parent.py",
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, 'child.py'])\n",
+    )
+    context = client_tools.ToolContext(
+        root=root,
+        allow_anywhere=True,
+        is_cancelled=_started_then(root, KeyboardInterrupt()),
+    )
+
+    with mock.patch.object(client_tools, "_exited", return_value=False):
+        with pytest.raises(KeyboardInterrupt):
+            client_tools.run_shell({"command": command}, context)
+
+    _assert_all_dead(root)
+
+
+def test_run_shell_kills_before_reaping(context, monkeypatch):
     # The command's ID (and its group's) stays its own until it is reaped:
-    # so kill first, then reap.
+    # so kill first, then reap.  (POSIX:  on Windows, '_Job' holds it.)
+    monkeypatch.setattr(client_tools, "_POSIX", True)
     calls = mock.Mock()
     proc = calls.proc
     proc.wait.return_value = -9
@@ -857,7 +1201,10 @@ def test_run_shell_kills_before_reaping(context):
         with pytest.raises(KeyboardInterrupt):
             client_tools.run_shell({"command": "echo hi"}, context)
 
-    assert calls.mock_calls == [mock.call.kill(proc), mock.call.proc.wait()]
+    assert calls.mock_calls == [
+        mock.call.kill(proc, None),
+        mock.call.proc.wait(),
+    ]
 
 
 @pytest.mark.parametrize(

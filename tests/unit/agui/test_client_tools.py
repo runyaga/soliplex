@@ -744,6 +744,31 @@ def test_run_shell_windows_w_normal_exit(windows_run):
     job.terminate.assert_not_called()
 
 
+def test_run_shell_posix_w_normal_exit(monkeypatch, context):
+    # As on POSIX, on any host:  no job, its own session.
+    monkeypatch.setattr(client_tools, "_POSIX", True)
+    monkeypatch.setattr(client_tools, "_Job", mock.Mock(name="_Job"))
+    proc = mock.Mock(name="proc")
+    proc.wait.return_value = 0
+
+    with (
+        mock.patch.object(
+            client_tools.subprocess,
+            "Popen",
+            return_value=proc,
+        ) as popen,
+        mock.patch.object(client_tools, "_exited", return_value=True),
+    ):
+        found = client_tools.run_shell({"command": "echo hi"}, context)
+
+    assert found["exit_code"] == 0
+    (_command,), kwargs = popen.call_args
+    assert kwargs["start_new_session"] is True
+    assert "creationflags" not in kwargs
+    client_tools._Job.assert_not_called()
+    proc.kill.assert_not_called()
+
+
 def test_run_shell_windows_w_adopt_failure(windows_run):
     # The shell never ran:  it is killed (outside the job), reaped, and
     # the job closed.

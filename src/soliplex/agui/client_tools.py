@@ -32,6 +32,7 @@ This module holds everything but the user interface, so that clients
 
 from __future__ import annotations
 
+import ctypes
 import dataclasses
 import datetime
 import fnmatch
@@ -628,12 +629,232 @@ def child_environment(
     }
 
 
-def _kill(proc: subprocess.Popen) -> None:
+#
+#   Windows:  a job object holds the command, and everything it starts
+#
+#   'taskkill /T' walks the process tree down from the shell, so it misses
+#   any process whose parent has exited (Windows does not reparent an
+#   orphan, as POSIX does to its session).  Instead, the shell is started
+#   suspended ('CREATE_SUSPENDED'), assigned to a job object while it can
+#   have started nothing, and only then resumed:  every process it starts
+#   joins the job too (the job allows no breakaway), however its parents
+#   exit, and 'TerminateJobObject' kills them all.  The job is created
+#   with 'JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE', and 'run_shell' holds its
+#   only handle (not inheritable):  closing it, when the command is done,
+#   kills anything still left in the job, even after a normal exit.
+#
+#   'subprocess.Popen' closes the new process's primary-thread handle, so
+#   'ResumeThread' is out of reach.  'NtResumeProcess' (ntdll) resumes a
+#   process's threads given only the process handle, which 'Popen' keeps:
+#   undocumented, but exported since Windows XP, and what e.g. psutil
+#   uses to resume a process.  (The alternative -- finding the thread with
+#   a Toolhelp32 snapshot, and opening it -- is more code, and more
+#   handles, for the same result.)
+#
+#   'CREATE_NEW_PROCESS_GROUP' is the Windows counterpart of the POSIX
+#   'start_new_session':  the console's Ctrl-C does not reach the command
+#   (its group ignores it);  'run_shell' kills it instead.
+_CREATE_SUSPENDED = 0x00000004
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9  # 'JOBOBJECTINFOCLASS'
+_KILLED_EXIT_CODE = 1  # as for 'Popen.kill', and 'taskkill /F'
+
+
+class _JobBasicLimitInformation(ctypes.Structure):
+    """'JOBOBJECT_BASIC_LIMIT_INFORMATION'"""
+
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _IOCounters(ctypes.Structure):
+    """'IO_COUNTERS'"""
+
+    _fields_ = [
+        (name, ctypes.c_uint64)
+        for name in [
+            "ReadOperationCount",
+            "WriteOperationCount",
+            "OtherOperationCount",
+            "ReadTransferCount",
+            "WriteTransferCount",
+            "OtherTransferCount",
+        ]
+    ]
+
+
+class _JobExtendedLimitInformation(ctypes.Structure):
+    """'JOBOBJECT_EXTENDED_LIMIT_INFORMATION'"""
+
+    _fields_ = [
+        ("BasicLimitInformation", _JobBasicLimitInformation),
+        ("IoInfo", _IOCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+class ResumeFailed(OSError):
+    """Windows:  'NtResumeProcess' could not resume the command"""
+
+    def __init__(self, status: int):
+        self.status = status
+        super().__init__(
+            f"NtResumeProcess failed: NTSTATUS {status & 0xFFFFFFFF:#010x}"
+        )
+
+
+def _win32() -> tuple[typing.Any, typing.Any]:
+    """'(kernel32, ntdll)', with the signatures '_Job' calls declared
+
+    Private instances (not 'ctypes.windll''s shared ones), so that the
+    declarations cannot clash with any other module's.
+    """
+    handle = ctypes.c_void_p
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+
+    for dll, name, restype, argtypes in [
+        (kernel32, "CreateJobObjectW", handle, [ctypes.c_void_p] * 2),
+        (
+            kernel32,
+            "SetInformationJobObject",
+            ctypes.c_int,
+            [handle, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32],
+        ),
+        (kernel32, "AssignProcessToJobObject", ctypes.c_int, [handle] * 2),
+        (
+            kernel32,
+            "TerminateJobObject",
+            ctypes.c_int,
+            [handle, ctypes.c_uint],
+        ),
+        (kernel32, "CloseHandle", ctypes.c_int, [handle]),
+        (ntdll, "NtResumeProcess", ctypes.c_long, [handle]),
+    ]:
+        function = getattr(dll, name)
+        function.restype = restype
+        function.argtypes = argtypes
+
+    return kernel32, ntdll
+
+
+def _win_error(function: str) -> OSError:
+    """The 'OSError' for a failed 'kernel32' call ('GetLastError')"""
+    error = ctypes.WinError(ctypes.get_last_error())
+    error.add_note(f"in {function}")
+    return error
+
+
+class _Job:
+    """A Windows job object which kills its processes when closed
+
+    See the comment above '_CREATE_SUSPENDED'.  Construct it before
+    starting the command (nothing runs if it cannot be made), 'adopt' the
+    suspended command, 'terminate' it to kill everything in it, and always
+    'close' it.
+    """
+
+    def __init__(self):
+        self._kernel32, self._ntdll = _win32()
+        self._handle = self._kernel32.CreateJobObjectW(None, None)
+
+        if not self._handle:
+            raise _win_error("CreateJobObjectW")
+
+        try:
+            self._kill_on_close()
+        except BaseException:
+            self.close()
+            raise
+
+    def _kill_on_close(self) -> None:
+        info = _JobExtendedLimitInformation()
+        info.BasicLimitInformation.LimitFlags = (
+            _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        )
+
+        if not self._kernel32.SetInformationJobObject(
+            self._handle,
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.addressof(info),
+            ctypes.sizeof(info),
+        ):
+            raise _win_error("SetInformationJobObject")
+
+    def adopt(self, proc: subprocess.Popen) -> None:
+        """Assign 'proc' (started suspended) to the job, then resume it
+
+        If this raises, 'proc' may still be suspended, outside the job:
+        the caller must kill it ('_kill' does).
+        """
+        # 'Popen' keeps the process handle for its own lifetime (reaping
+        # does not close it), with the 'PROCESS_ALL_ACCESS' 'CreateProcess'
+        # grants:  enough to assign, resume and terminate it.
+        process = int(proc._handle)
+
+        if not self._kernel32.AssignProcessToJobObject(self._handle, process):
+            raise _win_error("AssignProcessToJobObject")
+
+        status = self._ntdll.NtResumeProcess(process)
+
+        if status != 0:  # an 'NTSTATUS':  negative on failure
+            raise ResumeFailed(status)
+
+    def terminate(self) -> None:
+        """Kill every process in the job
+
+        Does not raise:  it runs as the command is being killed, whatever
+        interrupted it.  Should it fail, 'close' kills them anyway.
+        """
+        if self._handle:
+            self._kernel32.TerminateJobObject(self._handle, _KILLED_EXIT_CODE)
+
+    def close(self) -> None:
+        """Close the job's handle, killing anything left in it;  idempotent
+
+        The handle is forgotten before it is closed, so that no second
+        'close' can close it again (by then, perhaps another object's):
+        an interrupt between the two leaks it only until this process
+        exits, when Windows closes it, and so kills the job, anyway.
+        """
+        handle, self._handle = self._handle, None
+
+        if handle:
+            self._kernel32.CloseHandle(handle)
+
+
+def _new_job() -> _Job | None:
+    """On Windows, a new '_Job' for a command to run in;  else, 'None'"""
+    return None if _POSIX else _Job()
+
+
+def _popen_options() -> dict:
+    """'Popen' options starting a command which '_kill' can kill whole"""
+    if _POSIX:
+        return {"start_new_session": True}  # own process group
+
+    return {"creationflags": _CREATE_SUSPENDED | _CREATE_NEW_PROCESS_GROUP}
+
+
+def _kill(proc: subprocess.Popen, job: _Job | None) -> None:
     """Kill a command, with the processes it started
 
     'proc' is the shell ('shell=True'), so killing it alone would leave
     the command running.  On POSIX, kill its process group (it leads its
-    own session);  on Windows, its process tree.
+    own session);  on Windows, its job ('job', which POSIX ignores).
     """
     if _POSIX:
         try:
@@ -641,14 +862,28 @@ def _kill(proc: subprocess.Popen) -> None:
         except ProcessLookupError:  # already gone
             pass
     else:
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        proc.kill()  # in case 'taskkill' could not
+        job.terminate()
+        proc.kill()  # in case it is not in the job ('_Job.adopt' failed)
+
+
+def _reap(
+    proc: subprocess.Popen | None,
+    job: _Job | None,
+    *,
+    kill: bool,
+) -> int | None:
+    """Reap 'proc' (if it started), killing it first if 'kill';  its code
+
+    Kill, then reap:  the command's ID (and its group's) stays its own
+    until it is reaped (see '_exited').
+    """
+    if proc is None:  # 'Popen' raised:  nothing started
+        return None
+
+    if kill:
+        _kill(proc, job)
+
+    return proc.wait()
 
 
 def _read_capped(stream, cap: int) -> tuple[str, int, bool]:
@@ -737,39 +972,55 @@ def run_shell(args: dict, context: ToolContext) -> dict:
     if context.is_cancelled is not None and context.is_cancelled():
         raise CommandCancelled()
 
-    with (
-        tempfile.TemporaryFile() as stdout_file,
-        tempfile.TemporaryFile() as stderr_file,
-    ):
-        proc = subprocess.Popen(
-            command,
-            shell=True,
-            cwd=context.root,
-            stdin=subprocess.DEVNULL,
-            stdout=stdout_file,
-            stderr=stderr_file,
-            env=child_environment(pass_env=context.pass_env),
-            start_new_session=True,  # own process group, to kill it all
-        )
-        exited = timed_out = False
+    job = proc = None
 
-        try:
-            _wait(proc, context)
-            exited = True
-        except subprocess.TimeoutExpired:
-            timed_out = True
-        finally:
-            # Whatever else ended the wait -- a timeout, a cancellation,
-            # Ctrl-C, any other exception -- the command must not outlive
-            # it, even if it exited meanwhile, leaving processes behind.
-            if not exited:
-                _kill(proc)
+    try:
+        job = _new_job()
 
-            exit_code = proc.wait()  # reap it
+        with (
+            tempfile.TemporaryFile() as stdout_file,
+            tempfile.TemporaryFile() as stderr_file,
+        ):
+            exited = timed_out = False
 
-        cap = context.output_cap_bytes
-        stdout, stdout_bytes, stdout_cut = _read_capped(stdout_file, cap)
-        stderr, stderr_bytes, stderr_cut = _read_capped(stderr_file, cap)
+            try:
+                # Within the 'try', so that an interrupt as soon as it
+                # returns still kills the command.  (One inside 'Popen',
+                # once the process exists, cannot:  'Popen' does not kill
+                # it.  On Windows, it stays suspended, having run nothing.)
+                proc = subprocess.Popen(
+                    command,
+                    shell=True,
+                    cwd=context.root,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    env=child_environment(pass_env=context.pass_env),
+                    **_popen_options(),
+                )
+
+                if job is not None:
+                    job.adopt(proc)  # Windows:  it starts suspended
+
+                _wait(proc, context)
+                exited = True
+            except subprocess.TimeoutExpired:
+                timed_out = True
+            finally:
+                # Whatever else ended the wait -- a timeout, a
+                # cancellation, Ctrl-C, any other exception -- the command
+                # must not outlive it, even if it exited meanwhile,
+                # leaving processes behind.
+                exit_code = _reap(proc, job, kill=not exited)
+
+            cap = context.output_cap_bytes
+            stdout, stdout_bytes, stdout_cut = _read_capped(stdout_file, cap)
+            stderr, stderr_bytes, stderr_cut = _read_capped(stderr_file, cap)
+    finally:
+        # Windows:  kills anything left in the job, even should the reap
+        # above have been interrupted.
+        if job is not None:
+            job.close()
 
     if timed_out:
         stderr += f"\n[timed out after {context.timeout_secs:g} seconds]"

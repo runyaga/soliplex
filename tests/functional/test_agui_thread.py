@@ -1,12 +1,19 @@
 import json
 import re
+import socket
+import threading
 import time
 import uuid
 
+import httpx
 import pydantic
+import pytest
+import uvicorn
 from ag_ui import core as agui_core
 
+from soliplex import main
 from soliplex.agui import parser as agui_parser
+from soliplex.config import routing as config_routing
 
 EVENT_DESERIALIZER = pydantic.TypeAdapter(agui_core.Event)
 
@@ -270,3 +277,138 @@ def test_post_rooms_roomid_agui_threadid_w_parent_run_id(client_no_llm):
     )
 
     assert response.status_code == 400
+
+
+# A read timeout short of the 15-second SSE keepalive interval:  a run
+# whose stream never ends fails the test instead of hanging it.
+STREAM_READ_TIMEOUT_SECS = 10.0
+
+
+@pytest.fixture(scope="module")
+def no_llm_server_url():
+    """Serve the no-LLM installation over a real socket
+
+    'TestClient' collects the whole response body before it returns, so
+    a stream which never ends would hang the test, with no way to time
+    it out.  A real server lets the client's read timeout fire, and lets
+    the server see the client disconnect.
+    """
+    config_routing.register_default_routers()
+    app = main.create_app("example/functest_no_llm.yaml", no_auth_mode=True)
+    config_routing.add_registered_routers(app)
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    host, port = sock.getsockname()
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            log_level="warning",
+            ws="none",
+            timeout_graceful_shutdown=2,
+        ),
+    )
+    thread = threading.Thread(
+        target=server.run,
+        kwargs={"sockets": [sock]},
+        daemon=True,
+    )
+    thread.start()
+
+    try:
+        deadline = time.monotonic() + 30.0
+        while not server.started:
+            assert thread.is_alive(), "server failed to start"
+            assert time.monotonic() < deadline, "server did not start"
+            time.sleep(0.05)
+
+        yield f"http://{host}:{port}"
+
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10.0)
+        sock.close()
+
+    assert not thread.is_alive(), "server did not stop"
+
+
+def test_post_rooms_roomid_agui_threadid_runid_w_bad_history(
+    no_llm_server_url,
+):
+    """A history the agent cannot load fails the run, not the stream.
+
+    A tool result without its tool call raises while 'run_stream'
+    converts the messages, before the agent's stream exists.  The client
+    must still get 'RUN_ERROR' and the end of the stream, and the run
+    must be marked finished;  it used to get keepalives forever.
+    """
+    room_id = "faux"
+    base = f"{no_llm_server_url}/api/v1/rooms/{room_id}/agui"
+
+    with httpx.Client(timeout=STREAM_READ_TIMEOUT_SECS) as client:
+        response = client.post(base, json={})
+        assert response.status_code == 200
+        thread_id = response.json()["thread_id"]
+        (run_id,) = response.json()["runs"]
+
+        run_request = {
+            "thread_id": thread_id,
+            "run_id": run_id,
+            "state": None,
+            "messages": [
+                {
+                    "id": str(uuid.uuid4()),
+                    "role": "user",
+                    "content": IDENTITY_QUERY,
+                },
+                {
+                    "id": str(uuid.uuid4()),
+                    "role": "tool",
+                    "tool_call_id": "no-such-tool-call",
+                    "content": "orphaned tool result",
+                },
+            ],
+            "context": [],
+            "tools": [],
+            "forwarded_props": None,
+        }
+
+        event_types = []
+
+        try:
+            with client.stream(
+                method="POST",
+                url=f"{base}/{thread_id}/{run_id}",
+                json=run_request,
+            ) as response:
+                assert response.status_code == 200
+
+                for raw_line in response.iter_lines():
+                    if raw_line.startswith(SSE_DATA_PREFIX):
+                        event_json = json.loads(
+                            raw_line[len(SSE_DATA_PREFIX) :],
+                        )
+                        event_types.append(event_json["type"])
+
+        except httpx.ReadTimeout:
+            pytest.fail(f"stream did not end; events: {event_types}")
+
+        assert event_types == ["RUN_STARTED", "RUN_ERROR"]
+
+        # The stream ends before the driver marks the run finished.
+        deadline = time.monotonic() + STREAM_READ_TIMEOUT_SECS
+        while True:
+            response = client.get(f"{base}/{thread_id}/{run_id}")
+            assert response.status_code == 200
+            run_json = response.json()
+            if run_json["finished"] is not None:
+                break
+            assert time.monotonic() < deadline, "run not marked finished"
+            time.sleep(0.1)
+
+        found_types = [event["type"] for event in run_json["events"]]
+        assert found_types == event_types
+        assert "no-such-tool-call" in run_json["events"][-1]["message"]
+
+        client.delete(f"{base}/{thread_id}")

@@ -716,18 +716,46 @@ async def stream_llm_events(event_queue: asyncio.Queue):
         yield event
 
 
+async def run_error_stream(*, thread_id: str, run_id: str, message: str):
+    """Yield the events of a run which failed before the agent started
+
+    'RUN_STARTED', then 'RUN_ERROR':  the same shape as the adapter's own
+    stream when the agent fails mid-run.
+    """
+    yield agui_core.RunStartedEvent(thread_id=thread_id, run_id=run_id)
+    yield agui_core.RunErrorEvent(message=message)
+
+
 async def init_agent_stream(
     *,
     agui_adapter: ai_ag_ui.AGUIAdapter,
     run_stream_kwargs: dict,
     **drive_kwargs,
 ):
-    w_final_state = agui.with_final_state(
-        stream=agui_adapter.run_stream(**run_stream_kwargs),
-        deps=run_stream_kwargs.get("deps"),
-    )
-    compacted = agui.compact_event_stream(w_final_state)
-    await drive_llm_stream(llm_stream=compacted, **drive_kwargs)
+    """Start the agent's stream, and drive it to completion
+
+    'run_stream' converts the run input's messages to the model history
+    *before* it returns its stream, so an inconsistent history (e.g., a
+    tool result without its tool call) raises here, outside the stream.
+    Drive a 'RUN_ERROR' stream instead, so that the client sees the
+    error, its stream ends, and the run is marked finished.
+    """
+    try:
+        agent_stream = agui_adapter.run_stream(**run_stream_kwargs)
+    except Exception as exc:
+        llm_stream = run_error_stream(
+            thread_id=drive_kwargs["thread_id"],
+            run_id=drive_kwargs["run_id"],
+            message=str(exc),
+        )
+    else:
+        w_final_state = agui.with_final_state(
+            stream=agent_stream,
+            deps=run_stream_kwargs.get("deps"),
+        )
+        llm_stream = agui.compact_event_stream(w_final_state)
+
+    await drive_llm_stream(llm_stream=llm_stream, **drive_kwargs)
 
 
 def parse_last_event_id(header_value: str | None):

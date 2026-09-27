@@ -1500,6 +1500,56 @@ async def test_init_agent_stream_adds_final_state(ces, dls):
     assert found[1].snapshot == deps.state
 
 
+# 'run_stream' converts the history before it returns a stream, so a
+# history it cannot load raises from the call itself (e.g., a
+# tool result without its tool call).
+@pytest.mark.asyncio
+@mock.patch("soliplex.views.agui.drive_llm_stream")
+@mock.patch("soliplex.agui.compact_event_stream")
+@mock.patch("soliplex.agui.with_final_state")
+async def test_init_agent_stream_w_run_stream_error(wfs, ces, dls):
+    adapter = mock.MagicMock()
+    adapter.run_stream.side_effect = ValueError("Tool call not found")
+    run_stream_kwargs = {"deps": object(), "on_complete": object()}
+    drive_kwargs = {
+        "sqla_engine": object(),
+        "event_queue": asyncio.Queue(),
+        "user_name": USER_NAME,
+        "room_id": TEST_ROOM_ID,
+        "thread_id": TEST_THREAD_ID_STR,
+        "run_id": TEST_RUN_ID_STR,
+        "title_agent_config": None,
+        "messages": [],
+    }
+
+    await agui_views.init_agent_stream(
+        agui_adapter=adapter,
+        run_stream_kwargs=run_stream_kwargs,
+        **drive_kwargs,
+    )
+
+    adapter.run_stream.assert_called_once_with(**run_stream_kwargs)
+    wfs.assert_not_called()
+    ces.assert_not_called()
+
+    # The error stream is driven like any other, so the run gets its
+    # events saved and is marked finished.
+    dls.assert_awaited_once()
+    call_kwargs = dls.await_args.kwargs
+    stream = call_kwargs.pop("llm_stream")
+    assert call_kwargs == drive_kwargs
+
+    found = [event async for event in stream]
+
+    assert [event.type for event in found] == [
+        agui_core.EventType.RUN_STARTED,
+        agui_core.EventType.RUN_ERROR,
+    ]
+    assert found[0].thread_id == TEST_THREAD_ID_STR
+    assert found[0].run_id == TEST_RUN_ID_STR
+    assert found[1].message == "Tool call not found"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "w_bogus_thread_id, w_bogus_run_id",

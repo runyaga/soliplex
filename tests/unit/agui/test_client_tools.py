@@ -11,6 +11,7 @@ import pathlib
 import re
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -27,6 +28,7 @@ from pydantic_ai import messages as ai_messages
 from soliplex import main
 from soliplex.agui import client_tools
 from soliplex.agui import harness
+from soliplex.agui import parser as agui_parser
 from soliplex.config import routing as config_routing
 from tests._dburi import sqlite_dburi
 from tests.unit.agui import scripted_shell_room
@@ -576,6 +578,108 @@ def test__read_capped_head_tail_stays_within_the_cap(char, cap, extra):
     # Most of the room is used (a character's worth either side at most).
     assert len(text.encode()) > cap - 8
     assert len(head_bytes) >= len(tail_bytes)
+
+
+def test_run_shell_caps_both_streams(root):
+    command = _script(
+        root,
+        "both.py",
+        "import sys\n"
+        "sys.stdout.write('o' * 5000)\n"
+        "sys.stderr.write('e' * 5000)\n",
+    )
+    context = client_tools.ToolContext(
+        root=root,
+        allow_anywhere=True,
+        output_cap_bytes=300,
+    )
+
+    found = client_tools.run_shell({"command": command}, context)
+
+    assert (found["stdout_bytes"], found["stderr_bytes"]) == (5000, 5000)
+    assert len(found["stdout"].encode()) <= 300
+    assert len(found["stderr"].encode()) <= 300
+    assert "bytes omitted" in found["stdout"]
+    assert "bytes omitted" in found["stderr"]
+    assert found["truncated"] is True
+
+
+def test_run_shell_timeout_note_within_the_cap(root):
+    command = _script(
+        root,
+        "noisy.py",
+        "import sys, time\n"
+        "sys.stderr.write('e' * 5000)\n"
+        "sys.stderr.flush()\n"
+        "time.sleep(30)\n",
+    )
+    context = client_tools.ToolContext(
+        root=root,
+        allow_anywhere=True,
+        timeout_secs=1.5,
+        output_cap_bytes=300,
+    )
+
+    found = client_tools.run_shell({"command": command}, context)
+
+    assert found["timed_out"] is True
+    assert found["stderr"].endswith("\n[timed out after 1.5 seconds]")
+    assert len(found["stderr"].encode()) <= 300
+
+
+def test_run_shell_timeout_note_w_tiny_cap(root, monkeypatch):
+    # A cap smaller than the note:  the note alone.
+    monkeypatch.setattr(
+        client_tools,
+        "_read_capped",
+        mock.Mock(return_value=("", 0, False)),
+    )
+    monkeypatch.setattr(
+        client_tools,
+        "_wait",
+        mock.Mock(side_effect=subprocess.TimeoutExpired("cmd", 1)),
+    )
+    context = client_tools.ToolContext(
+        root=root,
+        allow_anywhere=True,
+        output_cap_bytes=10,
+    )
+
+    found = client_tools.run_shell({"command": "echo hi"}, context)
+
+    assert found["timed_out"] is True
+    (_, stderr_call) = client_tools._read_capped.call_args_list
+    assert stderr_call.args[1] == 0
+
+
+class _GrowingStream(io.BytesIO):
+    """A file a background command still writes to, as it is read"""
+
+    def seek(self, offset, whence=os.SEEK_SET):
+        position = super().seek(offset, whence)
+        if whence == os.SEEK_SET and offset > 0:
+            end = super().seek(0, os.SEEK_END)
+            self.write(b"LATE" * 1000)
+            super().seek(position)
+            assert end >= position
+        return position
+
+    def read(self, size=-1):
+        assert size is not None
+        assert size >= 0, "an unbounded read"
+        return super().read(size)
+
+
+def test__read_capped_w_growing_stream():
+    stream = _GrowingStream(b"a" * 1000 + b"END")
+
+    text, size, cut = client_tools._read_capped(stream, 300)
+
+    # Read up to the size first seen:  the late writes are not in it.
+    assert size == 1003
+    assert text.endswith("END")
+    assert "LATE" not in text
+    assert len(text.encode()) <= 300
 
 
 def test_run_shell_times_out_and_kills_the_command(root):
@@ -2318,6 +2422,71 @@ def test_run_loop_w_bad_sse_json(root):
         client_tools.run_loop(client, _run_input(), context)
 
 
+def test_pending_tool_calls_w_duplicate_ids():
+    # The same call id twice is one call:  executed once.
+    first = agui_core.ToolCall(
+        id="c1",
+        function=agui_core.FunctionCall(name="shell", arguments="{}"),
+    )
+    again = first.model_copy()
+    messages = [
+        agui_core.AssistantMessage(id="a1", tool_calls=[first]),
+        agui_core.AssistantMessage(id="a2", tool_calls=[again]),
+    ]
+
+    assert client_tools.pending_tool_calls(messages) == [first]
+
+
+def test_history_from_events():
+    events = [
+        agui_parser.agui_event_from_json(event)
+        for event in [
+            _started(),
+            *_call("c1", "server_tool", "{}", parent=None),
+            {
+                "type": "TOOL_CALL_RESULT",
+                "toolCallId": "c1",
+                "messageId": "r1",
+                "content": "server-result",
+            },
+            *_text("a1", "Done."),
+            _finished(),
+        ]
+    ]
+
+    found = client_tools.history_from_events(_run_input(), events)
+
+    # The parentless call is kept, under a made-up parent:  its result is
+    # not an orphan.
+    assert harness.pairing_problems(found.messages) == []
+    (call_message,) = [
+        message
+        for message in found.messages
+        if isinstance(message, agui_core.AssistantMessage)
+        and message.tool_calls
+    ]
+    assert call_message.tool_calls[0].id == "c1"
+    assert found.messages[-1].content == "Done."
+
+
+def test_history_from_events_w_invalid_state_delta():
+    events = [
+        agui_parser.agui_event_from_json(event)
+        for event in [
+            _started(),
+            {
+                "type": "STATE_DELTA",
+                "delta": [{"op": "replace", "path": "/nope/x", "value": 1}],
+            },
+            _finished(),
+        ]
+    ]
+
+    found = client_tools.history_from_events(_run_input(), events)
+
+    assert found.state == client_tools.INVALID_STATE
+
+
 def test_pending_tool_calls():
     call = agui_core.ToolCall(
         id="c1",
@@ -2412,13 +2581,37 @@ def _parts(history, part_type):
     ]
 
 
+@pytest.mark.parametrize("w_harness", [False, True])
 @pytest.mark.parametrize("prompt", ["just shell", "mixed tools"])
-def test_run_loop_end_to_end(e2e_client, root, prompt):
+def test_run_loop_end_to_end(e2e_client, root, prompt, w_harness):
     context = client_tools.ToolContext(root=root)
     thread = e2e_client.new_thread()
     run_input = client_tools.initial_run_input(thread, prompt)
+    hooks = {}
 
-    found = client_tools.run_loop(e2e_client, run_input, context)
+    if w_harness:  # through the real routes, the harness on
+        the_harness = harness.make_harness(
+            e2e_client.room_info(),
+            compaction=harness.CompactionPolicy(
+                mode=harness.COMPACTION_ALWAYS,
+                keep_recent=0,
+                min_elide_chars=1,
+            ),
+        )
+        hooks = {
+            "before_post": the_harness.before_post,
+            "after_run": the_harness.after_run,
+        }
+
+    found = client_tools.run_loop(e2e_client, run_input, context, **hooks)
+
+    if w_harness:
+        assert [report.first for report in the_harness.reports] == [
+            True,
+            False,
+        ]
+        # The server's usage anchored the budget:  a measured run.
+        assert the_harness.budget.anchor_tokens is not None
 
     assert len(found.run_ids) == 2
     assert [(call.name, call.exit_code) for call in found.tool_calls] == [

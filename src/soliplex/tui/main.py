@@ -1084,25 +1084,22 @@ class RoomView(t_screen.Screen):
 
         if run_input is not None:
             rai = agui_core.RunAgentInput.model_validate(run_input)
-            esp = agui_parser.EventStreamParser(rai)
             full_run_info = self.rest_api.get_run(
                 self.room_id,
                 thread_id,
                 last_run["run_id"],
             )
+            # As 'run_loop' builds it:  e.g., a parentless tool call keeps
+            # its result paired.
+            self.run_agent_input = client_tools.history_from_events(
+                rai,
+                (
+                    agui_parser.agui_event_from_json(event_info)
+                    for event_info in full_run_info["events"]
+                ),
+            )
 
-            for event_info in full_run_info["events"]:
-                event = agui_parser.agui_event_from_json(event_info)
-                esp(event)
-
-            if esp.invalid_state_deltas:  # see #1260
-                esp.state = {
-                    "error": "'STATE_DELTA' without final 'STATE_SNAPSHOT'",
-                }
-
-            self.run_agent_input = esp.as_run_agent_input
-
-            for message in esp.messages:
+            for message in self.run_agent_input.messages:
                 if message.role == "user":
                     scroller.mount(Prompt(message.content))
                 elif (

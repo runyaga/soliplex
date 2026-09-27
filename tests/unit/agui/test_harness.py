@@ -668,6 +668,7 @@ def test_harness_before_post_compacts_always():
         "window_tokens": None,
         "window_source": None,
         "stale": False,
+        "answered": 0,
     }
 
     # Again:  nothing more to do, and the same bytes.
@@ -1311,3 +1312,117 @@ def test_harness_before_post_compacts_then_checks_pairing():
         )
 
     assert the_harness.reports == []
+
+
+# -- unanswered calls --------------------------------------------------------
+
+
+def _unanswered_content():
+    return json.loads(
+        client_tools.tool_result_content(
+            client_tools._not_run(harness.UNANSWERED_ERROR),
+        ),
+    )
+
+
+def test_answer_unanswered_w_duplicate_call_ids():
+    # The same id twice is one call:  answered once.
+    messages = [_user(), _assistant("a1", "c1"), _assistant("a2", "c1")]
+
+    found, added = harness.answer_unanswered(messages)
+
+    assert added == 1
+    assert [m.role for m in found] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+
+
+def test_answer_unanswered_w_nothing_to_do():
+    messages = [_user(), _assistant("a1", "c1"), _result("t1", "c1")]
+
+    found, added = harness.answer_unanswered(messages)
+
+    assert (found, added) == (messages, 0)
+
+
+def test_answer_unanswered():
+    # A reloaded thread:  a run cancelled with 'c2' unanswered (its
+    # sibling 'c1' answered), then a new prompt;  and a trailing call.
+    messages = [
+        _user("u1"),
+        _assistant("a1", "c1", "c2"),
+        _result("t1", "c1"),
+        _user("u2"),
+        _assistant("a2", "c3"),
+        _assistant("a3", content="thinking"),
+    ]
+
+    found, added = harness.answer_unanswered(messages)
+
+    assert added == 2
+    assert [m.id for m in found if m.role != "tool" or m.id == "t1"] == [
+        "u1",
+        "a1",
+        "t1",
+        "u2",
+        "a2",
+        "a3",
+    ]
+    assert [(m.role, getattr(m, "tool_call_id", None)) for m in found] == [
+        ("user", None),
+        ("assistant", None),
+        ("tool", "c1"),
+        ("tool", "c2"),  # after its call's own results
+        ("user", None),
+        ("assistant", None),
+        ("tool", "c3"),
+        ("assistant", None),
+    ]
+    assert json.loads(found[3].content) == _unanswered_content()
+    assert harness.pairing_problems(found) == []
+
+
+def test_harness_before_post_answers_unanswered_at_a_prompt_start():
+    messages = [_user("u1"), _assistant("a1", "c1"), _user("u2")]
+    the_harness = harness.Harness()
+
+    found = the_harness.before_post(
+        mock.Mock(),
+        _run_input(messages),
+        first=True,
+    )
+
+    assert [m.role for m in found.messages] == [
+        "user",
+        "assistant",
+        "tool",
+        "user",
+    ]
+    assert the_harness.reports[-1].answered == 1
+
+
+def test_harness_before_post_mid_chain_does_not_answer():
+    # Within 'run_loop', every call has its result by then:  a missing
+    # one is a bug, and refused.
+    messages = [_user("u1"), _assistant("a1", "c1")]
+    the_harness = harness.Harness()
+
+    with pytest.raises(harness.InconsistentHistory, match="no result"):
+        the_harness.before_post(
+            mock.Mock(),
+            _run_input(messages),
+            first=False,
+        )
+
+
+def test_harness_before_post_without_pairing_check_answers_nothing():
+    messages = [_user("u1"), _assistant("a1", "c1"), _user("u2")]
+    the_harness = harness.Harness(pairing_check=False)
+    run_input = _run_input(messages)
+
+    found = the_harness.before_post(mock.Mock(), run_input, first=True)
+
+    assert found is run_input

@@ -1020,7 +1020,9 @@ def _read_capped(
     tail_room = room - head_room
     start = max(size - tail_room - _UTF8_MAX_CHAR_BYTES, head_used)
     stream.seek(start)
-    tail, tail_used = _fit(stream.read(), tail_room, from_end=True)
+    # Up to the size seen above, however much a command still running in
+    # the background has written since.
+    tail, tail_used = _fit(stream.read(size - start), tail_room, from_end=True)
     text = head + omitted_marker(size - head_used - tail_used) + tail
     return text, size, True
 
@@ -1146,6 +1148,12 @@ def run_shell(args: dict, context: ToolContext) -> dict:
 
             cap = context.output_cap_bytes
             mode = context.output_cap_mode
+            # The timeout's note comes within stderr's cap.
+            note = (
+                f"\n[timed out after {context.timeout_secs:g} seconds]"
+                if timed_out
+                else ""
+            )
             stdout, stdout_bytes, stdout_cut = _read_capped(
                 stdout_file,
                 cap,
@@ -1153,17 +1161,15 @@ def run_shell(args: dict, context: ToolContext) -> dict:
             )
             stderr, stderr_bytes, stderr_cut = _read_capped(
                 stderr_file,
-                cap,
+                max(cap - len(note.encode()), 0),
                 mode,
             )
+            stderr += note
     finally:
         # Windows:  kills anything left in the job, even should the reap
         # above have been interrupted.
         if job is not None:
             job.close()
-
-    if timed_out:
-        stderr += f"\n[timed out after {context.timeout_secs:g} seconds]"
 
     return {
         "stdout": stdout,
@@ -1736,19 +1742,62 @@ class LoopResult:
 def pending_tool_calls(
     messages: abc.Sequence[agui_core.Message],
 ) -> list[agui_core.ToolCall]:
-    """Tool calls in 'messages' which have no tool result yet"""
+    """Tool calls in 'messages' which have no tool result yet
+
+    A call id seen twice is one call:  it is executed (and answered) once.
+    """
     answered = {
         message.tool_call_id
         for message in messages
         if isinstance(message, agui_core.ToolMessage)
     }
-    return [
-        call
-        for message in messages
-        if isinstance(message, agui_core.AssistantMessage)
-        for call in message.tool_calls or ()
-        if call.id not in answered
-    ]
+    pending = {}
+
+    for message in messages:
+        if isinstance(message, agui_core.AssistantMessage):
+            for call in message.tool_calls or ():
+                if call.id not in answered:
+                    pending.setdefault(call.id, call)
+
+    return list(pending.values())
+
+
+def _with_parent(event: agui_core.Event) -> agui_core.Event:
+    """'event', a 'TOOL_CALL_START' without a parent given a made-up one
+
+    AG-UI allows a tool call without a parent message, but the parser
+    keeps a call in the history only under one:  without, the call would
+    be lost, and its result (if the server ran it) left an orphan.
+    """
+    if (
+        event.type == agui_core.EventType.TOOL_CALL_START
+        and event.parent_message_id is None
+    ):
+        event.parent_message_id = uuid.uuid4().hex
+
+    return event
+
+
+def history_from_events(
+    run_input: agui_core.RunAgentInput,
+    events: abc.Iterable[agui_core.Event],
+) -> agui_core.RunAgentInput:
+    """The history a run left:  its input, with its (stored) events applied
+
+    As 'run_loop' builds it live (e.g., for a client reloading a thread
+    from the server:  its last run's 'run_input' and events).  State left
+    unusable by a 'STATE_DELTA' which could not be applied becomes
+    'INVALID_STATE' (see #1260).
+    """
+    esp = agui_parser.EventStreamParser(run_input)
+
+    for event in events:
+        esp(_with_parent(event))
+
+    if esp.invalid_state_deltas:  # see #1260
+        esp.state = dict(INVALID_STATE)
+
+    return esp.as_run_agent_input
 
 
 def _parse_run(
@@ -1760,15 +1809,7 @@ def _parse_run(
 
     try:
         for event in client.stream_run(run_input):
-            # AG-UI allows a tool call without a parent message, but the
-            # parser keeps a call in the history only under one.
-            if (
-                event.type == agui_core.EventType.TOOL_CALL_START
-                and event.parent_message_id is None
-            ):
-                event.parent_message_id = uuid.uuid4().hex
-
-            esp(event)
+            esp(_with_parent(event))
 
             if on_event is not None:
                 on_event(event)

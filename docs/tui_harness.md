@@ -32,6 +32,18 @@ The server could not load such a history (pydantic-ai fails the run with
 `Tool call with ID ... not found in the history`), and it silently drops
 a trailing call which has no result.
 
+One case is repaired rather than refused. A thread whose client stopped
+mid-way -- a run cancelled, or interrupted while a client tool ran, or
+stopped at `--max-turns` -- holds calls the server stored whose results
+were never sent. Reloaded, and continued with a new prompt, each such
+call first gets a result saying it was not run (and will not be), placed
+right after its call; nothing is run again. `ask --url --json` counts
+these as `answered` in `resends`.
+
+A thread reloaded in the TUI is rebuilt from its last run's input and
+events the way a live run is, so a tool call the stream sent without a
+parent message keeps its result paired.
+
 ## Compaction of old tool results
 
 `--compaction off|auto|always` (default: `auto`;

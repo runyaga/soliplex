@@ -34,6 +34,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
+import uuid
 from collections import abc
 from urllib import parse as urllib_parse
 
@@ -114,6 +115,70 @@ def pairing_problems(
         )
 
     return problems
+
+
+#   The result given a call left without one (see 'answer_unanswered').
+UNANSWERED_ERROR = (
+    "No result:  the run ended before this call was answered (it was "
+    "cancelled, interrupted, or stopped at the turn limit).  It was not "
+    "run, and will not be."
+)
+
+
+def answer_unanswered(
+    messages: abc.Sequence[agui_core.Message],
+) -> tuple[list[agui_core.Message], int]:
+    """'messages', each call without a result given a "not run" one
+
+    A thread reloaded after its client stopped mid-way -- a run
+    cancelled, or interrupted while a client tool ran, or stopped at
+    '--max-turns' -- holds calls the server stored, but whose results
+    were never sent.  Each gets a result saying so ('UNANSWERED_ERROR'),
+    placed after its call's message and the results already following
+    it:  nothing is run again.  Returns the history, and how many
+    results it added.
+    """
+    answered = {
+        message.tool_call_id
+        for message in messages
+        if isinstance(message, agui_core.ToolMessage)
+    }
+    content = client_tools.tool_result_content(
+        client_tools._not_run(UNANSWERED_ERROR),
+    )
+    found: list[agui_core.Message] = []
+    waiting: dict[str, agui_core.ToolCall] = {}
+    added = 0
+
+    def flush() -> None:
+        nonlocal added
+
+        for call_id in waiting:
+            found.append(
+                agui_core.ToolMessage(
+                    id=uuid.uuid4().hex,
+                    tool_call_id=call_id,
+                    content=content,
+                ),
+            )
+            answered.add(call_id)
+            added += 1
+
+        waiting.clear()
+
+    for message in messages:
+        if not isinstance(message, agui_core.ToolMessage):
+            flush()
+
+        found.append(message)
+
+        if isinstance(message, agui_core.AssistantMessage):
+            for call in message.tool_calls or ():
+                if call.id not in answered:
+                    waiting.setdefault(call.id, call)
+
+    flush()
+    return found, added
 
 
 def validate_pairing(
@@ -695,6 +760,8 @@ class ResendReport:
     'compacted_total' how many of the history's results are compacted.
     'est_tokens' is the request's estimated size, of 'window_tokens'
     (from 'window_source'), 'stale' if the last run measured nothing.
+    'answered' is how many calls left without a result were given one
+    (see 'answer_unanswered').
     """
 
     thread_id: str
@@ -712,6 +779,7 @@ class ResendReport:
     window_tokens: int | None
     window_source: str | None
     stale: bool
+    answered: int = 0
 
     def as_json(self) -> dict:
         return dataclasses.asdict(self)
@@ -727,8 +795,10 @@ class Harness:
     Pass 'before_post' and 'after_run' to 'client_tools.run_loop'.
     'before_post' compacts the history as 'compaction' says, measured
     against 'budget' (which 'after_run' anchors on each run's usage);
-    then, with 'pairing_check', a history 'validate_pairing' refuses is
-    never sent:  'run_loop' raises 'InconsistentHistory' instead.  Each
+    then, with 'pairing_check', a prompt's first POST answers any call
+    left without a result ('answer_unanswered'), and a history
+    'validate_pairing' refuses is never sent:  'run_loop' raises
+    'InconsistentHistory' instead.  Each
     POST's 'ResendReport' is appended to 'reports', and passed to
     'on_report' (e.g., for a UI to show).
     """
@@ -752,6 +822,14 @@ class Harness:
         runs 'run_loop' makes to send client tool results back.
         """
         messages = run_input.messages
+        answered = 0
+
+        if self.pairing_check and first:
+            messages, answered = answer_unanswered(messages)
+
+            if answered:
+                run_input = run_input.model_copy(update={"messages": messages})
+
         chars = wire_chars(messages)
         indexes = self._to_compact(messages, chars)
         saved = 0
@@ -786,6 +864,7 @@ class Harness:
             window_tokens=self.budget.window_tokens,
             window_source=self.budget.window_source,
             stale=self.budget.stale,
+            answered=answered,
         )
         self.reports.append(report)
 

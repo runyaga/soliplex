@@ -462,13 +462,32 @@ def test_ask_remote_w_harness_options_from_env(
 ):
     monkeypatch.setenv("SOLIPLEX_TUI_COMPACTION", "off")
     monkeypatch.setenv("SOLIPLEX_TUI_CONTEXT_WINDOW", "262144")
+    monkeypatch.setenv("SOLIPLEX_TUI_KEEP_RECENT", "7")
+    monkeypatch.setenv("SOLIPLEX_TUI_PAIRING_CHECK", "false")
+    monkeypatch.setenv("SOLIPLEX_TUI_OUTPUT_CAP_BYTES", "4096")
+    monkeypatch.setenv("SOLIPLEX_TUI_OUTPUT_CAP_MODE", "head")
 
     result = cli_runner.invoke(cli_ask.app, ["--url", URL, "room", "hi"])
 
     assert result.exit_code == 0, result.output
-    harness_kwargs = ask_remote.call_args.kwargs["harness_kwargs"]
+    kwargs = ask_remote.call_args.kwargs
+    harness_kwargs = kwargs["harness_kwargs"]
     assert harness_kwargs["compaction"].mode == "off"
+    assert harness_kwargs["compaction"].keep_recent == 7
     assert harness_kwargs["context_window"] == 262144
+    assert harness_kwargs["pairing_check"] is False
+    assert kwargs["context"].output_cap_bytes == 4096
+    assert kwargs["context"].output_cap_mode == "head"
+
+    # An option on the command line wins over its variable.
+    result = cli_runner.invoke(
+        cli_ask.app,
+        ["--url", URL, "room", "hi", "--compaction", "always"],
+    )
+
+    assert result.exit_code == 0, result.output
+    harness_kwargs = ask_remote.call_args.kwargs["harness_kwargs"]
+    assert harness_kwargs["compaction"].mode == "always"
 
 
 def test_ask_remote_w_bad_compaction_fractions(cli_runner, ask_remote):

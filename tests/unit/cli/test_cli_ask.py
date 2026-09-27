@@ -303,6 +303,7 @@ DEFAULT_HARNESS_KWARGS = {
     "context_window": None,
     "probe_window": False,
     "output_reserve": agui_harness.DEFAULT_OUTPUT_RESERVE,
+    "trim_rag_state": agui_harness.TRIM_BOUNDARY,
 }
 
 
@@ -422,6 +423,8 @@ def test_ask_remote_w_options(cli_runner, ask_remote, tmp_path):
             "--probe-model-window",
             "--output-reserve",
             "1000",
+            "--trim-rag-state",
+            "off",
         ],
     )
 
@@ -443,6 +446,7 @@ def test_ask_remote_w_options(cli_runner, ask_remote, tmp_path):
         "context_window": 98304,
         "probe_window": True,
         "output_reserve": 1000,
+        "trim_rag_state": "off",
     }
 
     assert kwargs["context"] == client_tools.ToolContext(
@@ -453,6 +457,18 @@ def test_ask_remote_w_options(cli_runner, ask_remote, tmp_path):
         output_cap_mode="head",
         pass_env=True,
     )
+
+
+def test_ask_remote_w_aggressive_trim_warns(cli_runner, ask_remote):
+    result = cli_runner.invoke(
+        cli_ask.app,
+        ["--url", URL, "room", "hi", "--trim-rag-state", "aggressive"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Warning: --trim-rag-state aggressive" in _plain(result.stderr)
+    harness_kwargs = ask_remote.call_args.kwargs["harness_kwargs"]
+    assert harness_kwargs["trim_rag_state"] == "aggressive"
 
 
 def test_ask_remote_w_harness_options_from_env(
@@ -512,6 +528,7 @@ def test_ask_remote_w_bad_compaction_fractions(cli_runner, ask_remote):
         ["--context-window", "0"],
         ["--output-reserve", "-1"],
         ["--keep-recent", "-1"],
+        ["--trim-rag-state", "all"],
     ],
 )
 def test_ask_remote_w_bad_output_cap(cli_runner, ask_remote, flags):

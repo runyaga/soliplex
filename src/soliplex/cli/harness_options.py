@@ -121,6 +121,26 @@ OUTPUT_RESERVE = typer.Option(
 )
 
 
+TRIM_RAG_STATE = typer.Option(
+    agui_harness.TRIM_BOUNDARY,
+    "--trim-rag-state",
+    click_type=click.Choice(agui_harness.TRIM_MODES),
+    envvar="SOLIPLEX_TUI_TRIM_RAG_STATE",
+    help=(
+        "Drop haiku.rag's working evidence (search results) from the state "
+        "sent:  once a question is answered ('boundary', lossless), also "
+        "mid-question ('aggressive', lossy), or never ('off')."
+    ),
+)
+
+#   Shown when '--trim-rag-state aggressive' is chosen.
+AGGRESSIVE_TRIM_WARNING = (
+    "--trim-rag-state aggressive drops search results mid-question:  "
+    "'cite' can then no longer correct a mangled chunk id, and its "
+    "citations lose their expanded text."
+)
+
+
 def harness_options(
     *,
     pairing_check: bool,
@@ -132,6 +152,7 @@ def harness_options(
     context_window: int | None,
     probe_model_window: bool,
     output_reserve: int,
+    trim_rag_state: str = agui_harness.TRIM_BOUNDARY,
 ) -> dict:
     """'agui_harness.make_harness' options, from the command line's
 
@@ -150,4 +171,5 @@ def harness_options(
         "context_window": context_window,
         "probe_window": probe_model_window,
         "output_reserve": output_reserve,
+        "trim_rag_state": trim_rag_state,
     }

@@ -17,6 +17,11 @@ thin layers over it:
   is unchanged in shape.  A compacted result starts with
   'COMPACTED_MARKER', so that any client reading the thread back can
   tell, and is byte-identical on every later resend;
+- RAG-state trimming ('trim_rag_state'):  once a question is answered,
+  the working evidence haiku.rag keeps in the AG-UI state (every
+  expanded search result) is dropped before the next prompt -- as the
+  server itself drops it when the next question starts -- so it is not
+  uploaded, and stored, with every run;
 - the context budget ('ContextBudget'):  the model's window (from an
   option, the room, or the model server), and an estimate of how much
   of it the next request takes, anchored on the tokens the server
@@ -34,6 +39,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
+import typing
 import uuid
 from collections import abc
 from urllib import parse as urllib_parse
@@ -584,6 +590,99 @@ def wire_chars(messages: abc.Sequence[agui_core.Message]) -> int:
 
 
 #
+#   RAG state
+#
+TRIM_OFF = "off"
+TRIM_BOUNDARY = "boundary"
+TRIM_AGGRESSIVE = "aggressive"
+TRIM_MODES = (TRIM_OFF, TRIM_BOUNDARY, TRIM_AGGRESSIVE)
+
+#   A haiku.rag 'RAGState''s working evidence, and its empty value.  At a
+#   finished question all of it goes (as 'RAGState.begin_invocation'
+#   drops it when the next starts);  mid-question ('aggressive'), only the
+#   search results and executions.
+_BOUNDARY_FIELDS = {"searches": {}, "executions": [], "citations": []}
+_AGGRESSIVE_FIELDS = {"searches": {}, "executions": []}
+
+
+class InvalidTrimMode(ValueError):
+    def __init__(self, mode):
+        super().__init__(
+            f"Unknown RAG-state trim mode {mode!r} "
+            f"(one of: {', '.join(TRIM_MODES)})",
+        )
+
+
+def _rag_state_in_progress(value) -> bool | None:
+    """For a haiku.rag 'RAGState' dump, whether its question is open
+
+    None if 'value' is not one:  a dict with an 'evidence' record saying
+    'in_progress', and 'searches'.  (Keyed by any name:  a room may have
+    several RAG capabilities, each its own state namespace.)
+    """
+    if not isinstance(value, dict) or not isinstance(
+        value.get("searches"), dict
+    ):
+        return None
+
+    evidence = value.get("evidence")
+
+    if not isinstance(evidence, dict) or not isinstance(
+        evidence.get("in_progress"),
+        bool,
+    ):
+        return None
+
+    return evidence["in_progress"]
+
+
+def trim_rag_state(state, mode: str) -> tuple[typing.Any, list[str]]:
+    """'state', its RAG namespaces' working evidence dropped as 'mode' says
+
+    - 'off':  nothing;
+    - 'boundary':  in each namespace whose question is finished
+      ('evidence.in_progress' false), 'searches', 'executions' and
+      'citations' are emptied.  Lossless:  the server drops them itself
+      when the next question starts.  'citation_index', 'evidence',
+      'document_filter' and 'sources' are kept;
+    - 'aggressive':  as 'boundary', and mid-question too, 'searches' and
+      'executions'.  Lossy:  'cite' can then no longer correct a mangled
+      chunk id against the question's results, and falls back to the
+      database (whose citations carry no expanded text).
+
+    Returns the state (the same object if nothing was trimmed:  trimming
+    is idempotent), and the namespaces trimmed.
+    """
+    if mode not in TRIM_MODES:
+        raise InvalidTrimMode(mode)
+
+    if mode == TRIM_OFF or not isinstance(state, dict):
+        return state, []
+
+    trimmed = dict(state)
+    names = []
+
+    for name, value in state.items():
+        in_progress = _rag_state_in_progress(value)
+
+        if in_progress is None or (in_progress and mode == TRIM_BOUNDARY):
+            continue
+
+        fields = _AGGRESSIVE_FIELDS if in_progress else _BOUNDARY_FIELDS
+        emptied = {
+            field: type(empty)()
+            for field, empty in fields.items()
+            if field in value and value[field] != empty
+        }
+
+        if emptied:
+            trimmed[name] = value | emptied
+            names.append(name)
+
+    return (trimmed if names else state), names
+
+
+#
 #   The context budget
 #
 DEFAULT_OUTPUT_RESERVE = 4096
@@ -761,7 +860,8 @@ class ResendReport:
     'est_tokens' is the request's estimated size, of 'window_tokens'
     (from 'window_source'), 'stale' if the last run measured nothing.
     'answered' is how many calls left without a result were given one
-    (see 'answer_unanswered').
+    (see 'answer_unanswered');  'trimmed' the state namespaces whose RAG
+    working evidence was dropped (see 'trim_rag_state').
     """
 
     thread_id: str
@@ -780,6 +880,7 @@ class ResendReport:
     window_source: str | None
     stale: bool
     answered: int = 0
+    trimmed: list[str] = dataclasses.field(default_factory=list)
 
     def as_json(self) -> dict:
         return dataclasses.asdict(self)
@@ -798,16 +899,23 @@ class Harness:
     then, with 'pairing_check', a prompt's first POST answers any call
     left without a result ('answer_unanswered'), and a history
     'validate_pairing' refuses is never sent:  'run_loop' raises
-    'InconsistentHistory' instead.  Each
+    'InconsistentHistory' instead.  The state's RAG working evidence is
+    trimmed as 'trim_rag_state' says:  'boundary' at a prompt's first
+    POST, 'aggressive' at every POST.  Each
     POST's 'ResendReport' is appended to 'reports', and passed to
     'on_report' (e.g., for a UI to show).
     """
 
     pairing_check: bool = True
     compaction: CompactionPolicy = CompactionPolicy()
+    trim_rag_state: str = TRIM_BOUNDARY
     budget: ContextBudget = dataclasses.field(default_factory=ContextBudget)
     on_report: abc.Callable[[ResendReport], None] | None = None
     reports: list[ResendReport] = dataclasses.field(default_factory=list)
+
+    def __post_init__(self):
+        if self.trim_rag_state not in TRIM_MODES:
+            raise InvalidTrimMode(self.trim_rag_state)
 
     def before_post(
         self,
@@ -829,6 +937,16 @@ class Harness:
 
             if answered:
                 run_input = run_input.model_copy(update={"messages": messages})
+
+        trimmed = []
+
+        if first or self.trim_rag_state == TRIM_AGGRESSIVE:
+            state, trimmed = trim_rag_state(
+                run_input.state, self.trim_rag_state
+            )
+
+            if trimmed:
+                run_input = run_input.model_copy(update={"state": state})
 
         chars = wire_chars(messages)
         indexes = self._to_compact(messages, chars)
@@ -865,6 +983,7 @@ class Harness:
             window_source=self.budget.window_source,
             stale=self.budget.stale,
             answered=answered,
+            trimmed=trimmed,
         )
         self.reports.append(report)
 

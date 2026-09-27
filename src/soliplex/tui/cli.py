@@ -5,6 +5,7 @@ import typer
 from rich import console
 
 from soliplex.agui import client_tools
+from soliplex.agui import harness as agui_harness
 from soliplex.cli import harness_options
 from soliplex.tui import main
 
@@ -112,6 +113,7 @@ def tui(
     context_window: int | None = harness_options.CONTEXT_WINDOW,
     probe_model_window: bool = harness_options.PROBE_MODEL_WINDOW,
     output_reserve: int = harness_options.OUTPUT_RESERVE,
+    trim_rag_state: str = harness_options.TRIM_RAG_STATE,
     auto_approve: bool = typer.Option(
         False,
         "--auto-approve",
@@ -133,6 +135,7 @@ def tui(
             context_window=context_window,
             probe_model_window=probe_model_window,
             output_reserve=output_reserve,
+            trim_rag_state=trim_rag_state,
         )
         tool_context = client_tools.ToolContext(
             root=root,
@@ -145,6 +148,11 @@ def tui(
     except (OSError, ValueError) as exc:
         the_console.print(f"Error: {exc}")
         raise typer.Exit(1) from None
+
+    if trim_rag_state == agui_harness.TRIM_AGGRESSIVE:
+        the_console.print(
+            f"Warning: {harness_options.AGGRESSIVE_TRIM_WARNING}",
+        )
 
     tui_app = main.SoliplexTUI(
         soliplex_url=soliplex_url,

@@ -669,6 +669,7 @@ def test_harness_before_post_compacts_always():
         "window_source": None,
         "stale": False,
         "answered": 0,
+        "trimmed": [],
     }
 
     # Again:  nothing more to do, and the same bytes.
@@ -1426,3 +1427,135 @@ def test_harness_before_post_without_pairing_check_answers_nothing():
     found = the_harness.before_post(mock.Mock(), run_input, first=True)
 
     assert found is run_input
+
+
+# -- RAG state ---------------------------------------------------------------
+
+
+def _rag(in_progress, searches=None, **extra):
+    return {
+        "citation_index": {"c-1": {"chunk_id": "c-1"}},
+        "citations": ["c-1"],
+        "evidence": {"question": 3, "in_progress": in_progress},
+        "document_filter": None,
+        "sources": None,
+        "searches": (
+            {"q": [{"content": "x" * 5000}]} if searches is None else searches
+        ),
+        "executions": [{"code": "print(1)"}],
+        **extra,
+    }
+
+
+def test_trim_rag_state_at_a_finished_question():
+    state = {"rag": _rag(False), "other": {"keep": 1}}
+
+    found, names = harness.trim_rag_state(state, harness.TRIM_BOUNDARY)
+
+    assert names == ["rag"]
+    assert found["other"] is state["other"]
+    assert found["rag"] == {
+        "citation_index": {"c-1": {"chunk_id": "c-1"}},
+        "citations": [],
+        "evidence": {"question": 3, "in_progress": False},
+        "document_filter": None,
+        "sources": None,
+        "searches": {},
+        "executions": [],
+    }
+    assert state["rag"]["searches"]  # the input is not changed
+
+    # Idempotent:  nothing more to trim, the same object back.
+    again, names = harness.trim_rag_state(found, harness.TRIM_BOUNDARY)
+
+    assert again is found
+    assert names == []
+
+
+def test_trim_rag_state_mid_question():
+    state = {"rag": _rag(True)}
+
+    found, names = harness.trim_rag_state(state, harness.TRIM_BOUNDARY)
+
+    assert (found, names) == (state, [])
+
+    found, names = harness.trim_rag_state(state, harness.TRIM_AGGRESSIVE)
+
+    assert names == ["rag"]
+    assert found["rag"]["searches"] == {}
+    assert found["rag"]["executions"] == []
+    assert found["rag"]["citations"] == ["c-1"]  # kept mid-question
+
+
+def test_trim_rag_state_w_several_namespaces():
+    # Any namespace of that shape, not just 'rag'.
+    state = {"rag": _rag(False), "rag_b": _rag(False), "rag_c": _rag(True)}
+
+    found, names = harness.trim_rag_state(state, harness.TRIM_BOUNDARY)
+
+    assert names == ["rag", "rag_b"]
+    assert found["rag_c"] is state["rag_c"]
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        None,
+        [],
+        {"rag": "text"},
+        {"rag": {"searches": {"q": []}}},  # no evidence
+        {"rag": {"searches": {"q": []}, "evidence": []}},
+        {"rag": {"searches": {"q": []}, "evidence": {"in_progress": "no"}}},
+        {"rag": {"searches": [1], "evidence": {"in_progress": False}}},
+        # Already trimmed, and fields missing:  nothing to do.
+        {"rag": {"searches": {}, "evidence": {"in_progress": False}}},
+    ],
+)
+def test_trim_rag_state_w_nothing_to_trim(state):
+    found, names = harness.trim_rag_state(state, harness.TRIM_AGGRESSIVE)
+
+    assert found is state
+    assert names == []
+
+
+def test_trim_rag_state_off():
+    state = {"rag": _rag(False)}
+
+    assert harness.trim_rag_state(state, harness.TRIM_OFF) == (state, [])
+
+
+def test_trim_rag_state_w_bad_mode():
+    with pytest.raises(harness.InvalidTrimMode, match="'some'"):
+        harness.trim_rag_state({}, "some")
+
+    with pytest.raises(harness.InvalidTrimMode, match="'some'"):
+        harness.Harness(trim_rag_state="some")
+
+
+@pytest.mark.parametrize(
+    "mode, first, trimmed",
+    [
+        (harness.TRIM_BOUNDARY, True, True),
+        (harness.TRIM_BOUNDARY, False, False),  # mid-chain:  never
+        (harness.TRIM_AGGRESSIVE, False, True),
+        (harness.TRIM_OFF, True, False),
+    ],
+)
+def test_harness_before_post_trims_rag_state(mode, first, trimmed):
+    messages = _history(("search", "small"))
+    state = {"rag": _rag(False)}
+    run_input = _run_input(messages, state=state)
+    the_harness = harness.Harness(trim_rag_state=mode)
+
+    found = the_harness.before_post(mock.Mock(), run_input, first=first)
+
+    (report,) = the_harness.reports
+    if trimmed:
+        assert found.state["rag"]["searches"] == {}
+        assert found.messages is run_input.messages
+        assert report.trimmed == ["rag"]
+        assert report.state_chars == len(json.dumps(found.state))
+        assert report.state_chars < len(json.dumps(state))
+    else:
+        assert found is run_input
+        assert report.trimmed == []

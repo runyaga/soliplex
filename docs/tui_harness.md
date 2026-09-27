@@ -141,6 +141,36 @@ result is byte-identical on every later resend, and a result already
 carrying the marker is never compacted again. The tools and the rest of
 the history are left as they were.
 
+## RAG-state trimming
+
+`--trim-rag-state off|boundary|aggressive` (default: `boundary`;
+`SOLIPLEX_TUI_TRIM_RAG_STATE`).
+
+haiku.rag keeps each question's working evidence in the AG-UI state --
+every expanded search result, every code execution -- and the client
+uploads the state with every run, where the server stores it. It is not
+model context, but in a long thread it can be far larger than the
+messages.
+
+- `boundary`: before a prompt's first run, in each state namespace of
+  haiku.rag's shape whose question is finished
+  (`evidence.in_progress` false), `searches`, `executions` and
+  `citations` are emptied. This is **lossless**: the server empties them
+  itself when the next question starts. `citation_index`, `evidence`,
+  `document_filter` and `sources` are kept. A question still open (a
+  chain of client tool calls) is never trimmed.
+- `aggressive`: also, before every run, `searches` and `executions`
+  mid-question. This is **lossy**, and both clients warn when it is
+  chosen: `cite` can no longer correct a mangled chunk id against the
+  question's results, and falls back to the database, whose citations
+  carry no expanded text.
+- `off`: the state is sent as it is.
+
+Trimming is idempotent: a trimmed namespace is left as it is. The server
+sends the whole state back after each run (`STATE_SNAPSHOT`), which
+holds only the current question's evidence, so what is resent stays
+bounded by one question's worth.
+
 ## Context budget
 
 `--context-window N` (`SOLIPLEX_TUI_CONTEXT_WINDOW`),

@@ -396,6 +396,7 @@ def ask(
     context_window: int | None = harness_options.CONTEXT_WINDOW,
     probe_model_window: bool = harness_options.PROBE_MODEL_WINDOW,
     output_reserve: int = harness_options.OUTPUT_RESERVE,
+    trim_rag_state: str = harness_options.TRIM_RAG_STATE,
 ):
     """Send a single prompt to a room's agent and print the response.
 
@@ -422,6 +423,12 @@ def ask(
             _usage_error("With '--url', ROOM_ID and PROMPT are required.")
 
         room_id, prompt = str(installation_path), room_id
+
+        if trim_rag_state == agui_harness.TRIM_AGGRESSIVE:
+            typer.echo(
+                f"Warning: {harness_options.AGGRESSIVE_TRIM_WARNING}",
+                err=True,
+            )
 
         try:
             context = client_tools.ToolContext(
@@ -451,6 +458,7 @@ def ask(
                     context_window=context_window,
                     probe_model_window=probe_model_window,
                     output_reserve=output_reserve,
+                    trim_rag_state=trim_rag_state,
                 ),
             )
         except Exception as exc:

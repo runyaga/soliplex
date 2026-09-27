@@ -498,6 +498,52 @@ def test__read_capped_head_tail_w_no_room_for_the_marker():
     assert client_tools._read_capped(stream, 10) == ("x" * 10, 100, True)
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"\xff" * 300,  # no UTF-8 at all
+        b"\xe2\x82" * 200,  # incomplete sequences
+        b"ok " * 50 + b"\xff" * 50 + b" ok" * 50,
+        "\u20ac".encode() * 100 + b"\xff",
+    ],
+)
+@pytest.mark.parametrize("mode", client_tools.OUTPUT_CAP_MODES)
+def test__read_capped_w_bytes_not_utf8(data, mode):
+    # Each such byte becomes U+FFFD (three bytes):  still within the cap.
+    cap = 256
+
+    text, size, cut = client_tools._read_capped(io.BytesIO(data), cap, mode)
+
+    assert size == len(data)
+    assert cut is True
+    assert len(text.encode()) <= cap
+    assert len(text.encode()) > cap - 8
+
+    if mode == client_tools.OUTPUT_CAP_HEAD_TAIL:
+        head, omitted, tail = re.fullmatch(
+            r"(.*)\n\.\.\.\[(\d+) bytes omitted\]\.\.\.\n(.*)",
+            text,
+            re.DOTALL,
+        ).groups()
+        # Each U+FFFD stands for one byte;  every other character for its
+        # own bytes.
+        source = len(head.encode()) - 2 * head.count("\ufffd")
+        source += len(tail.encode()) - 2 * tail.count("\ufffd")
+        assert int(omitted) == size - source
+
+
+def test__read_capped_w_small_stream_not_utf8():
+    # Shorter than the cap, but too long once decoded:  cut all the same.
+    data = b"\xff" * 200
+
+    text, size, cut = client_tools._read_capped(io.BytesIO(data), 256)
+
+    assert size == 200
+    assert cut is True
+    assert len(text.encode()) <= 256
+    assert "bytes omitted" in text
+
+
 @pytest.mark.parametrize("char", ["a", "\u00e9", "\u20ac", "\U0001f600"])
 @pytest.mark.parametrize("cap", [256, 257, 300, 1000])
 @pytest.mark.parametrize("extra", [1, 2, 3, 7, 10, 95, 1000, 99_999])

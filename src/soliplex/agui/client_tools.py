@@ -947,20 +947,43 @@ def omitted_marker(omitted: int) -> str:
     return f"\n...[{omitted} bytes omitted]...\n"
 
 
-def _utf8_start(data: bytes, index: int) -> int:
-    """The first index at or after 'index' where no UTF-8 character is cut"""
-    while index < len(data) and (data[index] & 0xC0) == 0x80:
-        index += 1
-
-    return index
+#   A byte which is not UTF-8, as 'surrogateescape' decodes it.
+_ESCAPED_BYTES = re.compile("[\udc80-\udcff]")
+_UTF8_MAX_CHAR_BYTES = 4
 
 
-def _utf8_end(data: bytes, index: int) -> int:
-    """The last index at or before 'index' where no UTF-8 character is cut"""
-    while 0 < index < len(data) and (data[index] & 0xC0) == 0x80:
-        index -= 1
+def _fit(
+    data: bytes, limit: int, *, from_end: bool = False
+) -> tuple[str, int]:
+    """As much of 'data' as fits in 'limit' bytes of UTF-8, from its start
 
-    return index
+    (Or from its end.)  Whole characters only;  a byte which is not UTF-8
+    becomes U+FFFD, which takes three bytes.  Returns the text, and how
+    many bytes of 'data' it stands for.
+    """
+    chars = data.decode("utf-8", errors="surrogateescape")
+    kept: list[str] = []
+    used = size = 0
+
+    for char in reversed(chars) if from_end else chars:
+        if _ESCAPED_BYTES.fullmatch(char):
+            char, source = "\ufffd", 1
+        else:
+            source = len(char.encode())
+
+        width = len(char.encode())
+
+        if size + width > limit:
+            break
+
+        kept.append(char)
+        used += source
+        size += width
+
+    if from_end:
+        kept.reverse()
+
+    return "".join(kept), used
 
 
 def _read_capped(
@@ -968,40 +991,37 @@ def _read_capped(
     cap: int,
     mode: str = DEFAULT_OUTPUT_CAP_MODE,
 ) -> tuple[str, int, bool]:
-    """Read a stream of at most 'cap' bytes;  its text, size, and if cut
+    """Read a stream as at most 'cap' bytes of UTF-8;  text, size, if cut
 
-    Longer, it keeps its first 'cap' bytes ('head');  or ('head_tail') its
-    start and its end, 'OUTPUT_CAP_HEAD_FRACTION' of the room for the
-    start, with 'omitted_marker' between them -- all within 'cap' bytes,
-    the marker included, and cut only between UTF-8 characters.  (Should
-    the cap leave no room for the marker, it cuts as 'head' does.)  Bytes
-    which are not UTF-8 decode as U+FFFD.
+    A stream which does not fit keeps its start ('head');  or
+    ('head_tail') its start and its end, 'OUTPUT_CAP_HEAD_FRACTION' of the
+    room for the start, with 'omitted_marker' between them, the marker
+    counted in the cap.  (Should the cap leave no room for the marker, it
+    cuts as 'head' does.)  Cut only between characters;  bytes which are
+    not UTF-8 decode as U+FFFD, and count as its three bytes.
     """
     size = stream.seek(0, os.SEEK_END)
     stream.seek(0)
-
     # The marker, were it to say the most that could be omitted:  no
     # shorter than the one used.
-    budget = cap - len(omitted_marker(size).encode())
+    room = cap - len(omitted_marker(size).encode())
+    # A character's worth more than fits:  no character is cut in two.
+    text, used = _fit(stream.read(cap + _UTF8_MAX_CHAR_BYTES), cap)
 
-    if size <= cap or mode == OUTPUT_CAP_HEAD or budget < 2:
-        data = stream.read(cap)
-        return data.decode("utf-8", errors="replace"), size, size > cap
+    if used == size or mode == OUTPUT_CAP_HEAD or room < 2:
+        return text, size, used < size
 
-    head_bytes = int(budget * OUTPUT_CAP_HEAD_FRACTION)
-    tail_bytes = budget - head_bytes
-    # A character's worth more on each side, to find where it starts.
-    head = stream.read(head_bytes + 1)
-    head = head[: _utf8_end(head, head_bytes)]
-    stream.seek(size - tail_bytes - 1)
-    tail = stream.read(tail_bytes + 1)
-    tail = tail[_utf8_start(tail, 1) :]
-    omitted = size - len(head) - len(tail)
-    text = (
-        head.decode("utf-8", errors="replace")
-        + omitted_marker(omitted)
-        + tail.decode("utf-8", errors="replace")
+    head_room = int(room * OUTPUT_CAP_HEAD_FRACTION)
+    stream.seek(0)
+    head, head_used = _fit(
+        stream.read(head_room + _UTF8_MAX_CHAR_BYTES),
+        head_room,
     )
+    tail_room = room - head_room
+    start = max(size - tail_room - _UTF8_MAX_CHAR_BYTES, head_used)
+    stream.seek(start)
+    tail, tail_used = _fit(stream.read(), tail_room, from_end=True)
+    text = head + omitted_marker(size - head_used - tail_used) + tail
     return text, size, True
 
 

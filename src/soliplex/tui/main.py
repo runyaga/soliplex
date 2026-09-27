@@ -16,6 +16,7 @@ from textual import widgets as t_widgets
 from textual import worker as t_worker
 
 from soliplex.agui import client_tools
+from soliplex.agui import harness as agui_harness
 from soliplex.agui import parser as agui_parser
 from soliplex.config.agui import AGUI_FEATURES_BY_NAME
 from soliplex.tui import rest_api
@@ -914,6 +915,9 @@ class RoomView(t_screen.Screen):
     thread_description: str | None = None
     run_agent_input: agui_core.RunAgentInput | None = None
     run_count: int = 0
+    # What is done to this thread's history before each POST;  made anew
+    # for each thread.
+    harness: agui_harness.Harness | None = None
 
     def __init__(self, room_id, room_info, *args, **kwargs):
         self.room_id = room_id
@@ -973,7 +977,7 @@ class RoomView(t_screen.Screen):
         thread_label.update(f"Thread: {new_value}")
 
     def action_new_thread(self) -> None:
-        self.thread_id = self.run_agent_input = None
+        self.thread_id = self.run_agent_input = self.harness = None
         self.thread_name = self.thread_description = None
         scroller = self.query_one("#chat-view")
         scroller.remove_children()
@@ -1056,6 +1060,7 @@ class RoomView(t_screen.Screen):
 
     def select_thread(self, thread_id: str):
         self.thread_id = thread_id
+        self.harness = None
         info = self.rest_api.get_thread(self.room_id, thread_id)
         meta = info.get("metadata")
 
@@ -1181,6 +1186,9 @@ class RoomView(t_screen.Screen):
             )
             self.app.call_from_thread(response.update, response_content)
 
+        if self.harness is None:
+            self.harness = self.app.new_harness()
+
         worker = t_worker.get_current_worker()
 
         def is_cancelled() -> bool:
@@ -1215,6 +1223,7 @@ class RoomView(t_screen.Screen):
                     on_event=on_event,
                     on_tool_result=on_tool_result,
                     tool_log=self.app.tool_log,
+                    before_post=self.harness.before_post,
                 )
 
         except client_tools.ClientToolsError as exc:
@@ -1467,6 +1476,7 @@ class SoliplexTUI(t_app.App):
         max_turns: int = client_tools.DEFAULT_MAX_TURNS,
         tool_log: client_tools.ToolLog | None = None,
         auto_approve: bool = False,
+        harness_options: dict | None = None,
         *args,
         **kw,
     ):
@@ -1487,10 +1497,16 @@ class SoliplexTUI(t_app.App):
             enabled=auto_approve,
             on_enabled=lambda: self.call_from_thread(self._show_auto_approve),
         )
+        # 'agui_harness.Harness' options, for each thread's harness.
+        self.harness_options = dict(harness_options or {})
         self.rest_api = rest_api.TUI_REST_API(soliplex_url)
         self._oidc_providers = None
 
         super().__init__(*args, **kw)
+
+    def new_harness(self) -> agui_harness.Harness:
+        """A harness for a thread's history, as configured"""
+        return agui_harness.Harness(**self.harness_options)
 
     def _show_auto_approve(self) -> None:
         """Say, for the rest of the session, that commands run unasked"""

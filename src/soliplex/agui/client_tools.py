@@ -1769,6 +1769,14 @@ def _parse_run(
     return esp.as_run_agent_input
 
 
+#   Called before every POST 'run_loop' makes, with the client, the history
+#   about to be sent, and 'first' (true for a prompt's first run, false for
+#   one sending client tool results back);  returns the history to send in
+#   its place (e.g., compacted), or raises a 'ClientToolsError' to send
+#   nothing.  See 'soliplex.agui.harness.Harness.before_post'.
+BeforePost = abc.Callable[..., agui_core.RunAgentInput]
+
+
 def run_loop(
     client: SoliplexClient,
     run_input: agui_core.RunAgentInput,
@@ -1781,6 +1789,7 @@ def run_loop(
     on_event: abc.Callable[[agui_core.Event], None] | None = None,
     on_tool_result: (abc.Callable[[ToolCallRecord, dict], None] | None) = None,
     tool_log: ToolLog | None = None,
+    before_post: BeforePost | None = None,
 ) -> LoopResult:
     """Run 'run_input', executing client tool calls, until a final answer
 
@@ -1798,6 +1807,10 @@ def run_loop(
 
     'on_event' sees every event of every run;  'on_tool_result' each
     executed (or refused) call and its result, e.g. for a UI to show.
+
+    'before_post', if given, sees each history before it is sent, and
+    returns the one to send (see 'BeforePost'):  what it returns is the
+    history the run continues, and the result carries.
 
     Returns the result, whose 'run_input' is the final history (e.g., for
     the TUI's next prompt).  A 'ClientToolsError' carries the result so
@@ -1818,6 +1831,7 @@ def run_loop(
             on_event=on_event,
             on_tool_result=on_tool_result,
             tool_log=tool_log,
+            before_post=before_post,
         )
     except ClientToolsError as exc:
         exc.result = result
@@ -1839,11 +1853,17 @@ def _run_loop(
     on_event: abc.Callable[[agui_core.Event], None] | None,
     on_tool_result: abc.Callable[[ToolCallRecord, dict], None] | None,
     tool_log: ToolLog | None,
+    before_post: BeforePost | None,
 ) -> None:
     turn = 0
 
     while True:
         turn += 1
+
+        if before_post is not None:
+            run_input = before_post(client, run_input, first=turn == 1)
+            result.run_input = run_input
+
         result.run_ids.append(run_input.run_id)
         previous_ids = {message.id for message in run_input.messages}
 

@@ -126,6 +126,15 @@ def tui(
     tool_log: pathlib.Path | None = TOOL_LOG,
     output_cap_bytes: int = OUTPUT_CAP_BYTES,
     output_cap_mode: str = OUTPUT_CAP_MODE,
+    pairing_check: bool = typer.Option(
+        True,
+        "--pairing-check/--no-pairing-check",
+        envvar="SOLIPLEX_TUI_PAIRING_CHECK",
+        help=(
+            "Refuse to send a history whose tool calls and results do not "
+            "pair up (which the server would fail)."
+        ),
+    ),
     auto_approve: bool = typer.Option(
         False,
         "--auto-approve",
@@ -159,6 +168,7 @@ def tui(
             client_tools.ToolLog(tool_log) if tool_log is not None else None
         ),
         auto_approve=auto_approve,
+        harness_options={"pairing_check": pairing_check},
     )
 
     tui_app.run()

@@ -17,6 +17,7 @@ from sqlalchemy.ext import asyncio as sqla_asyncio
 from soliplex import loggers
 from soliplex import models
 from soliplex.agui import client_tools
+from soliplex.agui import harness as agui_harness
 from soliplex.agui import persistence as agui_persistence
 from soliplex.cli import cli_util
 from soliplex.cli import types
@@ -283,6 +284,7 @@ def _ask_remote(
     max_turns: int,
     confirm: bool,
     tool_log: pathlib.Path | None,
+    harness: agui_harness.Harness,
 ) -> client_tools.LoopResult:
     """Ask a room on a running server, executing its client tool calls"""
     with client_tools.SoliplexClient(url, room_id, token=token) as client:
@@ -301,6 +303,7 @@ def _ask_remote(
                 if tool_log is not None
                 else None
             ),
+            before_post=harness.before_post,
         )
 
 
@@ -390,6 +393,15 @@ def ask(
             "('head'), or its start and its end ('head_tail')."
         ),
     ),
+    pairing_check: bool = typer.Option(
+        True,
+        "--pairing-check/--no-pairing-check",
+        envvar="SOLIPLEX_TUI_PAIRING_CHECK",
+        help=(
+            "With '--url': refuse to send a history whose tool calls and "
+            "results do not pair up (which the server would fail)."
+        ),
+    ),
 ):
     """Send a single prompt to a room's agent and print the response.
 
@@ -435,6 +447,7 @@ def ask(
                 max_turns=max_turns,
                 confirm=confirm,
                 tool_log=tool_log,
+                harness=agui_harness.Harness(pairing_check=pairing_check),
             )
         except Exception as exc:
             _fail(json_output, str(exc))

@@ -1976,6 +1976,74 @@ def test_run_loop_round_trip(root, tmp_path, w_tool_log):
         assert not log_path.exists()
 
 
+def test_run_loop_w_before_post(root):
+    first = [
+        _started(),
+        *_call("c1", "shell", '{"command": "echo hi"}'),
+        _finished(),
+    ]
+    second = [
+        _started(CHILD_RUN_ID),
+        *_text("a9", "Done."),
+        _finished(CHILD_RUN_ID),
+    ]
+    server = ScriptedServer(
+        {RUN_ID: first, CHILD_RUN_ID: second},
+        child_ids=[CHILD_RUN_ID],
+    )
+    seen = []
+
+    def before_post(client, run_input, *, first):
+        seen.append((client, run_input.run_id, first))
+        # What it returns is what is sent, and what the run continues.
+        return run_input.model_copy(update={"state": {"posts": len(seen)}})
+
+    client = _mock_client(server)
+    context = client_tools.ToolContext(root=root)
+
+    found = client_tools.run_loop(
+        client,
+        _run_input(),
+        context,
+        before_post=before_post,
+    )
+
+    assert seen == [
+        (client, RUN_ID, True),
+        (client, CHILD_RUN_ID, False),
+    ]
+    assert [sent.state for sent in server.run_inputs] == [
+        {"posts": 1},
+        {"posts": 2},
+    ]
+    assert found.response == "Done."
+    assert found.run_input.state == {"posts": 2}
+
+
+def test_run_loop_w_before_post_refusing(root):
+    server = ScriptedServer({})
+    original = _run_input()
+
+    def before_post(client, run_input, *, first):
+        raise client_tools.ClientToolsError("refused")
+
+    client = _mock_client(server)
+    context = client_tools.ToolContext(root=root)
+
+    with pytest.raises(client_tools.ClientToolsError) as exc_info:
+        client_tools.run_loop(
+            client,
+            original,
+            context,
+            before_post=before_post,
+        )
+
+    # Nothing was sent, and the history to carry on from is unchanged.
+    assert server.run_inputs == []
+    assert exc_info.value.result.run_ids == []
+    assert exc_info.value.result.run_input is original
+
+
 @pytest.mark.parametrize(
     "option_kwargs, hint",
     [

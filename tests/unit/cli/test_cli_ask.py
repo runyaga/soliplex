@@ -9,6 +9,7 @@ import pytest
 
 from soliplex import loggers
 from soliplex.agui import client_tools
+from soliplex.agui import harness as agui_harness
 from soliplex.cli import ask as cli_ask
 
 
@@ -329,6 +330,7 @@ def test_ask_remote_defaults(
 
     kwargs = ask_remote.call_args.kwargs
     context = kwargs.pop("context")
+    assert kwargs.pop("harness") == agui_harness.Harness(pairing_check=True)
     assert kwargs == {
         "url": URL,
         "room_id": "a-room",
@@ -371,6 +373,7 @@ def test_ask_remote_w_options(cli_runner, ask_remote, tmp_path):
             "1000",
             "--output-cap-mode",
             "head",
+            "--no-pairing-check",
         ],
     )
 
@@ -380,6 +383,7 @@ def test_ask_remote_w_options(cli_runner, ask_remote, tmp_path):
     assert kwargs["max_turns"] == 3
     assert kwargs["confirm"] is True
     assert kwargs["tool_log"] == log_path
+    assert kwargs["harness"] == agui_harness.Harness(pairing_check=False)
     assert kwargs["context"] == client_tools.ToolContext(
         root=root,
         allow_anywhere=True,
@@ -449,6 +453,7 @@ def test__ask_remote(tmp_path, w_confirm, w_tool_log):
     context = client_tools.ToolContext(root=tmp_path)
     tool_log = tmp_path / "tools.jsonl" if w_tool_log else None
     thread = {"thread_id": "thread-1", "runs": {"run-1": {}}}
+    the_harness = agui_harness.Harness()
 
     with (
         mock.patch.object(client_tools, "SoliplexClient") as client_klass,
@@ -466,6 +471,7 @@ def test__ask_remote(tmp_path, w_confirm, w_tool_log):
             max_turns=4,
             confirm=w_confirm,
             tool_log=tool_log,
+            harness=the_harness,
         )
 
     assert found is run_loop.return_value
@@ -478,6 +484,7 @@ def test__ask_remote(tmp_path, w_confirm, w_tool_log):
     assert run_input.messages[0].content == "hi"
     assert kwargs["max_turns"] == 4
     assert kwargs["max_turns_option"] == "--max-turns"
+    assert kwargs["before_post"] == the_harness.before_post
 
     if w_confirm:
         assert kwargs["confirm"] is cli_ask._confirm_tool_call

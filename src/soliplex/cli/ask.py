@@ -402,6 +402,30 @@ def ask(
             "results do not pair up (which the server would fail)."
         ),
     ),
+    compaction: str = typer.Option(
+        agui_harness.COMPACTION_OFF,
+        "--compaction",
+        click_type=click.Choice(agui_harness.COMPACTION_MODES),
+        envvar="SOLIPLEX_TUI_COMPACTION",
+        help=(
+            "With '--url': compact old, large tool results in the history "
+            "before each run ('always'), or not ('off')."
+        ),
+    ),
+    keep_recent: int = typer.Option(
+        agui_harness.DEFAULT_KEEP_RECENT,
+        "--keep-recent",
+        min=0,
+        envvar="SOLIPLEX_TUI_KEEP_RECENT",
+        help="With '--url': the newest large tool results never compacted.",
+    ),
+    min_elide_chars: int = typer.Option(
+        agui_harness.DEFAULT_MIN_ELIDE_CHARS,
+        "--min-elide-chars",
+        min=1,
+        envvar="SOLIPLEX_TUI_MIN_ELIDE_CHARS",
+        help="With '--url': shorter tool results are never compacted.",
+    ),
 ):
     """Send a single prompt to a room's agent and print the response.
 
@@ -447,7 +471,14 @@ def ask(
                 max_turns=max_turns,
                 confirm=confirm,
                 tool_log=tool_log,
-                harness=agui_harness.Harness(pairing_check=pairing_check),
+                harness=agui_harness.Harness(
+                    pairing_check=pairing_check,
+                    compaction=agui_harness.CompactionPolicy(
+                        mode=compaction,
+                        keep_recent=keep_recent,
+                        min_elide_chars=min_elide_chars,
+                    ),
+                ),
             )
         except Exception as exc:
             _fail(json_output, str(exc))

@@ -374,6 +374,12 @@ def test_ask_remote_w_options(cli_runner, ask_remote, tmp_path):
             "--output-cap-mode",
             "head",
             "--no-pairing-check",
+            "--compaction",
+            "always",
+            "--keep-recent",
+            "2",
+            "--min-elide-chars",
+            "500",
         ],
     )
 
@@ -383,7 +389,14 @@ def test_ask_remote_w_options(cli_runner, ask_remote, tmp_path):
     assert kwargs["max_turns"] == 3
     assert kwargs["confirm"] is True
     assert kwargs["tool_log"] == log_path
-    assert kwargs["harness"] == agui_harness.Harness(pairing_check=False)
+    assert kwargs["harness"] == agui_harness.Harness(
+        pairing_check=False,
+        compaction=agui_harness.CompactionPolicy(
+            mode="always",
+            keep_recent=2,
+            min_elide_chars=500,
+        ),
+    )
     assert kwargs["context"] == client_tools.ToolContext(
         root=root,
         allow_anywhere=True,

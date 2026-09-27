@@ -6,6 +6,7 @@ import typer
 from rich import console
 
 from soliplex.agui import client_tools
+from soliplex.agui import harness as agui_harness
 from soliplex.tui import main
 
 the_cli = typer.Typer(
@@ -135,6 +136,30 @@ def tui(
             "pair up (which the server would fail)."
         ),
     ),
+    compaction: str = typer.Option(
+        agui_harness.COMPACTION_OFF,
+        "--compaction",
+        click_type=click.Choice(agui_harness.COMPACTION_MODES),
+        envvar="SOLIPLEX_TUI_COMPACTION",
+        help=(
+            "Compact old, large tool results in the history before each "
+            "run ('always'), or not ('off')."
+        ),
+    ),
+    keep_recent: int = typer.Option(
+        agui_harness.DEFAULT_KEEP_RECENT,
+        "--keep-recent",
+        min=0,
+        envvar="SOLIPLEX_TUI_KEEP_RECENT",
+        help="The newest large tool results, never compacted.",
+    ),
+    min_elide_chars: int = typer.Option(
+        agui_harness.DEFAULT_MIN_ELIDE_CHARS,
+        "--min-elide-chars",
+        min=1,
+        envvar="SOLIPLEX_TUI_MIN_ELIDE_CHARS",
+        help="Tool results shorter than this are never compacted.",
+    ),
     auto_approve: bool = typer.Option(
         False,
         "--auto-approve",
@@ -168,7 +193,14 @@ def tui(
             client_tools.ToolLog(tool_log) if tool_log is not None else None
         ),
         auto_approve=auto_approve,
-        harness_options={"pairing_check": pairing_check},
+        harness_options={
+            "pairing_check": pairing_check,
+            "compaction": agui_harness.CompactionPolicy(
+                mode=compaction,
+                keep_recent=keep_recent,
+                min_elide_chars=min_elide_chars,
+            ),
+        },
     )
 
     tui_app.run()

@@ -125,9 +125,10 @@ def pairing_problems(
 
 #   The result given a call left without one (see 'answer_unanswered').
 UNANSWERED_ERROR = (
-    "No result:  the run ended before this call was answered (it was "
-    "cancelled, interrupted, or stopped at the turn limit).  It was not "
-    "run, and will not be."
+    "No result was recorded for this call:  the run ended before its "
+    "result was sent (it was cancelled, interrupted, or stopped at the "
+    "turn limit).  Whether it ran, and what it did, is unknown:  check "
+    "its effects before running it again."
 )
 
 
@@ -141,7 +142,9 @@ def answer_unanswered(
     '--max-turns' -- holds calls the server stored, but whose results
     were never sent.  Each gets a result saying so ('UNANSWERED_ERROR'),
     placed after its call's message and the results already following
-    it:  nothing is run again.  Returns the history, and how many
+    it:  nothing is run again.  The result says the outcome is unknown,
+    not that the call did not run:  a command may have run (and changed
+    things) before its client stopped.  Returns the history, and how many
     results it added.
     """
     answered = {
@@ -379,9 +382,14 @@ def _search_skeleton(content: str) -> str | None:
             kept.append(first)
             continue
 
-        block, found, _ = hit.partition("\nContent:\n")
+        # More than one 'Content:' line (e.g. a title with one in it):
+        # where the header ends is ambiguous.
+        if hit.count("\nContent:\n") != 1:
+            return None
 
-        if not found or not _SEARCH_HIT_FIRST_LINE.match(first):
+        block, _, _ = hit.partition("\nContent:\n")
+
+        if not _SEARCH_HIT_FIRST_LINE.match(first):
             return None
 
         kept.append(block)
@@ -534,15 +542,18 @@ def compaction_candidates(
     if policy.keep_recent:
         eligible = eligible[: -policy.keep_recent]
 
-    def shorter(index: int) -> bool:  # as sent:  as JSON
+    def shorter(index: int) -> bool:  # as sent:  UTF-8 JSON
         message = messages[index]
         tool = calls[message.tool_call_id].function.name
         compacted = compact_content(tool, message.content)
-        return len(json.dumps(compacted, ensure_ascii=False)) < len(
-            json.dumps(message.content, ensure_ascii=False),
-        )
+        return _wire_bytes(compacted) < _wire_bytes(message.content)
 
     return [index for index in eligible if shorter(index)]
+
+
+def _wire_bytes(content: str) -> int:
+    """'content''s size in a POST's body:  UTF-8 JSON, not ASCII-escaped"""
+    return len(json.dumps(content, ensure_ascii=False).encode())
 
 
 def compact_history(

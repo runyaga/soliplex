@@ -682,6 +682,40 @@ def test__read_capped_w_growing_stream():
     assert len(text.encode()) <= 300
 
 
+class _GrowingAfterSizing(io.BytesIO):
+    """A file which grows as soon as its size has been taken"""
+
+    def __init__(self, data):
+        super().__init__(data)
+        self.reads = []
+
+    def seek(self, offset, whence=os.SEEK_SET):
+        position = super().seek(offset, whence)
+
+        if whence == os.SEEK_END:
+            super().seek(0, os.SEEK_END)
+            self.write(b"x" * 1_000_000)
+            super().seek(position)
+
+        return position
+
+    def read(self, size=-1):
+        self.reads.append(size)
+        return super().read(size)
+
+
+@pytest.mark.parametrize("data", [b"", b"y", "\u00e9".encode() * 200])
+def test__read_capped_w_growth_before_any_read(data):
+    stream = _GrowingAfterSizing(data)
+
+    text, size, cut = client_tools._read_capped(stream, 256)
+
+    assert size == len(data)
+    assert text.encode() == data or cut
+    assert all(0 <= count <= len(data) for count in stream.reads)
+    assert "x" not in text
+
+
 def test_run_shell_times_out_and_kills_the_command(root):
     # The shell runs 'parent.py', which runs 'child.py':  the timeout must
     # stop the grandchild, not just the shell, or 'late.txt' appears.

@@ -1078,8 +1078,15 @@ class RoomView(t_screen.Screen):
         rai = None
         scroller = self.query_one("#chat-view")
         scroller.remove_children()
+        # Not another thread's history, whatever this one holds.
+        self.run_agent_input = None
 
-        last_run = runs[-1]
+        # The newest run with an input:  a run made just before its client
+        # stopped may have none.
+        last_run = next(
+            (run for run in reversed(runs) if run["run_input"] is not None),
+            runs[-1],
+        )
         run_input = last_run["run_input"]
 
         if run_input is not None:

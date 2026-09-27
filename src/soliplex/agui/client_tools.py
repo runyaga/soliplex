@@ -1005,24 +1005,27 @@ def _read_capped(
     # The marker, were it to say the most that could be omitted:  no
     # shorter than the one used.
     room = cap - len(omitted_marker(size).encode())
-    # A character's worth more than fits:  no character is cut in two.
-    text, used = _fit(stream.read(cap + _UTF8_MAX_CHAR_BYTES), cap)
+
+    # Every read stops at the size seen above, however much a command
+    # still running in the background writes meanwhile;  each reads a
+    # character's worth more than fits, so no character is cut in two.
+    def read(start: int, count: int) -> bytes:
+        stream.seek(start)
+        return stream.read(max(min(count, size - start), 0))
+
+    text, used = _fit(read(0, cap + _UTF8_MAX_CHAR_BYTES), cap)
 
     if used == size or mode == OUTPUT_CAP_HEAD or room < 2:
         return text, size, used < size
 
     head_room = int(room * OUTPUT_CAP_HEAD_FRACTION)
-    stream.seek(0)
     head, head_used = _fit(
-        stream.read(head_room + _UTF8_MAX_CHAR_BYTES),
+        read(0, head_room + _UTF8_MAX_CHAR_BYTES),
         head_room,
     )
     tail_room = room - head_room
     start = max(size - tail_room - _UTF8_MAX_CHAR_BYTES, head_used)
-    stream.seek(start)
-    # Up to the size seen above, however much a command still running in
-    # the background has written since.
-    tail, tail_used = _fit(stream.read(size - start), tail_room, from_end=True)
+    tail, tail_used = _fit(read(start, size), tail_room, from_end=True)
     text = head + omitted_marker(size - head_used - tail_used) + tail
     return text, size, True
 

@@ -1715,3 +1715,41 @@ def test_harness_auto_savings_counted_as_json():
 def test_make_harness_w_window_under_the_reserve():
     with pytest.raises(harness.InvalidContextBudget):
         harness.make_harness({}, context_window=4096)
+
+
+# -- verification round ------------------------------------------------------
+
+
+def test_compact_content_search_w_a_content_line_in_a_title():
+    # A title holding a line 'Content:' makes the header's end ambiguous:
+    # the result is left alone, rather than lose part of its header.
+    content = (
+        "[c-1] [rank 1 of 1]\n"
+        'Source: "Manual\nContent:\nVolume 2" > Chapter 1\n'
+        "Type: paragraph\n"
+        "Content:\n" + "text " * 500
+    )
+
+    assert harness.compact_content("search", content) == content
+
+
+def test_compaction_candidates_counts_utf8_bytes():
+    # Fewer characters once escapes are gone is not fewer bytes sent:
+    # four-byte characters in the body, a long header kept.
+    content = (
+        "[c] [rank 1 of 1]\nSource: " + "a" * 1000 + "\nContent:\n"
+        "\U0001f600" * 20
+    )
+    messages = _history(("search", content))
+
+    found = harness.compaction_candidates(
+        messages,
+        _always(keep_recent=0, min_elide_chars=1),
+    )
+
+    assert found == []
+
+
+def test_unanswered_error_says_the_outcome_is_unknown():
+    assert "unknown" in harness.UNANSWERED_ERROR
+    assert "not run" not in harness.UNANSWERED_ERROR

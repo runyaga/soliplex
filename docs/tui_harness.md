@@ -36,13 +36,19 @@ One case is repaired rather than refused. A thread whose client stopped
 mid-way -- a run cancelled, or interrupted while a client tool ran, or
 stopped at `--max-turns` -- holds calls the server stored whose results
 were never sent. Reloaded, and continued with a new prompt, each such
-call first gets a result saying it was not run (and will not be), placed
+call first gets a result saying no result was recorded and its outcome
+is unknown (a command may have run before its client stopped), placed
 right after its call; nothing is run again. `ask --url --json` counts
 these as `answered` in `resends`.
 
-A thread reloaded in the TUI is rebuilt from its last run's input and
-events the way a live run is, so a tool call the stream sent without a
-parent message keeps its result paired.
+A thread reloaded in the TUI is rebuilt from its newest run which has
+an input, and that run's events, the way a live run is, so a tool call
+the stream sent without a parent message keeps its result paired.
+
+Limits: a question haiku.rag still has open (`evidence.in_progress`)
+when its client stopped stays open, and the next prompt continues it;
+and a thread reloaded while its last run still runs on the server may
+be answered for calls that run is about to answer.
 
 ## Compaction of old tool results
 

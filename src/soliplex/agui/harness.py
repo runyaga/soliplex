@@ -538,7 +538,9 @@ def compaction_candidates(
         message = messages[index]
         tool = calls[message.tool_call_id].function.name
         compacted = compact_content(tool, message.content)
-        return len(json.dumps(compacted)) < len(json.dumps(message.content))
+        return len(json.dumps(compacted, ensure_ascii=False)) < len(
+            json.dumps(message.content, ensure_ascii=False),
+        )
 
     return [index for index in eligible if shorter(index)]
 
@@ -728,10 +730,12 @@ def probe_model_window(
     except (httpx.HTTPError, ValueError, KeyError, TypeError):
         return None
 
+    if not isinstance(models, list):
+        return None
+
     for model in models:
         if isinstance(model, dict) and model.get("id") == model_name:
-            window = model.get("max_model_len")
-            return window if isinstance(window, int) else None
+            return _tokens(model.get("max_model_len"))
 
     return None
 
@@ -766,23 +770,36 @@ def resolve_window(
     return None, None
 
 
+def _tokens(value) -> int | None:
+    """'value' if it is a whole number of tokens (not a bool), else None"""
+    return value if type(value) is int and value >= 0 else None
+
+
 def measured_tokens(usage: dict | None) -> int | None:
     """The tokens a run left in the thread, from its usage record
 
     'final_input_tokens + final_output_tokens':  the last request's input,
     plus the reply it made, which the next request carries.  (Never the
     cumulative 'input_tokens', which counts every request of the run.)
-    None if the run recorded no usage, or not those.
+    None if the run recorded no usage, or not those (or not as numbers).
     """
-    if not usage:
+    if not isinstance(usage, dict):
         return None
 
-    final_input = usage.get("final_input_tokens")
+    final_input = _tokens(usage.get("final_input_tokens"))
 
     if final_input is None:
         return None
 
-    return final_input + (usage.get("final_output_tokens") or 0)
+    return final_input + (_tokens(usage.get("final_output_tokens")) or 0)
+
+
+class InvalidContextBudget(ValueError):
+    def __init__(self, window, reserve):
+        super().__init__(
+            f"The context window ({window} tokens) must be larger than the "
+            f"output reserve ({reserve} tokens)",
+        )
 
 
 @dataclasses.dataclass
@@ -811,13 +828,19 @@ class ContextBudget:
     anchor_chars: int = 0
     stale: bool = False
 
+    def __post_init__(self):
+        if self.window_tokens is not None and not (
+            0 <= self.output_reserve < self.window_tokens
+        ):
+            raise InvalidContextBudget(self.window_tokens, self.output_reserve)
+
     @property
     def usable_tokens(self) -> int | None:
         """The window, less the output reserve;  None if unknown"""
         if self.window_tokens is None:
             return None
 
-        return max(self.window_tokens - self.output_reserve, 0)
+        return self.window_tokens - self.output_reserve
 
     def estimate(self, chars: int) -> int:
         """Tokens a request carrying a history of 'chars' characters takes"""
@@ -1026,8 +1049,10 @@ class Harness:
 
             message = messages[index]
             tool = calls[message.tool_call_id].function.name
-            saved = len(message.content) - len(
-                compact_content(tool, message.content),
+            compacted = compact_content(tool, message.content)
+            # As 'wire_chars' counts it:  as JSON.
+            saved = len(json.dumps(message.content, ensure_ascii=False)) - len(
+                json.dumps(compacted, ensure_ascii=False),
             )
             estimate -= saved / self.budget.chars_per_token
             chosen.append(index)
@@ -1041,12 +1066,13 @@ class Harness:
     ) -> None:
         """Anchor the budget on the run's usage, as the server measured it
 
-        A usage which cannot be had (e.g., an HTTP error) leaves the
-        anchor as it was, 'stale':  the run itself is not failed for it.
+        A usage which cannot be had (an HTTP error, a body which is not
+        JSON, or not a usage record) leaves the anchor as it was, 'stale':
+        the run itself is not failed for it.
         """
         try:
             usage = client.run_usage(run_input.thread_id, run_input.run_id)
-        except client_tools.ClientToolsError:
+        except (client_tools.ClientToolsError, ValueError):
             usage = None
 
         self.budget.anchor(usage, wire_chars(run_input.messages))

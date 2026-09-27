@@ -194,7 +194,8 @@ The **window** comes from, in order:
    a 98k local model.
 
 `--output-reserve` tokens of the window are kept for the reply; the
-fractions apply to the rest.
+fractions apply to the rest. A window no larger than the reserve is
+refused, rather than silently compacting nothing.
 
 The **estimate** of the next request is anchored on what the server
 measured: after each run the client reads the run's usage
@@ -203,10 +204,14 @@ measured: after each run the client reads the run's usage
 reply it made, which the next request carries (never the cumulative
 `input_tokens`). The next request is estimated as that, plus the
 characters added to the history since (less those compaction saved) at
-3.5 characters a token. Before the first measurement it is the history's
+3.5 characters a token (counting the history as JSON, as it is sent).
+Before the first measurement it is the history's
 size at 3.5 characters a token, which leaves out the system prompt and
 tool definitions. A run with no usage (e.g., it failed) keeps the last
-anchor, marked stale.
+anchor, marked stale; so does a usage the client cannot read (an HTTP
+error, a body which is not a usage record). Neither fails the run. The
+usage is read after every run, so in a chain of client tool calls the
+anchor moves on with each hop.
 
 With `ask --url --json`, the output's `resends` lists what the client did
 before each POST: the history's size in characters (`resend_chars`,

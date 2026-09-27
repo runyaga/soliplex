@@ -482,6 +482,12 @@ def test_ask_remote_w_harness_options_from_env(
     monkeypatch.setenv("SOLIPLEX_TUI_PAIRING_CHECK", "false")
     monkeypatch.setenv("SOLIPLEX_TUI_OUTPUT_CAP_BYTES", "4096")
     monkeypatch.setenv("SOLIPLEX_TUI_OUTPUT_CAP_MODE", "head")
+    monkeypatch.setenv("SOLIPLEX_TUI_MIN_ELIDE_CHARS", "99")
+    monkeypatch.setenv("SOLIPLEX_TUI_COMPACTION_TRIGGER", "0.8")
+    monkeypatch.setenv("SOLIPLEX_TUI_COMPACTION_TARGET", "0.3")
+    monkeypatch.setenv("SOLIPLEX_TUI_PROBE_MODEL_WINDOW", "true")
+    monkeypatch.setenv("SOLIPLEX_TUI_OUTPUT_RESERVE", "512")
+    monkeypatch.setenv("SOLIPLEX_TUI_TRIM_RAG_STATE", "off")
 
     result = cli_runner.invoke(cli_ask.app, ["--url", URL, "room", "hi"])
 
@@ -492,6 +498,12 @@ def test_ask_remote_w_harness_options_from_env(
     assert harness_kwargs["compaction"].keep_recent == 7
     assert harness_kwargs["context_window"] == 262144
     assert harness_kwargs["pairing_check"] is False
+    assert harness_kwargs["compaction"].min_elide_chars == 99
+    assert harness_kwargs["compaction"].trigger_fraction == 0.8
+    assert harness_kwargs["compaction"].target_fraction == 0.3
+    assert harness_kwargs["probe_window"] is True
+    assert harness_kwargs["output_reserve"] == 512
+    assert harness_kwargs["trim_rag_state"] == "off"
     assert kwargs["context"].output_cap_bytes == 4096
     assert kwargs["context"].output_cap_mode == "head"
 

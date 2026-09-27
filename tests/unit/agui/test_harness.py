@@ -688,7 +688,7 @@ def test_harness_before_post_w_compaction_off():
     run_input = _run_input(messages)
     the_harness = harness.Harness(
         compaction=harness.CompactionPolicy(mode=harness.COMPACTION_OFF),
-        budget=harness.ContextBudget(window_tokens=1000),
+        budget=harness.ContextBudget(window_tokens=5000),
     )
 
     found = the_harness.before_post(mock.Mock(), run_input, first=True)
@@ -868,10 +868,17 @@ def test_context_budget_usable_and_fraction():
 
     assert budget.usable_tokens == 8_000
     assert budget.fraction(2_000) == 0.25
-    # A reserve larger than the window leaves nothing usable.
-    small = harness.ContextBudget(window_tokens=1_000, output_reserve=2_000)
-    assert small.usable_tokens == 0
-    assert small.fraction(10) is None
+
+
+@pytest.mark.parametrize(
+    "window, reserve",
+    [(1_000, 2_000), (4_096, 4_096), (10_000, -1)],
+)
+def test_context_budget_w_no_room(window, reserve):
+    # A reserve which leaves nothing usable is refused, not silently
+    # taken for an unknown window.
+    with pytest.raises(harness.InvalidContextBudget, match="larger than"):
+        harness.ContextBudget(window_tokens=window, output_reserve=reserve)
 
 
 def test_context_budget_anchor():
@@ -1026,7 +1033,7 @@ def test_harness_auto_stops_at_keep_recent():
     ]
 
 
-@pytest.mark.parametrize("window", [None, harness.DEFAULT_OUTPUT_RESERVE])
+@pytest.mark.parametrize("window", [None])
 def test_harness_auto_without_a_usable_window(window):
     # No window known (or none usable):  nothing is compacted.
     messages = _history(*_searches(10))
@@ -1559,3 +1566,152 @@ def test_harness_before_post_trims_rag_state(mode, first, trimmed):
     else:
         assert found is run_input
         assert report.trimmed == []
+
+
+# -- context budget:  review findings ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"data": None}, {"data": 123}, {"data": "text"}],
+)
+def test_probe_model_window_w_bad_data(body):
+    found = harness.probe_model_window(
+        _vllm_room(),
+        _models_http(lambda request: httpx.Response(200, json=body)),
+    )
+
+    assert found is None
+
+
+@pytest.mark.parametrize("window", [True, -1, 1.5, None])
+def test_probe_model_window_w_bad_window(window):
+    body = {"data": [{"id": "glimmer", "max_model_len": window}]}
+
+    found = harness.probe_model_window(
+        _vllm_room(),
+        _models_http(lambda request: httpx.Response(200, json=body)),
+    )
+
+    assert found is None
+
+
+@pytest.mark.parametrize(
+    "kwargs, room_info",
+    [
+        ({"context_window": 1000}, {}),
+        ({}, {"agent": {"context_window": 2000}}),
+    ],
+)
+def test_resolve_window_does_not_probe_when_known(kwargs, room_info):
+    probe = mock.Mock(side_effect=AssertionError("probed"))
+
+    window, _ = harness.resolve_window(room_info, probe=probe, **kwargs)
+
+    assert window is not None
+    probe.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        [1],
+        "text",
+        {"final_input_tokens": "100"},
+        {"final_input_tokens": True},
+        {"final_input_tokens": -5},
+    ],
+)
+def test_measured_tokens_w_bad_usage(usage):
+    assert harness.measured_tokens(usage) is None
+
+
+def test_measured_tokens_w_bad_output_tokens():
+    usage = {"final_input_tokens": 100, "final_output_tokens": "20"}
+
+    assert harness.measured_tokens(usage) == 100
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ValueError("Expecting value"),  # a body which is not JSON
+        client_tools.HTTPFailure(
+            mock.Mock(status_code=500, url="u", text="x")
+        ),
+    ],
+)
+def test_harness_after_run_w_bad_usage_body(error):
+    run_input = _run_input(_history(*_searches(1)))
+    client = mock.Mock(spec=["run_usage"])
+    client.run_usage.side_effect = error
+    the_harness = harness.Harness(
+        budget=harness.ContextBudget(anchor_tokens=10, anchor_chars=10),
+    )
+
+    the_harness.after_run(client, run_input)  # does not raise
+
+    assert the_harness.budget.stale is True
+
+
+@pytest.mark.parametrize("usage", [[1], {"final_input_tokens": "100"}])
+def test_harness_after_run_w_bad_usage_shape(usage):
+    run_input = _run_input(_history(*_searches(1)))
+    client = mock.Mock(spec=["run_usage"])
+    client.run_usage.return_value = usage
+    the_harness = harness.Harness()
+
+    the_harness.after_run(client, run_input)  # does not raise
+
+    assert the_harness.budget.anchor_tokens is None
+
+
+def test_harness_auto_exactly_at_the_trigger():
+    # At the trigger, not over it:  nothing compacted.
+    messages = _history(*_searches(6))
+    chars = harness.wire_chars(messages)
+    budget = harness.ContextBudget(
+        window_tokens=10_000,
+        output_reserve=0,
+        anchor_tokens=7_000,
+        anchor_chars=chars,
+    )
+    the_harness = harness.Harness(compaction=_auto(), budget=budget)
+    run_input = _run_input(messages)
+
+    assert budget.estimate(chars) == 7_000
+    assert the_harness.before_post(mock.Mock(), run_input, first=True) is (
+        run_input
+    )
+
+
+def test_harness_auto_savings_counted_as_json():
+    # Escape-heavy content:  savings are counted as the estimate counts
+    # characters (as JSON), so the batch stops as soon as it is enough.
+    content = "\u0001" * 10_000
+    messages = _history(*[("other", content) for _ in range(3)])
+    chars = harness.wire_chars(messages)
+    window = int(chars / 3.5 / 0.75)
+    budget = harness.ContextBudget(window_tokens=window, output_reserve=0)
+    the_harness = harness.Harness(
+        compaction=_auto(keep_recent=0),
+        budget=budget,
+    )
+
+    found = the_harness.before_post(
+        mock.Mock(),
+        _run_input(messages),
+        first=True,
+    )
+
+    report = the_harness.reports[-1]
+    assert report.est_tokens <= 0.4 * budget.usable_tokens
+    # Not all three:  two were enough.
+    assert report.compacted == 2
+    assert harness.is_compacted(_tool_contents(found.messages)[1])
+    assert not harness.is_compacted(_tool_contents(found.messages)[2])
+
+
+def test_make_harness_w_window_under_the_reserve():
+    with pytest.raises(harness.InvalidContextBudget):
+        harness.make_harness({}, context_window=4096)

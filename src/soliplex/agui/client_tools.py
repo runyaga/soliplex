@@ -947,6 +947,22 @@ def omitted_marker(omitted: int) -> str:
     return f"\n...[{omitted} bytes omitted]...\n"
 
 
+def _utf8_start(data: bytes, index: int) -> int:
+    """The first index at or after 'index' where no UTF-8 character is cut"""
+    while index < len(data) and (data[index] & 0xC0) == 0x80:
+        index += 1
+
+    return index
+
+
+def _utf8_end(data: bytes, index: int) -> int:
+    """The last index at or before 'index' where no UTF-8 character is cut"""
+    while 0 < index < len(data) and (data[index] & 0xC0) == 0x80:
+        index -= 1
+
+    return index
+
+
 def _read_capped(
     stream,
     cap: int,
@@ -954,26 +970,36 @@ def _read_capped(
 ) -> tuple[str, int, bool]:
     """Read a stream of at most 'cap' bytes;  its text, size, and if cut
 
-    Longer, it keeps its first 'cap' bytes ('head'), or its first
-    'OUTPUT_CAP_HEAD_FRACTION' of them and its last bytes, with
-    'omitted_marker' between ('head_tail').  A character cut in two
-    decodes as U+FFFD.
+    Longer, it keeps its first 'cap' bytes ('head');  or ('head_tail') its
+    start and its end, 'OUTPUT_CAP_HEAD_FRACTION' of the room for the
+    start, with 'omitted_marker' between them -- all within 'cap' bytes,
+    the marker included, and cut only between UTF-8 characters.  (Should
+    the cap leave no room for the marker, it cuts as 'head' does.)  Bytes
+    which are not UTF-8 decode as U+FFFD.
     """
     size = stream.seek(0, os.SEEK_END)
     stream.seek(0)
 
-    if size <= cap or mode == OUTPUT_CAP_HEAD:
+    # The marker, were it to say the most that could be omitted:  no
+    # shorter than the one used.
+    budget = cap - len(omitted_marker(size).encode())
+
+    if size <= cap or mode == OUTPUT_CAP_HEAD or budget < 2:
         data = stream.read(cap)
         return data.decode("utf-8", errors="replace"), size, size > cap
 
-    head_bytes = int(cap * OUTPUT_CAP_HEAD_FRACTION)
-    tail_bytes = cap - head_bytes
-    head = stream.read(head_bytes)
-    stream.seek(size - tail_bytes)
-    tail = stream.read(tail_bytes)
+    head_bytes = int(budget * OUTPUT_CAP_HEAD_FRACTION)
+    tail_bytes = budget - head_bytes
+    # A character's worth more on each side, to find where it starts.
+    head = stream.read(head_bytes + 1)
+    head = head[: _utf8_end(head, head_bytes)]
+    stream.seek(size - tail_bytes - 1)
+    tail = stream.read(tail_bytes + 1)
+    tail = tail[_utf8_start(tail, 1) :]
+    omitted = size - len(head) - len(tail)
     text = (
         head.decode("utf-8", errors="replace")
-        + omitted_marker(size - cap)
+        + omitted_marker(omitted)
         + tail.decode("utf-8", errors="replace")
     )
     return text, size, True

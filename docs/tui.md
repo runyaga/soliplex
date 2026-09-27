@@ -57,9 +57,10 @@ Options:
   stdout and stderr sent to the model (default: 16384; at least 256;
   `SOLIPLEX_TUI_OUTPUT_CAP_BYTES`)
 - `--output-cap-mode head|head_tail` -- how longer output is cut: keep its
-  start only, or its first 60% and its end, with a
-  `...[N bytes omitted]...` line between (default: `head_tail`, since
-  errors are usually at the end; `SOLIPLEX_TUI_OUTPUT_CAP_MODE`)
+  start only, or its start and its end (60% / 40% of the room), with a
+  `...[N bytes omitted]...` line between -- the line counts toward the
+  cap, and no character is cut in two (default: `head_tail`, since errors
+  are usually at the end; `SOLIPLEX_TUI_OUTPUT_CAP_MODE`)
 - `--auto-approve` / `--yolo` -- run client tool calls **without asking**
   (default: off; see [Auto-approve](#auto-approve))
 - `-V` / `--version` -- print the version and exit

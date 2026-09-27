@@ -8,6 +8,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import signal
 import socket
 import sys
@@ -465,20 +466,21 @@ def test_run_shell_caps_output_head_tail(root):
     command = _script(
         root,
         "big.py",
-        "import sys\nsys.stdout.write('a' * 100 + 'END')\n",
+        "import sys\nsys.stdout.write('a' * 300 + 'END')\n",
     )
     context = client_tools.ToolContext(
         root=root,
         allow_anywhere=True,
-        output_cap_bytes=10,
+        output_cap_bytes=100,
     )
 
     found = client_tools.run_shell({"command": command}, context)
 
-    assert found["stdout_bytes"] == 103
-    assert found["stdout"] == "aaaaaa" + client_tools.omitted_marker(93) + (
-        "aEND"
-    )
+    assert found["stdout_bytes"] == 303
+    marker = client_tools.omitted_marker(303 - 73)
+    assert len(marker) == 27  # so 73 bytes of room:  43 + 30
+    assert found["stdout"] == "a" * 43 + marker + "a" * 27 + "END"
+    assert len(found["stdout"].encode()) == 100
     assert found["truncated"] is True
 
 
@@ -489,17 +491,44 @@ def test__read_capped_under_the_cap(mode):
     assert client_tools._read_capped(stream, 5, mode) == ("short", 5, False)
 
 
-def test__read_capped_head_tail_splits_a_character():
-    # A character cut in two decodes as U+FFFD, rather than failing.
-    stream = io.BytesIO("é".encode() * 10)  # 20 bytes
+def test__read_capped_head_tail_w_no_room_for_the_marker():
+    # A cap too small for the marker cuts as 'head' does.
+    stream = io.BytesIO(b"x" * 100)
 
-    text, size, cut = client_tools._read_capped(stream, 11)
+    assert client_tools._read_capped(stream, 10) == ("x" * 10, 100, True)
 
-    assert size == 20
+
+@pytest.mark.parametrize("char", ["a", "\u00e9", "\u20ac", "\U0001f600"])
+@pytest.mark.parametrize("cap", [256, 257, 300, 1000])
+@pytest.mark.parametrize("extra", [1, 2, 3, 7, 10, 95, 1000, 99_999])
+def test__read_capped_head_tail_stays_within_the_cap(char, cap, extra):
+    # Whatever the sizes (and the marker's digits), the text sent is at
+    # most 'cap' bytes, cut only between characters, and says truly how
+    # many bytes it left out.
+    data = (char * (cap + extra)).encode()
+    stream = io.BytesIO(data)
+
+    text, size, cut = client_tools._read_capped(stream, cap)
+
+    assert size == len(data)
     assert cut is True
-    head, tail = text.split(client_tools.omitted_marker(9))
-    assert head == "ééé"  # 6 bytes
-    assert tail == "\ufffdéé"  # the last 5 bytes
+    assert len(text.encode()) <= cap
+    head, marker_count, tail = re.fullmatch(
+        r"(.*)\n\.\.\.\[(\d+) bytes omitted\]\.\.\.\n(.*)",
+        text,
+        re.DOTALL,
+    ).groups()
+    head_bytes, tail_bytes = head.encode(), tail.encode()
+    assert data.startswith(head_bytes)
+    assert data.endswith(tail_bytes)
+    assert int(marker_count) == size - len(head_bytes) - len(tail_bytes)
+    # Nothing replaced:  no character was cut.
+    assert "\ufffd" not in head + tail
+    assert head
+    assert tail
+    # Most of the room is used (a character's worth either side at most).
+    assert len(text.encode()) > cap - 8
+    assert len(head_bytes) >= len(tail_bytes)
 
 
 def test_run_shell_times_out_and_kills_the_command(root):

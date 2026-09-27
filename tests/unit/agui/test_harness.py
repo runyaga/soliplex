@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from unittest import mock
 
+import httpx
 import pytest
 from ag_ui import core as agui_core
 
@@ -200,9 +201,23 @@ def _shell_json(exit_code=0, stdout="x" * 3000, stderr="", **extra):
 def test_compaction_policy_defaults():
     policy = harness.CompactionPolicy()
 
-    assert policy.mode == harness.COMPACTION_OFF
+    assert policy.mode == harness.COMPACTION_AUTO
     assert policy.keep_recent == harness.DEFAULT_KEEP_RECENT
     assert policy.min_elide_chars == harness.DEFAULT_MIN_ELIDE_CHARS
+    assert policy.trigger_fraction == harness.DEFAULT_TRIGGER_FRACTION
+    assert policy.target_fraction == harness.DEFAULT_TARGET_FRACTION
+
+
+@pytest.mark.parametrize(
+    "trigger, target",
+    [(0.5, 0.5), (0.4, 0.5), (1.1, 0.5), (0.7, 0.0), (0.7, -0.1)],
+)
+def test_compaction_policy_w_bad_fractions(trigger, target):
+    with pytest.raises(harness.InvalidCompactionFractions, match="target"):
+        harness.CompactionPolicy(
+            trigger_fraction=trigger,
+            target_fraction=target,
+        )
 
 
 def test_compaction_policy_w_bad_mode():
@@ -447,14 +462,15 @@ def test_compacted_info_w_uncompacted(content):
     assert harness.compacted_info(content) is None
 
 
-def _history(*results, calls=None):
+def _history(*results, calls=None, start=0):
     """A user prompt, then one assistant call and result per 'results'
 
-    'results' are '(tool, content)';  'calls' may override a call.
+    'results' are '(tool, content)';  'calls' may override a call.  Ids
+    are numbered from 'start'.
     """
     messages = [_user()]
 
-    for index, (tool, content) in enumerate(results):
+    for index, (tool, content) in enumerate(results, start):
         call_id = f"call-{index}"
         call = (calls or {}).get(index) or _call(call_id, tool)
         messages.append(
@@ -645,6 +661,10 @@ def test_harness_before_post_compacts_always():
             harness.wire_chars(messages) - harness.wire_chars(found.messages)
         ),
         "compacted_total": 2,
+        "est_tokens": round(harness.wire_chars(found.messages) / 3.5),
+        "window_tokens": None,
+        "window_source": None,
+        "stale": False,
     }
 
     # Again:  nothing more to do, and the same bytes.
@@ -661,7 +681,10 @@ def test_harness_before_post_w_compaction_off():
         *[("search", _search_result(f"s{k}")) for k in range(6)]
     )
     run_input = _run_input(messages)
-    the_harness = harness.Harness()
+    the_harness = harness.Harness(
+        compaction=harness.CompactionPolicy(mode=harness.COMPACTION_OFF),
+        budget=harness.ContextBudget(window_tokens=1000),
+    )
 
     found = the_harness.before_post(mock.Mock(), run_input, first=True)
 
@@ -680,3 +703,420 @@ def test_compacted_info_w_other_words():
 @pytest.mark.parametrize("content", ["not json " * 300, json.dumps([1] * 900)])
 def test_compact_content_shell_not_a_result(content):
     assert harness.compact_content("shell", content) == content
+
+
+# -- context budget ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "room_info, expected",
+    [
+        ({}, None),
+        ({"agent": None}, None),
+        ({"agent": {"kind": "factory"}}, None),
+        ({"agent": {"context_window": 98304}}, 98304),
+    ],
+)
+def test_room_context_window(room_info, expected):
+    assert harness.room_context_window(room_info) == expected
+
+
+def _vllm_room(base_url="http://vllm:8000/v1", model="glimmer"):
+    return {"agent": {"provider_base_url": base_url, "model_name": model}}
+
+
+def _models_http(handler):
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://vllm:8000/v1", "http://vllm:8000/v1/", "http://vllm:8000"],
+)
+def test_probe_model_window(base_url):
+    urls = []
+
+    def handler(request):
+        urls.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    "junk",
+                    {"id": "other", "max_model_len": 1},
+                    {"id": "glimmer", "max_model_len": 98304},
+                ],
+            },
+        )
+
+    found = harness.probe_model_window(
+        _vllm_room(base_url),
+        _models_http(handler),
+    )
+
+    assert found == 98304
+    assert urls == ["http://vllm:8000/v1/models"]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, json={"data": [{"id": "other"}]}),
+        httpx.Response(200, json={"data": [{"id": "glimmer"}]}),
+        httpx.Response(
+            200,
+            json={"data": [{"id": "glimmer", "max_model_len": "big"}]},
+        ),
+        httpx.Response(200, json={"models": []}),
+        httpx.Response(200, json=[1, 2]),
+        httpx.Response(200, text="not json"),
+        httpx.Response(500, text="down"),
+    ],
+)
+def test_probe_model_window_w_nothing_useful(response):
+    found = harness.probe_model_window(
+        _vllm_room(),
+        _models_http(lambda request: response),
+    )
+
+    assert found is None
+
+
+def test_probe_model_window_w_transport_error():
+    def handler(request):
+        raise httpx.ConnectError("refused", request=request)
+
+    assert (
+        harness.probe_model_window(_vllm_room(), _models_http(handler)) is None
+    )
+
+
+@pytest.mark.parametrize(
+    "room_info",
+    [{}, _vllm_room(base_url=None), _vllm_room(model=None)],
+)
+def test_probe_model_window_w_no_server(room_info):
+    http = _models_http(mock.Mock(side_effect=AssertionError("no request")))
+
+    assert harness.probe_model_window(room_info, http) is None
+
+
+@pytest.mark.parametrize(
+    "kwargs, room_info, probed, expected",
+    [
+        (
+            {"context_window": 1000},
+            {"agent": {"context_window": 2}},
+            3,
+            (1000, "option"),
+        ),
+        ({}, {"agent": {"context_window": 2}}, 3, (2, "room")),
+        ({}, {}, 3, (3, "model server")),
+        ({}, {}, None, (None, None)),
+    ],
+)
+def test_resolve_window(kwargs, room_info, probed, expected):
+    probe = mock.Mock(return_value=probed)
+
+    found = harness.resolve_window(room_info, probe=probe, **kwargs)
+
+    assert found == expected
+
+
+def test_resolve_window_without_probe():
+    assert harness.resolve_window({}) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "usage, expected",
+    [
+        (None, None),
+        ({}, None),
+        ({"input_tokens": 500, "final_input_tokens": None}, None),
+        ({"final_input_tokens": 100}, 100),
+        ({"final_input_tokens": 100, "final_output_tokens": None}, 100),
+        # Never the cumulative 'input_tokens'.
+        (
+            {
+                "input_tokens": 900,
+                "final_input_tokens": 100,
+                "final_output_tokens": 20,
+            },
+            120,
+        ),
+    ],
+)
+def test_measured_tokens(usage, expected):
+    assert harness.measured_tokens(usage) == expected
+
+
+def test_context_budget_unknown_window():
+    budget = harness.ContextBudget()
+
+    assert budget.usable_tokens is None
+    assert budget.fraction(100) is None
+    assert budget.estimate(350) == 100  # at 3.5 characters a token
+
+
+def test_context_budget_usable_and_fraction():
+    budget = harness.ContextBudget(window_tokens=10_000, output_reserve=2_000)
+
+    assert budget.usable_tokens == 8_000
+    assert budget.fraction(2_000) == 0.25
+    # A reserve larger than the window leaves nothing usable.
+    small = harness.ContextBudget(window_tokens=1_000, output_reserve=2_000)
+    assert small.usable_tokens == 0
+    assert small.fraction(10) is None
+
+
+def test_context_budget_anchor():
+    budget = harness.ContextBudget(window_tokens=100_000)
+
+    budget.anchor(
+        {"final_input_tokens": 5_000, "final_output_tokens": 200}, 7_000
+    )
+
+    assert (budget.anchor_tokens, budget.anchor_chars, budget.stale) == (
+        5_200,
+        7_000,
+        False,
+    )
+    # Measured, plus (or less) the characters since, at 3.5 a token.
+    assert budget.estimate(7_000) == 5_200
+    assert budget.estimate(14_000) == 7_200
+    assert budget.estimate(3_500) == 4_200
+    assert budget.estimate(0) == 3_200
+    assert (
+        harness.ContextBudget(anchor_tokens=10, anchor_chars=10_000).estimate(
+            0
+        )
+        == 0
+    )
+
+    # A run with no measurement keeps the anchor, but it is stale.
+    budget.anchor(None, 20_000)
+
+    assert (budget.anchor_tokens, budget.anchor_chars, budget.stale) == (
+        5_200,
+        7_000,
+        True,
+    )
+
+    budget.anchor({"final_input_tokens": 9_000}, 21_000)
+
+    assert (budget.anchor_tokens, budget.stale) == (9_000, False)
+
+
+def test_context_budget_no_anchor_is_not_stale():
+    budget = harness.ContextBudget()
+
+    budget.anchor(None, 100)
+
+    assert budget.anchor_tokens is None
+    assert budget.stale is False
+
+
+def _auto(**kwargs):
+    return harness.CompactionPolicy(mode=harness.COMPACTION_AUTO, **kwargs)
+
+
+def _searches(count, start=0):
+    return [
+        ("search", _search_result(f"s{k}"))
+        for k in range(start, start + count)
+    ]
+
+
+def _tool_contents(messages):
+    return [m.content for m in messages if m.role == "tool"]
+
+
+def test_harness_auto_waits_for_the_high_water_mark():
+    messages = _history(*_searches(6))
+    chars = harness.wire_chars(messages)
+    # Estimate (chars / 3.5) just under 70% of the usable window.
+    window = int(chars / 3.5 / 0.69) + harness.DEFAULT_OUTPUT_RESERVE
+    the_harness = harness.Harness(
+        compaction=_auto(),
+        budget=harness.ContextBudget(window_tokens=window),
+    )
+    run_input = _run_input(messages)
+
+    found = the_harness.before_post(mock.Mock(), run_input, first=True)
+
+    assert found is run_input
+    (report,) = the_harness.reports
+    assert report.compacted == 0
+    assert report.window_tokens == window
+    assert report.est_tokens == round(chars / 3.5)
+
+
+def test_harness_auto_compacts_one_batch_to_the_low_water_mark():
+    messages = _history(*_searches(20))
+    chars = harness.wire_chars(messages)
+    # Estimate at 80% of the usable window:  over the 70% trigger.
+    window = int(chars / 3.5 / 0.8) + harness.DEFAULT_OUTPUT_RESERVE
+    budget = harness.ContextBudget(window_tokens=window, window_source="room")
+    the_harness = harness.Harness(compaction=_auto(), budget=budget)
+
+    found = the_harness.before_post(
+        mock.Mock(), _run_input(messages), first=True
+    )
+
+    (report,) = the_harness.reports
+    # Oldest first, just enough to get under 40%;  the newest 4 are kept.
+    compacted = [
+        harness.is_compacted(c) for c in _tool_contents(found.messages)
+    ]
+    assert compacted == [True] * report.compacted + [False] * (
+        20 - report.compacted
+    )
+    assert 0 < report.compacted < 16  # not every candidate:  just enough
+    assert report.est_tokens <= 0.4 * budget.usable_tokens
+    assert report.window_source == "room"
+    # One fewer, and it would still be over the low-water mark.
+    partial = harness.compact_history(
+        messages,
+        [2 * k + 2 for k in range(report.compacted - 1)],
+    )
+    assert (
+        budget.estimate(harness.wire_chars(partial))
+        > 0.4 * budget.usable_tokens
+    )
+
+    # Growing again, below the trigger:  the history is only appended
+    # to, so the prefix already sent stays byte-identical.
+    grown = [
+        *found.messages,
+        *_history(*_searches(1, start=20), start=20)[1:],
+    ]
+    again = the_harness.before_post(mock.Mock(), _run_input(grown), first=True)
+
+    assert the_harness.reports[-1].compacted == 0
+    sent_before = [m.model_dump_json() for m in found.messages]
+    sent_after = [m.model_dump_json() for m in again.messages]
+    assert sent_after[: len(sent_before)] == sent_before
+
+
+def test_harness_auto_stops_at_keep_recent():
+    # Even over the trigger, the newest 'keep_recent' are never compacted.
+    messages = _history(*_searches(5))
+    budget = harness.ContextBudget(
+        window_tokens=harness.DEFAULT_OUTPUT_RESERVE + 10
+    )
+    the_harness = harness.Harness(compaction=_auto(), budget=budget)
+
+    found = the_harness.before_post(
+        mock.Mock(), _run_input(messages), first=True
+    )
+
+    assert [
+        harness.is_compacted(c) for c in _tool_contents(found.messages)
+    ] == [
+        True,
+        False,
+        False,
+        False,
+        False,
+    ]
+
+
+@pytest.mark.parametrize("window", [None, harness.DEFAULT_OUTPUT_RESERVE])
+def test_harness_auto_without_a_usable_window(window):
+    # No window known (or none usable):  nothing is compacted.
+    messages = _history(*_searches(10))
+    the_harness = harness.Harness(
+        compaction=_auto(),
+        budget=harness.ContextBudget(window_tokens=window),
+    )
+    run_input = _run_input(messages)
+
+    assert (
+        the_harness.before_post(mock.Mock(), run_input, first=True)
+        is run_input
+    )
+
+
+def test_harness_after_run_anchors_the_budget():
+    run_input = _run_input(_history(*_searches(1)))
+    client = mock.Mock(spec=["run_usage"])
+    client.run_usage.return_value = {
+        "final_input_tokens": 1_000,
+        "final_output_tokens": 50,
+    }
+    the_harness = harness.Harness()
+
+    the_harness.after_run(client, run_input)
+
+    client.run_usage.assert_called_once_with("thread-1", "run-1")
+    assert the_harness.budget.anchor_tokens == 1_050
+    assert the_harness.budget.anchor_chars == harness.wire_chars(
+        run_input.messages
+    )
+
+    # The next POST's estimate starts from it.
+    the_harness.before_post(client, run_input, first=True)
+
+    assert the_harness.reports[-1].est_tokens == 1_050
+    assert the_harness.reports[-1].stale is False
+
+
+def test_harness_after_run_w_failed_usage():
+    run_input = _run_input(_history(*_searches(1)))
+    client = mock.Mock(spec=["run_usage"])
+    client.run_usage.side_effect = client_tools.TransportFailure(
+        httpx.ConnectError("refused"),
+    )
+    the_harness = harness.Harness(
+        budget=harness.ContextBudget(anchor_tokens=10, anchor_chars=10),
+    )
+
+    the_harness.after_run(client, run_input)  # does not raise
+
+    assert the_harness.budget.anchor_tokens == 10
+    assert the_harness.budget.stale is True
+    the_harness.before_post(client, run_input, first=True)
+    assert the_harness.reports[-1].stale is True
+
+
+@pytest.mark.parametrize("probe_window", [False, True])
+def test_make_harness(probe_window):
+    room_info = _vllm_room()
+
+    with mock.patch.object(
+        harness,
+        "probe_model_window",
+        return_value=262_144,
+    ) as probe:
+        found = harness.make_harness(
+            room_info,
+            probe_window=probe_window,
+            output_reserve=100,
+            pairing_check=False,
+        )
+
+    assert found.pairing_check is False
+    assert found.budget.output_reserve == 100
+
+    if probe_window:
+        ((info, http), _) = probe.call_args
+        assert info is room_info
+        assert isinstance(http, httpx.Client)
+        assert http.is_closed
+        assert (found.budget.window_tokens, found.budget.window_source) == (
+            262_144,
+            "model server",
+        )
+    else:
+        probe.assert_not_called()
+        assert found.budget.window_tokens is None
+
+
+def test_make_harness_w_context_window():
+    found = harness.make_harness({}, context_window=5000)
+
+    assert (found.budget.window_tokens, found.budget.window_source) == (
+        5000,
+        "option",
+    )
+    assert found.budget.output_reserve == harness.DEFAULT_OUTPUT_RESERVE

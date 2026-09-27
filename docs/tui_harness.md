@@ -33,8 +33,10 @@ a trailing call which has no result.
 
 ## Compaction of old tool results
 
-`--compaction off|always` (default: `off`; `SOLIPLEX_TUI_COMPACTION`),
-`--keep-recent N` (default: 4), `--min-elide-chars N` (default: 1024).
+`--compaction off|auto|always` (default: `auto`;
+`SOLIPLEX_TUI_COMPACTION`), `--keep-recent N` (default: 4;
+`SOLIPLEX_TUI_KEEP_RECENT`), `--min-elide-chars N` (default: 1024;
+`SOLIPLEX_TUI_MIN_ELIDE_CHARS`).
 
 Most of a RAG-heavy thread's history is tool results: each haiku.rag
 `search` returns five context-expanded hits, about 10 KB, and every
@@ -68,6 +70,27 @@ A `search` or `shell` result which is not of the shape expected (hits
 the client cannot parse, a result not made by this client) is left as
 it is, rather than risk losing its chunk ids or a failure.
 
+### When: `auto`, `always` and `off`
+
+- `auto` (the default) compacts nothing until the next request is
+  estimated (see [Context budget](#context-budget)) to take more than
+  `--compaction-trigger` (default 0.70) of the usable context window.
+  Then it compacts, oldest first, just enough results to bring the
+  estimate under `--compaction-target` (default 0.40), **in one batch**,
+  and nothing more until the trigger is crossed again. With no window
+  known, `auto` compacts nothing.
+- `always` compacts every eligible result but the newest
+  `--keep-recent`, before every POST.
+- `off` sends the history as it is.
+
+Why batches: a model server with prefix caching (vLLM's is on by
+default) reuses the computed prefix of a prompt it has seen. An
+append-only history keeps that prefix; rewriting an old result
+invalidates everything after it. Compacting a little on every turn
+(`always`) would bust the cache on every turn; `auto`'s high- and
+low-water marks bust it once per batch, and between batches the history
+only grows.
+
 ### The compaction marker
 
 The server stores the history each run is sent, so every client reading
@@ -95,3 +118,46 @@ result: no timestamps, counters or budget figures. Once compacted, a
 result is byte-identical on every later resend, and a result already
 carrying the marker is never compacted again. The tools and the rest of
 the history are left as they were.
+
+## Context budget
+
+`--context-window N` (`SOLIPLEX_TUI_CONTEXT_WINDOW`),
+`--probe-model-window` (`SOLIPLEX_TUI_PROBE_MODEL_WINDOW`),
+`--output-reserve N` (default: 4096; `SOLIPLEX_TUI_OUTPUT_RESERVE`),
+`--compaction-trigger F` / `--compaction-target F` (defaults: 0.70 /
+0.40; `SOLIPLEX_TUI_COMPACTION_TRIGGER` / `_TARGET`).
+
+The **window** comes from, in order:
+
+1. `--context-window`;
+2. the room's `agent.context_window` (declare it in the room's YAML for
+   a local model: the server cannot know a vLLM model's window
+   otherwise);
+3. with `--probe-model-window` only, the room's model server:
+   `GET {provider_base_url}/v1/models`, the entry whose `id` is the
+   room's model, its `max_model_len` (vLLM). This contacts the model
+   server directly from the client, so it is off by default;
+4. otherwise it is unknown, and `auto` compacts nothing. There is no
+   default: a guess (pydantic-ai-harness uses 200k) is badly wrong for
+   a 98k local model.
+
+`--output-reserve` tokens of the window are kept for the reply; the
+fractions apply to the rest.
+
+The **estimate** of the next request is anchored on what the server
+measured: after each run the client reads the run's usage
+(`GET .../agui/{thread_id}/{run_id}/usage`) and takes
+`final_input_tokens + final_output_tokens` -- the last request, plus the
+reply it made, which the next request carries (never the cumulative
+`input_tokens`). The next request is estimated as that, plus the
+characters added to the history since (less those compaction saved) at
+3.5 characters a token. Before the first measurement it is the history's
+size at 3.5 characters a token, which leaves out the system prompt and
+tool definitions. A run with no usage (e.g., it failed) keeps the last
+anchor, marked stale.
+
+With `ask --url --json`, the output's `resends` lists what the client did
+before each POST: the history's size in characters (`resend_chars`,
+`state_chars`), how many results it compacted (`compacted`, saving
+`compacted_chars`; `compacted_total` in all), the estimate
+(`est_tokens`) and the window (`window_tokens`, `window_source`).

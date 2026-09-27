@@ -1193,7 +1193,7 @@ class RoomView(t_screen.Screen):
             self.app.call_from_thread(response.update, response_content)
 
         if self.harness is None:
-            self.harness = self.app.new_harness()
+            self.harness = self.app.new_harness(self.room_info)
 
         worker = t_worker.get_current_worker()
 
@@ -1230,6 +1230,7 @@ class RoomView(t_screen.Screen):
                     on_tool_result=on_tool_result,
                     tool_log=self.app.tool_log,
                     before_post=self.harness.before_post,
+                    after_run=self.harness.after_run,
                 )
 
         except client_tools.ClientToolsError as exc:
@@ -1510,9 +1511,9 @@ class SoliplexTUI(t_app.App):
 
         super().__init__(*args, **kw)
 
-    def new_harness(self) -> agui_harness.Harness:
-        """A harness for a thread's history, as configured"""
-        return agui_harness.Harness(**self.harness_options)
+    def new_harness(self, room_info: dict) -> agui_harness.Harness:
+        """A harness for a thread's history in a room, as configured"""
+        return agui_harness.make_harness(room_info, **self.harness_options)
 
     def _show_auto_approve(self) -> None:
         """Say, for the rest of the session, that commands run unasked"""

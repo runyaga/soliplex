@@ -1631,6 +1631,28 @@ class SoliplexClient:
             {"parent_run_id": parent_run_id},
         )
 
+    def _get(self, url: str) -> typing.Any:
+        try:
+            response = self.http.get(url)
+        except httpx.HTTPError as exc:
+            raise TransportFailure(exc) from exc
+
+        self._check(response)
+        return response.json()
+
+    def room_info(self) -> dict:
+        """The room, as 'GET /api/v1/rooms/{room_id}' describes it"""
+        return self._get(self.agui_url.removesuffix("/agui"))
+
+    def run_usage(self, thread_id: str, run_id: str) -> dict | None:
+        """A run's token usage, or None if it recorded none
+
+        See 'GET .../agui/{thread_id}/{run_id}/usage':  its
+        'final_input_tokens' and 'final_output_tokens' are the last model
+        request's, which say how full the context window is.
+        """
+        return self._get(f"{self.agui_url}/{thread_id}/{run_id}/usage")
+
     def stream_run(
         self,
         run_input: agui_core.RunAgentInput,
@@ -1769,6 +1791,10 @@ def _parse_run(
     return esp.as_run_agent_input
 
 
+#   Called after every run 'run_loop' makes which finishes, with the client
+#   and the history the run left (whose 'run_id' is the run's).
+AfterRun = abc.Callable[[SoliplexClient, agui_core.RunAgentInput], None]
+
 #   Called before every POST 'run_loop' makes, with the client, the history
 #   about to be sent, and 'first' (true for a prompt's first run, false for
 #   one sending client tool results back);  returns the history to send in
@@ -1790,6 +1816,7 @@ def run_loop(
     on_tool_result: (abc.Callable[[ToolCallRecord, dict], None] | None) = None,
     tool_log: ToolLog | None = None,
     before_post: BeforePost | None = None,
+    after_run: AfterRun | None = None,
 ) -> LoopResult:
     """Run 'run_input', executing client tool calls, until a final answer
 
@@ -1810,7 +1837,8 @@ def run_loop(
 
     'before_post', if given, sees each history before it is sent, and
     returns the one to send (see 'BeforePost'):  what it returns is the
-    history the run continues, and the result carries.
+    history the run continues, and the result carries.  'after_run', if
+    given, sees the history each run which finishes leaves.
 
     Returns the result, whose 'run_input' is the final history (e.g., for
     the TUI's next prompt).  A 'ClientToolsError' carries the result so
@@ -1832,6 +1860,7 @@ def run_loop(
             on_tool_result=on_tool_result,
             tool_log=tool_log,
             before_post=before_post,
+            after_run=after_run,
         )
     except ClientToolsError as exc:
         exc.result = result
@@ -1854,6 +1883,7 @@ def _run_loop(
     on_tool_result: abc.Callable[[ToolCallRecord, dict], None] | None,
     tool_log: ToolLog | None,
     before_post: BeforePost | None,
+    after_run: AfterRun | None,
 ) -> None:
     turn = 0
 
@@ -1868,6 +1898,10 @@ def _run_loop(
         previous_ids = {message.id for message in run_input.messages}
 
         run_input = _parse_run(client, run_input, on_event)
+
+        if after_run is not None:
+            after_run(client, run_input)
+
         pending = pending_tool_calls(run_input.messages)
 
         if not pending:

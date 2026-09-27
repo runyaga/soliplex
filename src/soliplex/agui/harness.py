@@ -16,7 +16,14 @@ thin layers over it:
   history (and haiku.rag's per-question ledger, which counts messages)
   is unchanged in shape.  A compacted result starts with
   'COMPACTED_MARKER', so that any client reading the thread back can
-  tell, and is byte-identical on every later resend.
+  tell, and is byte-identical on every later resend;
+- the context budget ('ContextBudget'):  the model's window (from an
+  option, the room, or the model server), and an estimate of how much
+  of it the next request takes, anchored on the tokens the server
+  measured for the last run.  In 'auto' mode, compaction waits until the
+  estimate crosses a high-water mark, then compacts down to a low-water
+  mark in one batch:  a model server caching prompt prefixes (vLLM)
+  keeps its cache between batches, since the history only grows.
 
 'Harness' ties it together:  a client makes one per thread, and hands
 its 'before_post' to 'client_tools.run_loop'.
@@ -30,6 +37,7 @@ import re
 from collections import abc
 from urllib import parse as urllib_parse
 
+import httpx
 from ag_ui import core as agui_core
 
 from soliplex.agui import client_tools
@@ -124,11 +132,16 @@ def validate_pairing(
 #   Compaction:  rewriting old tool results
 #
 COMPACTION_OFF = "off"
+COMPACTION_AUTO = "auto"
 COMPACTION_ALWAYS = "always"
-COMPACTION_MODES = (COMPACTION_OFF, COMPACTION_ALWAYS)
+COMPACTION_MODES = (COMPACTION_OFF, COMPACTION_AUTO, COMPACTION_ALWAYS)
 
 DEFAULT_KEEP_RECENT = 4
 DEFAULT_MIN_ELIDE_CHARS = 1024
+#   'auto':  compact once the estimate is over this fraction of the usable
+#   window, down to under that one, in one batch.
+DEFAULT_TRIGGER_FRACTION = 0.70
+DEFAULT_TARGET_FRACTION = 0.40
 
 #   Every compacted tool result starts with this, then 'key=value' words
 #   ('tool', 'format', 'original_bytes') and ']':  see 'compacted_info'.
@@ -181,6 +194,14 @@ class InvalidCompactionMode(ValueError):
         )
 
 
+class InvalidCompactionFractions(ValueError):
+    def __init__(self, trigger, target):
+        super().__init__(
+            f"Compaction needs 0 < target ({target}) < trigger ({trigger}) "
+            f"<= 1",
+        )
+
+
 @dataclasses.dataclass(frozen=True)
 class CompactionPolicy:
     """Which old tool results to compact, before each POST
@@ -188,20 +209,32 @@ class CompactionPolicy:
     'mode':
 
     - 'off':  none;
-    - 'always':  every eligible result but the newest 'keep_recent'.
+    - 'always':  every eligible result but the newest 'keep_recent';
+    - 'auto':  nothing, until the next request's estimate is over
+      'trigger_fraction' of the usable window;  then, oldest first, as
+      many eligible results as bring it under 'target_fraction', in one
+      batch.  (Nothing, with no window known:  see 'ContextBudget'.)
 
     A result is eligible if it is at least 'min_elide_chars' long, not
     compacted yet, answers a call of a tool not in 'PROTECTED_TOOLS', and
     neither it nor its call carries an 'encrypted_value'.
     """
 
-    mode: str = COMPACTION_OFF
+    mode: str = COMPACTION_AUTO
     keep_recent: int = DEFAULT_KEEP_RECENT
     min_elide_chars: int = DEFAULT_MIN_ELIDE_CHARS
+    trigger_fraction: float = DEFAULT_TRIGGER_FRACTION
+    target_fraction: float = DEFAULT_TARGET_FRACTION
 
     def __post_init__(self):
         if self.mode not in COMPACTION_MODES:
             raise InvalidCompactionMode(self.mode)
+
+        if not 0 < self.target_fraction < self.trigger_fraction <= 1:
+            raise InvalidCompactionFractions(
+                self.trigger_fraction,
+                self.target_fraction,
+            )
 
 
 def is_compacted(content: str) -> bool:
@@ -456,6 +489,173 @@ def wire_chars(messages: abc.Sequence[agui_core.Message]) -> int:
     )
 
 
+#
+#   The context budget
+#
+DEFAULT_OUTPUT_RESERVE = 4096
+#   Without a tokenizer:  about this many characters of JSON per token.
+DEFAULT_CHARS_PER_TOKEN = 3.5
+
+WINDOW_FROM_OPTION = "option"
+WINDOW_FROM_ROOM = "room"
+WINDOW_FROM_MODEL_SERVER = "model server"
+
+
+def room_context_window(room_info: dict) -> int | None:
+    """The room's declared context window ('agent.context_window'), if any"""
+    agent = room_info.get("agent") or {}
+    return agent.get("context_window")
+
+
+def probe_model_window(
+    room_info: dict,
+    http: httpx.Client,
+) -> int | None:
+    """The room's model's window, as its server's '/v1/models' says
+
+    For an OpenAI-compatible server which reports 'max_model_len' (vLLM):
+    the entry whose 'id' is the room's 'agent.model_name', at the room's
+    'agent.provider_base_url' (with or without its '/v1').  None if the
+    room names no such server, the server cannot be reached, or it does
+    not say.  Contacts the model server directly, so only on request.
+    """
+    agent = room_info.get("agent") or {}
+    base_url = agent.get("provider_base_url")
+    model_name = agent.get("model_name")
+
+    if not base_url or not model_name:
+        return None
+
+    url = f"{base_url.rstrip('/').removesuffix('/v1')}/v1/models"
+
+    try:
+        response = http.get(url)
+        response.raise_for_status()
+        models = response.json()["data"]
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        return None
+
+    for model in models:
+        if isinstance(model, dict) and model.get("id") == model_name:
+            window = model.get("max_model_len")
+            return window if isinstance(window, int) else None
+
+    return None
+
+
+def resolve_window(
+    room_info: dict,
+    *,
+    context_window: int | None = None,
+    probe: abc.Callable[[dict], int | None] | None = None,
+) -> tuple[int | None, str | None]:
+    """The model's context window in tokens, and where it came from
+
+    In order:  'context_window' (an option);  the room's declared window;
+    'probe(room_info)' (e.g. 'probe_model_window'), if given;  else
+    unknown, '(None, None)'.  Never a default:  a guess (such as
+    pydantic-ai-harness's 200k) is badly wrong for small local models.
+    """
+    if context_window is not None:
+        return context_window, WINDOW_FROM_OPTION
+
+    window = room_context_window(room_info)
+
+    if window is not None:
+        return window, WINDOW_FROM_ROOM
+
+    if probe is not None:
+        window = probe(room_info)
+
+        if window is not None:
+            return window, WINDOW_FROM_MODEL_SERVER
+
+    return None, None
+
+
+def measured_tokens(usage: dict | None) -> int | None:
+    """The tokens a run left in the thread, from its usage record
+
+    'final_input_tokens + final_output_tokens':  the last request's input,
+    plus the reply it made, which the next request carries.  (Never the
+    cumulative 'input_tokens', which counts every request of the run.)
+    None if the run recorded no usage, or not those.
+    """
+    if not usage:
+        return None
+
+    final_input = usage.get("final_input_tokens")
+
+    if final_input is None:
+        return None
+
+    return final_input + (usage.get("final_output_tokens") or 0)
+
+
+@dataclasses.dataclass
+class ContextBudget:
+    """How much of the model's context window the next request takes
+
+    'window_tokens' (and 'window_source':  see 'resolve_window') is the
+    window, None if unknown;  'output_reserve' tokens of it are kept for
+    the reply.
+
+    The estimate is anchored on what the server measured:  after each
+    run, 'anchor' records the run's 'measured_tokens' against the size of
+    the history the run left.  The next request is estimated as that,
+    plus the characters added since (or less those compaction saved) at
+    'chars_per_token'.  Before any measurement it is the history's size
+    at 'chars_per_token', which leaves out the system prompt and the tool
+    definitions.  A run with no measurement keeps the last anchor, and
+    marks it 'stale'.
+    """
+
+    window_tokens: int | None = None
+    window_source: str | None = None
+    output_reserve: int = DEFAULT_OUTPUT_RESERVE
+    chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
+    anchor_tokens: int | None = None
+    anchor_chars: int = 0
+    stale: bool = False
+
+    @property
+    def usable_tokens(self) -> int | None:
+        """The window, less the output reserve;  None if unknown"""
+        if self.window_tokens is None:
+            return None
+
+        return max(self.window_tokens - self.output_reserve, 0)
+
+    def estimate(self, chars: int) -> int:
+        """Tokens a request carrying a history of 'chars' characters takes"""
+        if self.anchor_tokens is None:
+            return round(chars / self.chars_per_token)
+
+        added = (chars - self.anchor_chars) / self.chars_per_token
+        return max(round(self.anchor_tokens + added), 0)
+
+    def anchor(self, usage: dict | None, chars: int) -> None:
+        """Anchor on a run's usage, its history 'chars' characters long"""
+        tokens = measured_tokens(usage)
+
+        if tokens is None:
+            self.stale = self.anchor_tokens is not None
+            return
+
+        self.anchor_tokens = tokens
+        self.anchor_chars = chars
+        self.stale = False
+
+    def fraction(self, tokens: int) -> float | None:
+        """'tokens' as a fraction of the usable window;  None if unknown"""
+        usable = self.usable_tokens
+
+        if not usable:
+            return None
+
+        return tokens / usable
+
+
 @dataclasses.dataclass(frozen=True)
 class ResendReport:
     """What 'Harness.before_post' did to one history, and its size
@@ -464,6 +664,8 @@ class ResendReport:
     history's messages and state as sent;  'compacted' how many results
     this POST compacted (saving 'compacted_chars'), and
     'compacted_total' how many of the history's results are compacted.
+    'est_tokens' is the request's estimated size, of 'window_tokens'
+    (from 'window_source'), 'stale' if the last run measured nothing.
     """
 
     thread_id: str
@@ -477,6 +679,10 @@ class ResendReport:
     compacted: int
     compacted_chars: int
     compacted_total: int
+    est_tokens: int
+    window_tokens: int | None
+    window_source: str | None
+    stale: bool
 
     def as_json(self) -> dict:
         return dataclasses.asdict(self)
@@ -489,15 +695,18 @@ class ResendReport:
 class Harness:
     """What a client does to one thread's history before each POST
 
-    Pass 'before_post' to 'client_tools.run_loop'.  It compacts the
-    history as 'compaction' says;  then, with 'pairing_check', a history
-    'validate_pairing' refuses is never sent:  'run_loop' raises
-    'InconsistentHistory' instead.  Each POST's 'ResendReport' is appended
-    to 'reports', and passed to 'on_report' (e.g., for a UI to show).
+    Pass 'before_post' and 'after_run' to 'client_tools.run_loop'.
+    'before_post' compacts the history as 'compaction' says, measured
+    against 'budget' (which 'after_run' anchors on each run's usage);
+    then, with 'pairing_check', a history 'validate_pairing' refuses is
+    never sent:  'run_loop' raises 'InconsistentHistory' instead.  Each
+    POST's 'ResendReport' is appended to 'reports', and passed to
+    'on_report' (e.g., for a UI to show).
     """
 
     pairing_check: bool = True
     compaction: CompactionPolicy = CompactionPolicy()
+    budget: ContextBudget = dataclasses.field(default_factory=ContextBudget)
     on_report: abc.Callable[[ResendReport], None] | None = None
     reports: list[ResendReport] = dataclasses.field(default_factory=list)
 
@@ -514,17 +723,15 @@ class Harness:
         runs 'run_loop' makes to send client tool results back.
         """
         messages = run_input.messages
+        chars = wire_chars(messages)
+        indexes = self._to_compact(messages, chars)
         saved = 0
-        indexes = []
-
-        if self.compaction.mode != COMPACTION_OFF:
-            indexes = compaction_candidates(messages, self.compaction)
 
         if indexes:
-            before = wire_chars(messages)
             messages = compact_history(messages, indexes)
             run_input = run_input.model_copy(update={"messages": messages})
-            saved = before - wire_chars(messages)
+            saved = chars - wire_chars(messages)
+            chars -= saved
 
         if self.pairing_check:
             validate_pairing(messages)
@@ -536,7 +743,7 @@ class Harness:
             first=first,
             mode=self.compaction.mode,
             messages=len(messages),
-            resend_chars=wire_chars(messages),
+            resend_chars=chars,
             state_chars=len(json.dumps(run_input.state, ensure_ascii=False)),
             compacted=len(indexes),
             compacted_chars=saved,
@@ -546,6 +753,10 @@ class Harness:
                 if isinstance(message, agui_core.ToolMessage)
                 and is_compacted(message.content)
             ),
+            est_tokens=self.budget.estimate(chars),
+            window_tokens=self.budget.window_tokens,
+            window_source=self.budget.window_source,
+            stale=self.budget.stale,
         )
         self.reports.append(report)
 
@@ -553,3 +764,97 @@ class Harness:
             self.on_report(report)
 
         return run_input
+
+    def _to_compact(
+        self,
+        messages: abc.Sequence[agui_core.Message],
+        chars: int,
+    ) -> list[int]:
+        """The results to compact now, per 'compaction' and 'budget'"""
+        policy = self.compaction
+
+        if policy.mode == COMPACTION_OFF:
+            return []
+
+        candidates = compaction_candidates(messages, policy)
+
+        if policy.mode == COMPACTION_ALWAYS:
+            return candidates
+
+        usable = self.budget.usable_tokens
+        estimate = self.budget.estimate(chars)
+
+        if not usable or estimate <= policy.trigger_fraction * usable:
+            return []
+
+        # One batch, oldest first, down to the low-water mark:  the
+        # history then only grows again until the next one.
+        target = policy.target_fraction * usable
+        calls = _calls_by_id(messages)
+        chosen = []
+
+        for index in candidates:
+            if estimate <= target:
+                break
+
+            message = messages[index]
+            tool = calls[message.tool_call_id].function.name
+            saved = len(message.content) - len(
+                compact_content(tool, message.content),
+            )
+            estimate -= saved / self.budget.chars_per_token
+            chosen.append(index)
+
+        return chosen
+
+    def after_run(
+        self,
+        client: client_tools.SoliplexClient,
+        run_input: agui_core.RunAgentInput,
+    ) -> None:
+        """Anchor the budget on the run's usage, as the server measured it
+
+        A usage which cannot be had (e.g., an HTTP error) leaves the
+        anchor as it was, 'stale':  the run itself is not failed for it.
+        """
+        try:
+            usage = client.run_usage(run_input.thread_id, run_input.run_id)
+        except client_tools.ClientToolsError:
+            usage = None
+
+        self.budget.anchor(usage, wire_chars(run_input.messages))
+
+
+PROBE_TIMEOUT = httpx.Timeout(5.0)
+
+
+def make_harness(
+    room_info: dict,
+    *,
+    context_window: int | None = None,
+    probe_window: bool = False,
+    output_reserve: int = DEFAULT_OUTPUT_RESERVE,
+    **options,
+) -> Harness:
+    """A 'Harness' for a thread in the room 'room_info' describes
+
+    Its budget's window is 'resolve_window''s:  'context_window' if given,
+    else the room's, else (only if 'probe_window') what the model's server
+    says ('probe_model_window').  'options' are the other 'Harness' fields.
+    """
+
+    def probe(info: dict) -> int | None:
+        with httpx.Client(timeout=PROBE_TIMEOUT) as http:
+            return probe_model_window(info, http)
+
+    window, source = resolve_window(
+        room_info,
+        context_window=context_window,
+        probe=probe if probe_window else None,
+    )
+    budget = ContextBudget(
+        window_tokens=window,
+        window_source=source,
+        output_reserve=output_reserve,
+    )
+    return Harness(budget=budget, **options)

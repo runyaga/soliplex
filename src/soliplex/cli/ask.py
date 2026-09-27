@@ -20,6 +20,7 @@ from soliplex.agui import client_tools
 from soliplex.agui import harness as agui_harness
 from soliplex.agui import persistence as agui_persistence
 from soliplex.cli import cli_util
+from soliplex.cli import harness_options
 from soliplex.cli import types
 
 app = typer.Typer()
@@ -284,14 +285,23 @@ def _ask_remote(
     max_turns: int,
     confirm: bool,
     tool_log: pathlib.Path | None,
-    harness: agui_harness.Harness,
-) -> client_tools.LoopResult:
-    """Ask a room on a running server, executing its client tool calls"""
+    harness_kwargs: dict,
+) -> tuple[client_tools.LoopResult, agui_harness.Harness]:
+    """Ask a room on a running server, executing its client tool calls
+
+    Returns the loop's result, and the harness which saw each POST.
+    """
     with client_tools.SoliplexClient(url, room_id, token=token) as client:
+        try:
+            room_info = client.room_info()
+        except client_tools.ClientToolsError:  # e.g., an older server
+            room_info = {}
+
+        harness = agui_harness.make_harness(room_info, **harness_kwargs)
         thread = client.new_thread()
         run_input = client_tools.initial_run_input(thread, prompt)
 
-        return client_tools.run_loop(
+        result = client_tools.run_loop(
             client,
             run_input,
             context,
@@ -304,7 +314,9 @@ def _ask_remote(
                 else None
             ),
             before_post=harness.before_post,
+            after_run=harness.after_run,
         )
+        return result, harness
 
 
 @app.command("ask")
@@ -319,7 +331,7 @@ def ask(
         help=(
             "Emit a JSON object (room_id, thread_id, prompt, response, "
             "usage) instead of the plain-text response.  With '--url': "
-            "(thread_id, run_ids, response, tool_calls)."
+            "(thread_id, run_ids, response, tool_calls, resends)."
         ),
     ),
     cli_log_config: pathlib.Path | None = cli_util.CLI_LOG_CONFIG_OPTION,
@@ -373,59 +385,17 @@ def ask(
             "are left out;  'SOLIPLEX_TOKEN' always is."
         ),
     ),
-    output_cap_bytes: int = typer.Option(
-        client_tools.DEFAULT_OUTPUT_CAP_BYTES,
-        "--output-cap-bytes",
-        min=client_tools.MIN_OUTPUT_CAP_BYTES,
-        envvar="SOLIPLEX_TUI_OUTPUT_CAP_BYTES",
-        help=(
-            "With '--url': the most bytes of each output stream of a "
-            "client tool call sent to the model."
-        ),
-    ),
-    output_cap_mode: str = typer.Option(
-        client_tools.DEFAULT_OUTPUT_CAP_MODE,
-        "--output-cap-mode",
-        click_type=click.Choice(client_tools.OUTPUT_CAP_MODES),
-        envvar="SOLIPLEX_TUI_OUTPUT_CAP_MODE",
-        help=(
-            "With '--url': how longer output is cut -- keep its start "
-            "('head'), or its start and its end ('head_tail')."
-        ),
-    ),
-    pairing_check: bool = typer.Option(
-        True,
-        "--pairing-check/--no-pairing-check",
-        envvar="SOLIPLEX_TUI_PAIRING_CHECK",
-        help=(
-            "With '--url': refuse to send a history whose tool calls and "
-            "results do not pair up (which the server would fail)."
-        ),
-    ),
-    compaction: str = typer.Option(
-        agui_harness.COMPACTION_OFF,
-        "--compaction",
-        click_type=click.Choice(agui_harness.COMPACTION_MODES),
-        envvar="SOLIPLEX_TUI_COMPACTION",
-        help=(
-            "With '--url': compact old, large tool results in the history "
-            "before each run ('always'), or not ('off')."
-        ),
-    ),
-    keep_recent: int = typer.Option(
-        agui_harness.DEFAULT_KEEP_RECENT,
-        "--keep-recent",
-        min=0,
-        envvar="SOLIPLEX_TUI_KEEP_RECENT",
-        help="With '--url': the newest large tool results never compacted.",
-    ),
-    min_elide_chars: int = typer.Option(
-        agui_harness.DEFAULT_MIN_ELIDE_CHARS,
-        "--min-elide-chars",
-        min=1,
-        envvar="SOLIPLEX_TUI_MIN_ELIDE_CHARS",
-        help="With '--url': shorter tool results are never compacted.",
-    ),
+    output_cap_bytes: int = harness_options.OUTPUT_CAP_BYTES,
+    output_cap_mode: str = harness_options.OUTPUT_CAP_MODE,
+    pairing_check: bool = harness_options.PAIRING_CHECK,
+    compaction: str = harness_options.COMPACTION,
+    keep_recent: int = harness_options.KEEP_RECENT,
+    min_elide_chars: int = harness_options.MIN_ELIDE_CHARS,
+    compaction_trigger: float = harness_options.COMPACTION_TRIGGER,
+    compaction_target: float = harness_options.COMPACTION_TARGET,
+    context_window: int | None = harness_options.CONTEXT_WINDOW,
+    probe_model_window: bool = harness_options.PROBE_MODEL_WINDOW,
+    output_reserve: int = harness_options.OUTPUT_RESERVE,
 ):
     """Send a single prompt to a room's agent and print the response.
 
@@ -462,7 +432,7 @@ def ask(
                 output_cap_mode=output_cap_mode,
                 pass_env=pass_env,
             )
-            result = _ask_remote(
+            result, harness = _ask_remote(
                 url=url,
                 room_id=room_id,
                 prompt=prompt,
@@ -471,20 +441,25 @@ def ask(
                 max_turns=max_turns,
                 confirm=confirm,
                 tool_log=tool_log,
-                harness=agui_harness.Harness(
+                harness_kwargs=harness_options.harness_options(
                     pairing_check=pairing_check,
-                    compaction=agui_harness.CompactionPolicy(
-                        mode=compaction,
-                        keep_recent=keep_recent,
-                        min_elide_chars=min_elide_chars,
-                    ),
+                    compaction=compaction,
+                    keep_recent=keep_recent,
+                    min_elide_chars=min_elide_chars,
+                    compaction_trigger=compaction_trigger,
+                    compaction_target=compaction_target,
+                    context_window=context_window,
+                    probe_model_window=probe_model_window,
+                    output_reserve=output_reserve,
                 ),
             )
         except Exception as exc:
             _fail(json_output, str(exc))
 
         if json_output:
-            print(json.dumps(result.as_json()))
+            found = result.as_json()
+            found["resends"] = [report.as_json() for report in harness.reports]
+            print(json.dumps(found))
         else:
             print(result.response)
 

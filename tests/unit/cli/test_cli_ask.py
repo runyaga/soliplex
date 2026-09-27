@@ -275,12 +275,43 @@ REMOTE_RESULT = client_tools.LoopResult(
 )
 
 
+REMOTE_HARNESS = agui_harness.Harness(
+    reports=[
+        agui_harness.ResendReport(
+            thread_id="thread-1",
+            run_id="run-1",
+            parent_run_id=None,
+            first=True,
+            mode="auto",
+            messages=1,
+            resend_chars=50,
+            state_chars=2,
+            compacted=0,
+            compacted_chars=0,
+            compacted_total=0,
+            est_tokens=14,
+            window_tokens=None,
+            window_source=None,
+            stale=False,
+        ),
+    ],
+)
+
+DEFAULT_HARNESS_KWARGS = {
+    "pairing_check": True,
+    "compaction": agui_harness.CompactionPolicy(),
+    "context_window": None,
+    "probe_window": False,
+    "output_reserve": agui_harness.DEFAULT_OUTPUT_RESERVE,
+}
+
+
 @pytest.fixture
 def ask_remote():
     with mock.patch.object(
         cli_ask,
         "_ask_remote",
-        return_value=REMOTE_RESULT,
+        return_value=(REMOTE_RESULT, REMOTE_HARNESS),
     ) as patched:
         yield patched
 
@@ -324,13 +355,15 @@ def test_ask_remote_defaults(
 
     assert result.exit_code == 0, result.output
     if json_output:
-        assert json.loads(result.stdout) == REMOTE_RESULT.as_json()
+        assert json.loads(result.stdout) == REMOTE_RESULT.as_json() | {
+            "resends": [REMOTE_HARNESS.reports[0].as_json()],
+        }
     else:
         assert result.stdout == "The answer.\n"
 
     kwargs = ask_remote.call_args.kwargs
     context = kwargs.pop("context")
-    assert kwargs.pop("harness") == agui_harness.Harness(pairing_check=True)
+    assert kwargs.pop("harness_kwargs") == DEFAULT_HARNESS_KWARGS
     assert kwargs == {
         "url": URL,
         "room_id": "a-room",
@@ -380,6 +413,15 @@ def test_ask_remote_w_options(cli_runner, ask_remote, tmp_path):
             "2",
             "--min-elide-chars",
             "500",
+            "--compaction-trigger",
+            "0.9",
+            "--compaction-target",
+            "0.5",
+            "--context-window",
+            "98304",
+            "--probe-model-window",
+            "--output-reserve",
+            "1000",
         ],
     )
 
@@ -389,14 +431,20 @@ def test_ask_remote_w_options(cli_runner, ask_remote, tmp_path):
     assert kwargs["max_turns"] == 3
     assert kwargs["confirm"] is True
     assert kwargs["tool_log"] == log_path
-    assert kwargs["harness"] == agui_harness.Harness(
-        pairing_check=False,
-        compaction=agui_harness.CompactionPolicy(
+    assert kwargs["harness_kwargs"] == {
+        "pairing_check": False,
+        "compaction": agui_harness.CompactionPolicy(
             mode="always",
             keep_recent=2,
             min_elide_chars=500,
+            trigger_fraction=0.9,
+            target_fraction=0.5,
         ),
-    )
+        "context_window": 98304,
+        "probe_window": True,
+        "output_reserve": 1000,
+    }
+
     assert kwargs["context"] == client_tools.ToolContext(
         root=root,
         allow_anywhere=True,
@@ -407,9 +455,45 @@ def test_ask_remote_w_options(cli_runner, ask_remote, tmp_path):
     )
 
 
+def test_ask_remote_w_harness_options_from_env(
+    cli_runner,
+    ask_remote,
+    monkeypatch,
+):
+    monkeypatch.setenv("SOLIPLEX_TUI_COMPACTION", "off")
+    monkeypatch.setenv("SOLIPLEX_TUI_CONTEXT_WINDOW", "262144")
+
+    result = cli_runner.invoke(cli_ask.app, ["--url", URL, "room", "hi"])
+
+    assert result.exit_code == 0, result.output
+    harness_kwargs = ask_remote.call_args.kwargs["harness_kwargs"]
+    assert harness_kwargs["compaction"].mode == "off"
+    assert harness_kwargs["context_window"] == 262144
+
+
+def test_ask_remote_w_bad_compaction_fractions(cli_runner, ask_remote):
+    result = cli_runner.invoke(
+        cli_ask.app,
+        ["--url", URL, "room", "hi", "--compaction-target", "0.8"],
+    )
+
+    assert result.exit_code == 1
+    assert "target (0.8) < trigger (0.7)" in result.stderr
+    ask_remote.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "flags",
-    [["--output-cap-bytes", "255"], ["--output-cap-mode", "tail"]],
+    [
+        ["--output-cap-bytes", "255"],
+        ["--output-cap-mode", "tail"],
+        ["--compaction", "sometimes"],
+        ["--compaction-trigger", "0"],
+        ["--compaction-trigger", "1.5"],
+        ["--context-window", "0"],
+        ["--output-reserve", "-1"],
+        ["--keep-recent", "-1"],
+    ],
 )
 def test_ask_remote_w_bad_output_cap(cli_runner, ask_remote, flags):
     result = cli_runner.invoke(
@@ -462,11 +546,12 @@ def test_ask_remote_w_bad_root(cli_runner, ask_remote, tmp_path):
 
 @pytest.mark.parametrize("w_confirm", [False, True])
 @pytest.mark.parametrize("w_tool_log", [False, True])
-def test__ask_remote(tmp_path, w_confirm, w_tool_log):
+@pytest.mark.parametrize("w_room_info", [False, True])
+def test__ask_remote(tmp_path, w_confirm, w_tool_log, w_room_info):
     context = client_tools.ToolContext(root=tmp_path)
     tool_log = tmp_path / "tools.jsonl" if w_tool_log else None
     thread = {"thread_id": "thread-1", "runs": {"run-1": {}}}
-    the_harness = agui_harness.Harness()
+    room_info = {"id": "room", "agent": {"context_window": 1000}}
 
     with (
         mock.patch.object(client_tools, "SoliplexClient") as client_klass,
@@ -475,7 +560,14 @@ def test__ask_remote(tmp_path, w_confirm, w_tool_log):
         client = client_klass.return_value.__enter__.return_value
         client.new_thread.return_value = thread
 
-        found = cli_ask._ask_remote(
+        if w_room_info:
+            client.room_info.return_value = room_info
+        else:  # e.g., an older server
+            client.room_info.side_effect = client_tools.HTTPFailure(
+                mock.Mock(status_code=404, url="u", text="no"),
+            )
+
+        found, the_harness = cli_ask._ask_remote(
             url=URL,
             room_id="room",
             prompt="hi",
@@ -484,7 +576,7 @@ def test__ask_remote(tmp_path, w_confirm, w_tool_log):
             max_turns=4,
             confirm=w_confirm,
             tool_log=tool_log,
-            harness=the_harness,
+            harness_kwargs={"pairing_check": False, "output_reserve": 10},
         )
 
     assert found is run_loop.return_value
@@ -498,6 +590,14 @@ def test__ask_remote(tmp_path, w_confirm, w_tool_log):
     assert kwargs["max_turns"] == 4
     assert kwargs["max_turns_option"] == "--max-turns"
     assert kwargs["before_post"] == the_harness.before_post
+    assert kwargs["after_run"] == the_harness.after_run
+    assert the_harness.pairing_check is False
+    assert the_harness.budget.output_reserve == 10
+
+    if w_room_info:
+        assert the_harness.budget.window_tokens == 1000
+    else:
+        assert the_harness.budget.window_tokens is None
 
     if w_confirm:
         assert kwargs["confirm"] is cli_ask._confirm_tool_call

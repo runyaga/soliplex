@@ -1,12 +1,11 @@
 import pathlib
 from importlib.metadata import version
 
-import click
 import typer
 from rich import console
 
 from soliplex.agui import client_tools
-from soliplex.agui import harness as agui_harness
+from soliplex.cli import harness_options
 from soliplex.tui import main
 
 the_cli = typer.Typer(
@@ -59,29 +58,6 @@ TOOL_LOG = typer.Option(
 )
 
 
-OUTPUT_CAP_BYTES = typer.Option(
-    client_tools.DEFAULT_OUTPUT_CAP_BYTES,
-    "--output-cap-bytes",
-    min=client_tools.MIN_OUTPUT_CAP_BYTES,
-    envvar="SOLIPLEX_TUI_OUTPUT_CAP_BYTES",
-    help=(
-        "The most bytes of each output stream (stdout, stderr) of a "
-        "client tool call sent to the model."
-    ),
-)
-
-OUTPUT_CAP_MODE = typer.Option(
-    client_tools.DEFAULT_OUTPUT_CAP_MODE,
-    "--output-cap-mode",
-    click_type=click.Choice(client_tools.OUTPUT_CAP_MODES),
-    envvar="SOLIPLEX_TUI_OUTPUT_CAP_MODE",
-    help=(
-        "How output over --output-cap-bytes is cut:  keep its start "
-        "('head'), or its start and its end ('head_tail')."
-    ),
-)
-
-
 @the_cli.command()
 def tui(
     version: bool = typer.Option(None, "--version", "-V"),
@@ -125,41 +101,17 @@ def tui(
         ),
     ),
     tool_log: pathlib.Path | None = TOOL_LOG,
-    output_cap_bytes: int = OUTPUT_CAP_BYTES,
-    output_cap_mode: str = OUTPUT_CAP_MODE,
-    pairing_check: bool = typer.Option(
-        True,
-        "--pairing-check/--no-pairing-check",
-        envvar="SOLIPLEX_TUI_PAIRING_CHECK",
-        help=(
-            "Refuse to send a history whose tool calls and results do not "
-            "pair up (which the server would fail)."
-        ),
-    ),
-    compaction: str = typer.Option(
-        agui_harness.COMPACTION_OFF,
-        "--compaction",
-        click_type=click.Choice(agui_harness.COMPACTION_MODES),
-        envvar="SOLIPLEX_TUI_COMPACTION",
-        help=(
-            "Compact old, large tool results in the history before each "
-            "run ('always'), or not ('off')."
-        ),
-    ),
-    keep_recent: int = typer.Option(
-        agui_harness.DEFAULT_KEEP_RECENT,
-        "--keep-recent",
-        min=0,
-        envvar="SOLIPLEX_TUI_KEEP_RECENT",
-        help="The newest large tool results, never compacted.",
-    ),
-    min_elide_chars: int = typer.Option(
-        agui_harness.DEFAULT_MIN_ELIDE_CHARS,
-        "--min-elide-chars",
-        min=1,
-        envvar="SOLIPLEX_TUI_MIN_ELIDE_CHARS",
-        help="Tool results shorter than this are never compacted.",
-    ),
+    output_cap_bytes: int = harness_options.OUTPUT_CAP_BYTES,
+    output_cap_mode: str = harness_options.OUTPUT_CAP_MODE,
+    pairing_check: bool = harness_options.PAIRING_CHECK,
+    compaction: str = harness_options.COMPACTION,
+    keep_recent: int = harness_options.KEEP_RECENT,
+    min_elide_chars: int = harness_options.MIN_ELIDE_CHARS,
+    compaction_trigger: float = harness_options.COMPACTION_TRIGGER,
+    compaction_target: float = harness_options.COMPACTION_TARGET,
+    context_window: int | None = harness_options.CONTEXT_WINDOW,
+    probe_model_window: bool = harness_options.PROBE_MODEL_WINDOW,
+    output_reserve: int = harness_options.OUTPUT_RESERVE,
     auto_approve: bool = typer.Option(
         False,
         "--auto-approve",
@@ -171,6 +123,17 @@ def tui(
     ),
 ):
     try:
+        options = harness_options.harness_options(
+            pairing_check=pairing_check,
+            compaction=compaction,
+            keep_recent=keep_recent,
+            min_elide_chars=min_elide_chars,
+            compaction_trigger=compaction_trigger,
+            compaction_target=compaction_target,
+            context_window=context_window,
+            probe_model_window=probe_model_window,
+            output_reserve=output_reserve,
+        )
         tool_context = client_tools.ToolContext(
             root=root,
             allow_anywhere=allow_anywhere,
@@ -193,14 +156,7 @@ def tui(
             client_tools.ToolLog(tool_log) if tool_log is not None else None
         ),
         auto_approve=auto_approve,
-        harness_options={
-            "pairing_check": pairing_check,
-            "compaction": agui_harness.CompactionPolicy(
-                mode=compaction,
-                keep_recent=keep_recent,
-                min_elide_chars=min_elide_chars,
-            ),
-        },
+        harness_options=options,
     )
 
     tui_app.run()

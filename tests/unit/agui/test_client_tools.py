@@ -1708,6 +1708,55 @@ def test_soliplexclient_new_run():
     assert json.loads(request.content) == {"parent_run_id": RUN_ID}
 
 
+def test_soliplexclient_room_info():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"id": "a room", "agent": {}})
+
+    client = _mock_client(handler)
+
+    assert client.room_info() == {"id": "a room", "agent": {}}
+    (request,) = requests
+    assert request.method == "GET"
+    assert request.url.raw_path == b"/api/v1/rooms/a%20room"
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [None, {"final_input_tokens": 10, "final_output_tokens": 2}],
+)
+def test_soliplexclient_run_usage(usage):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, content=json.dumps(usage).encode())
+
+    client = _mock_client(handler)
+
+    assert client.run_usage(THREAD_ID, RUN_ID) == usage
+    (request,) = requests
+    assert request.method == "GET"
+    assert request.url.path.endswith(f"/agui/{THREAD_ID}/{RUN_ID}/usage")
+
+
+def test_soliplexclient_get_w_errors():
+    client = _mock_client(lambda request: httpx.Response(404, text="gone"))
+
+    with pytest.raises(client_tools.HTTPFailure, match="HTTP 404.*gone"):
+        client.room_info()
+
+    def handler(request):
+        raise httpx.ConnectError("refused", request=request)
+
+    client = _mock_client(handler)
+
+    with pytest.raises(client_tools.TransportFailure, match="refused"):
+        client.run_usage(THREAD_ID, RUN_ID)
+
+
 def test_soliplexclient_w_http_error():
     client = _mock_client(lambda request: httpx.Response(403, text="nope"))
 
@@ -1993,11 +2042,15 @@ def test_run_loop_w_before_post(root):
         child_ids=[CHILD_RUN_ID],
     )
     seen = []
+    after = []
 
     def before_post(client, run_input, *, first):
         seen.append((client, run_input.run_id, first))
         # What it returns is what is sent, and what the run continues.
         return run_input.model_copy(update={"state": {"posts": len(seen)}})
+
+    def after_run(client, run_input):
+        after.append((client, run_input.run_id, len(run_input.messages)))
 
     client = _mock_client(server)
     context = client_tools.ToolContext(root=root)
@@ -2007,6 +2060,7 @@ def test_run_loop_w_before_post(root):
         _run_input(),
         context,
         before_post=before_post,
+        after_run=after_run,
     )
 
     assert seen == [
@@ -2019,6 +2073,9 @@ def test_run_loop_w_before_post(root):
     ]
     assert found.response == "Done."
     assert found.run_input.state == {"posts": 2}
+    # Each finished run's history:  the first holds the prompt and the
+    # call, the second its result and the answer too.
+    assert after == [(client, RUN_ID, 2), (client, CHILD_RUN_ID, 4)]
 
 
 def test_run_loop_w_before_post_refusing(root):

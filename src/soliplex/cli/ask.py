@@ -397,6 +397,7 @@ def ask(
     probe_model_window: bool = harness_options.PROBE_MODEL_WINDOW,
     output_reserve: int = harness_options.OUTPUT_RESERVE,
     trim_rag_state: str = harness_options.TRIM_RAG_STATE,
+    harness_log: pathlib.Path | None = harness_options.HARNESS_LOG,
 ):
     """Send a single prompt to a room's agent and print the response.
 
@@ -459,6 +460,7 @@ def ask(
                     probe_model_window=probe_model_window,
                     output_reserve=output_reserve,
                     trim_rag_state=trim_rag_state,
+                    harness_log=harness_log,
                 ),
             )
         except Exception as exc:

@@ -344,8 +344,8 @@ Options, all only with `--url`:
 - `--pairing-check/--no-pairing-check`, `--compaction off|auto|always`,
   `--keep-recent N`, `--min-elide-chars N`, `--compaction-trigger F`,
   `--compaction-target F`, `--context-window N`, `--probe-model-window`,
-  `--output-reserve N`, `--trim-rag-state off|boundary|aggressive` — the
-  context harness: see
+  `--output-reserve N`, `--trim-rag-state off|boundary|aggressive`,
+  `--harness-log PATH` — the context harness: see
   [TUI Context Harness](../tui_harness.md). With `--json`, the output
   also lists what was done before each POST as `resends`.
 

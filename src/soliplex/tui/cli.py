@@ -114,6 +114,7 @@ def tui(
     probe_model_window: bool = harness_options.PROBE_MODEL_WINDOW,
     output_reserve: int = harness_options.OUTPUT_RESERVE,
     trim_rag_state: str = harness_options.TRIM_RAG_STATE,
+    harness_log: pathlib.Path | None = harness_options.HARNESS_LOG,
     auto_approve: bool = typer.Option(
         False,
         "--auto-approve",
@@ -136,6 +137,7 @@ def tui(
             probe_model_window=probe_model_window,
             output_reserve=output_reserve,
             trim_rag_state=trim_rag_state,
+            harness_log=harness_log,
         )
         tool_context = client_tools.ToolContext(
             root=root,

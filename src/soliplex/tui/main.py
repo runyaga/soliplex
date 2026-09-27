@@ -909,6 +909,30 @@ class RoomView(t_screen.Screen):
         margin-left: 8;
         padding: 1 2 0 2;
     }
+
+    #context-meter {
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+    }
+
+    #context-meter.level-ok {
+        color: $success;
+    }
+
+    #context-meter.level-warning {
+        color: $warning;
+        text-style: bold;
+    }
+
+    #context-meter.level-critical {
+        color: $error;
+        text-style: bold reverse;
+    }
+
+    .compacted-results {
+        margin: 0 1 1 8;
+    }
     """
 
     thread_id: str | None = t_reactive.reactive(None, bindings=True)
@@ -952,6 +976,12 @@ class RoomView(t_screen.Screen):
             yield t_widgets.Label(f"Room: {self.room_id}", id="room")
             yield t_widgets.Label(id="thread")
 
+        yield t_widgets.Static(
+            agui_harness.ContextReading().text(),
+            id="context-meter",
+            markup=False,
+        )
+
         with t_containers.VerticalScroll(id="chat-view"):
             yield t_widgets.Static(room_info["welcome_message"])
             yield t_widgets.Static("Suggestions:")
@@ -979,6 +1009,7 @@ class RoomView(t_screen.Screen):
 
     def action_new_thread(self) -> None:
         self.thread_id = self.run_agent_input = self.harness = None
+        self._show_reading(agui_harness.ContextReading())
         self.thread_name = self.thread_description = None
         scroller = self.query_one("#chat-view")
         scroller.remove_children()
@@ -1063,6 +1094,15 @@ class RoomView(t_screen.Screen):
         self.thread_id = thread_id
         self.harness = None
         info = self.rest_api.get_thread(self.room_id, thread_id)
+
+        # The reading, from the thread's newest measured run.
+        try:
+            self.harness = self.app.new_harness(self.room_info)
+        except ValueError as exc:  # e.g., a window under the reserve
+            self.query_one("#context-meter").update(f"context: {exc}")
+        else:
+            self.harness.meter.seed(info["runs"])
+            self._show_reading(self.harness.meter.reading)
         meta = info.get("metadata")
 
         if meta is not None:
@@ -1119,10 +1159,109 @@ class RoomView(t_screen.Screen):
         """When the user hits return."""
         chat_view = self.query_one("#chat-view")
         event.input.clear()
+
+        if await self._slash_command(event.value.strip()):
+            return
+
         await chat_view.mount(Prompt(event.value))
         await chat_view.mount(response := Response())
 
         self.send_agui_prompt(event.value, response)
+
+    async def _slash_command(self, command: str) -> bool:
+        """Handle '/context' or '/compact', locally;  whether it was one"""
+        if command not in ("/context", "/compact"):
+            return False
+
+        chat_view = self.query_one("#chat-view")
+        await chat_view.mount(Prompt(command))
+
+        if self.run_agent_input is None:
+            await chat_view.mount(Response("Nothing sent in this thread yet."))
+            return True
+
+        if command == "/compact":
+            if self.harness is None:
+                self.harness = self.app.new_harness(self.room_info)
+
+            self.harness.compact_next()
+            await chat_view.mount(
+                Response(
+                    "The next prompt compacts every old, large tool result "
+                    "but the newest "
+                    f"{self.harness.compaction.keep_recent}.",
+                ),
+            )
+            return True
+
+        rows = agui_harness.context_breakdown(self.run_agent_input)
+        table = "\n".join(
+            f"| {label} | {count} | {chars:,} | ~{chars / 3.5:,.0f} |"
+            for label, count, chars in rows
+        )
+        reading = (
+            self.harness.meter.reading
+            if self.harness is not None
+            else agui_harness.ContextReading()
+        )
+        await chat_view.mount(
+            Response(
+                f"**{reading.text()}**\n\n"
+                "| what | messages | chars (JSON) | tokens (est.) |\n"
+                "|---|---:|---:|---:|\n"
+                f"{table}",
+            ),
+        )
+        return True
+
+    def _show_reading(self, reading: agui_harness.ContextReading) -> None:
+        """Paint the context meter;  warn once when it is nearly full"""
+        meter = self.query_one("#context-meter")
+        meter.update(reading.text())
+
+        for level in (
+            agui_harness.LEVEL_NONE,
+            agui_harness.LEVEL_OK,
+            agui_harness.LEVEL_WARNING,
+            agui_harness.LEVEL_CRITICAL,
+        ):
+            meter.set_class(reading.level == level, f"level-{level}")
+
+        if self.harness is not None and self.harness.meter.warning_due():
+            self.notify(
+                f"{reading.text()}: the model's context window is nearly "
+                "full.  '/compact' compacts old tool results before the "
+                "next prompt;  or start a new thread (Ctrl+N).",
+                title="Context nearly full",
+                severity="warning",
+                timeout=15,
+            )
+
+    def _show_compacted(self, report: agui_harness.ResendReport) -> None:
+        """Mount the full text of the results a POST compacted, collapsed"""
+        chat_view = self.query_one("#chat-view")
+        results = [
+            t_widgets.Collapsible(
+                t_widgets.Static(original, markup=False),
+                title=(
+                    f"{tool} result {call_id} (compacted; "
+                    f"{len(original):,} chars in full)"
+                ),
+                collapsed=True,
+            )
+            for call_id, tool, original in report.originals
+        ]
+        chat_view.mount(
+            t_widgets.Collapsible(
+                *results,
+                title=(
+                    f"{agui_harness.compaction_notice(report)}: the model "
+                    "now sees headers and summaries; expand for the full text"
+                ),
+                collapsed=True,
+                classes="compacted-results",
+            ),
+        )
 
     @textual.work(thread=True)
     def send_agui_prompt(self, prompt: str, response: Response) -> None:
@@ -1204,6 +1343,26 @@ class RoomView(t_screen.Screen):
                 self.app.call_from_thread(response.update, response_content)
                 return
 
+        def on_report(report) -> None:
+            nonlocal response_content
+
+            if self.app.log_report is not None:
+                self.app.log_report(report)
+
+            notice = agui_harness.compaction_notice(report)
+
+            if notice is not None:
+                response_content += f"\n\n** {notice} **"
+                self.app.call_from_thread(response.update, response_content)
+                self.app.call_from_thread(self._show_compacted, report)
+
+        def on_reading(reading) -> None:
+            self.app.call_from_thread(self._show_reading, reading)
+
+        # This prompt's display:  the harness itself is the thread's.
+        self.harness.on_report = on_report
+        self.harness.on_reading = on_reading
+
         worker = t_worker.get_current_worker()
 
         def is_cancelled() -> bool:
@@ -1249,8 +1408,16 @@ class RoomView(t_screen.Screen):
 
             if not isinstance(exc, client_tools.RunErrored):  # else shown
                 response_content += f"\n\n** error **\n\n{exc}"
-                self.app.call_from_thread(response.update, response_content)
+            elif agui_harness.is_context_overflow(str(exc)):
+                response_content += (
+                    "\n\n** the model's context window is full ** "
+                    "'/compact' compacts old tool results before the next "
+                    "prompt;  or run with '--compaction auto' and a known "
+                    "window ('--context-window', or the room's "
+                    "'agent.context_window');  or start a new thread."
+                )
 
+            self.app.call_from_thread(response.update, response_content)
             return
 
         self.run_agent_input = result.run_input
@@ -1513,8 +1680,10 @@ class SoliplexTUI(t_app.App):
             enabled=auto_approve,
             on_enabled=lambda: self.call_from_thread(self._show_auto_approve),
         )
-        # 'agui_harness.Harness' options, for each thread's harness.
+        # 'agui_harness.Harness' options, for each thread's harness;  and
+        # where each POST's report is logged ('--harness-log'), if at all.
         self.harness_options = dict(harness_options or {})
+        self.log_report = self.harness_options.pop("on_report", None)
         self.rest_api = rest_api.TUI_REST_API(soliplex_url)
         self._oidc_providers = None
 

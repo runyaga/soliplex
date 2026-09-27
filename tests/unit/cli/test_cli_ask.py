@@ -459,6 +459,21 @@ def test_ask_remote_w_options(cli_runner, ask_remote, tmp_path):
     )
 
 
+def test_ask_remote_w_harness_log(cli_runner, ask_remote, tmp_path):
+    path = tmp_path / "harness.jsonl"
+
+    result = cli_runner.invoke(
+        cli_ask.app,
+        ["--url", URL, "room", "hi", "--harness-log", str(path)],
+    )
+
+    assert result.exit_code == 0, result.output
+    harness_kwargs = ask_remote.call_args.kwargs["harness_kwargs"]
+    on_report = harness_kwargs["on_report"]
+    assert on_report.__self__ == agui_harness.HarnessLog(path)
+    assert on_report.__func__ is agui_harness.HarnessLog.record
+
+
 def test_ask_remote_w_aggressive_trim_warns(cli_runner, ask_remote):
     result = cli_runner.invoke(
         cli_ask.app,

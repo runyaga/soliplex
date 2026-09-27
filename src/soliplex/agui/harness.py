@@ -28,7 +28,10 @@ thin layers over it:
   measured for the last run.  In 'auto' mode, compaction waits until the
   estimate crosses a high-water mark, then compacts down to a low-water
   mark in one batch:  a model server caching prompt prefixes (vLLM)
-  keeps its cache between batches, since the history only grows.
+  keeps its cache between batches, since the history only grows;
+- the context meter ('ContextMeter'):  how full the model's window is,
+  as the server measured the last request -- read the way the Flutter
+  frontend reads it.
 
 'Harness' ties it together:  a client makes one per thread, and hands
 its 'before_post' to 'client_tools.run_loop'.
@@ -37,7 +40,9 @@ its 'before_post' to 'client_tools.run_loop'.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import json
+import pathlib
 import re
 import typing
 import uuid
@@ -556,6 +561,11 @@ def _wire_bytes(content: str) -> int:
     return len(json.dumps(content, ensure_ascii=False).encode())
 
 
+def _json_chars(content: str) -> int:
+    """'content''s size as 'wire_chars' counts it:  JSON characters"""
+    return len(json.dumps(content, ensure_ascii=False))
+
+
 def compact_history(
     messages: abc.Sequence[agui_core.Message],
     indexes: abc.Iterable[int],
@@ -930,9 +940,359 @@ class ResendReport:
     stale: bool
     answered: int = 0
     trimmed: list[str] = dataclasses.field(default_factory=list)
+    #   What the results compacted by this POST were, and are, as JSON.
+    compacted_from_chars: int = 0
+    compacted_to_chars: int = 0
+    keep_recent: int = DEFAULT_KEEP_RECENT
+    #   '(tool_call_id, tool, original content)' of each result compacted
+    #   by this POST, for a UI to show in full:  not in 'as_json'.
+    originals: tuple[tuple[str, str, str], ...] = dataclasses.field(
+        default=(),
+        repr=False,
+    )
 
     def as_json(self) -> dict:
-        return dataclasses.asdict(self)
+        found = dataclasses.asdict(self)
+        del found["originals"]
+        return found
+
+
+#
+#   The context meter
+#
+#   The same rules as the Flutter frontend's gauge (soliplex/frontend,
+#   'packages/soliplex_client/lib/src/domain/run_usage.dart',
+#   'packages/soliplex_agent/lib/src/metering/context_usage.dart' and
+#   'lib/src/modules/room/context_usage_controller.dart'):  the reading is
+#   the provider's own count, never an estimate, and absent is not zero.
+#
+#   At and above this window, the later warning threshold applies.
+LARGE_CONTEXT_WINDOW = 128_000
+WARNING_THRESHOLD = 0.80
+LARGE_WINDOW_WARNING_THRESHOLD = 0.85
+CRITICAL_THRESHOLD = 0.90
+
+LEVEL_NONE = "none"  # no percentage:  nothing measured, or no window
+LEVEL_OK = "ok"
+LEVEL_WARNING = "warning"
+LEVEL_CRITICAL = "critical"
+
+
+class UnreadableUsage(ValueError):
+    """A usage record which is not one"""
+
+
+@dataclasses.dataclass(frozen=True)
+class RunUsage:
+    """What one run's last model request cost, as the provider reported
+
+    ('final_input_tokens' is None for a run which never reached the
+    model;  'final_output_tokens' may be None for an older server.)
+    """
+
+    run_id: str
+    final_input_tokens: int | None
+    final_output_tokens: int | None
+
+    @classmethod
+    def from_json(cls, run_id: str, usage) -> RunUsage | None:
+        """The usage 'GET .../usage' (or a thread's run) reports
+
+        None for a run with no usage record;  raises 'UnreadableUsage'
+        for a record which cannot be read.
+        """
+        if usage is None:
+            return None
+
+        if not isinstance(usage, dict):
+            raise UnreadableUsage(usage)
+
+        counts = []
+
+        for key in ("final_input_tokens", "final_output_tokens"):
+            value = usage.get(key)
+
+            if value is not None and _tokens(value) is None:
+                raise UnreadableUsage(usage)
+
+            counts.append(value)
+
+        return cls(run_id, *counts)
+
+    @property
+    def is_measured(self) -> bool:
+        return self.final_input_tokens is not None
+
+    @property
+    def context_tokens(self) -> int | None:
+        """The tokens the thread holds after the run:  input plus reply"""
+        if not self.is_measured:
+            return None
+
+        return self.final_input_tokens + (self.final_output_tokens or 0)
+
+
+def _k(tokens: float) -> str:
+    """'61k', '9.4k', '512':  a count of tokens, roughly"""
+    if tokens >= 10_000:
+        return f"{tokens / 1000:.0f}k"
+
+    if tokens >= 1_000:
+        return f"{tokens / 1000:.1f}k"
+
+    return f"{tokens:.0f}"
+
+
+@dataclasses.dataclass(frozen=True)
+class ContextReading:
+    """How much of the model's window the thread occupies
+
+    'measured_tokens' is what the provider counted (None when no run of
+    the thread has reported);  'context_window' the window (None when
+    unknown).  There is no draft estimate:  a percentage is shown only of
+    what was measured.
+    """
+
+    measured_tokens: int | None = None
+    context_window: int | None = None
+
+    @property
+    def window(self) -> int | None:
+        """The window, if one worth reading (a window of 0 is none)"""
+        window = self.context_window
+        return window if window is not None and window > 0 else None
+
+    @property
+    def fraction_used(self) -> float | None:
+        """Of the window, used;  None without both a count and a window"""
+        if self.measured_tokens is None or self.window is None:
+            return None
+
+        return min(max(self.measured_tokens / self.window, 0.0), 1.0)
+
+    @property
+    def warning_threshold(self) -> float | None:
+        """A small window warns earlier:  the same fraction leaves less"""
+        if self.window is None:
+            return None
+
+        if self.window < LARGE_CONTEXT_WINDOW:
+            return WARNING_THRESHOLD
+
+        return LARGE_WINDOW_WARNING_THRESHOLD
+
+    @property
+    def is_nearly_full(self) -> bool:
+        fraction = self.fraction_used
+        return fraction is not None and fraction >= self.warning_threshold
+
+    @property
+    def is_critical(self) -> bool:
+        fraction = self.fraction_used
+        return fraction is not None and fraction >= CRITICAL_THRESHOLD
+
+    @property
+    def level(self) -> str:
+        """What a UI paints:  the reading decides, the UI only paints"""
+        if self.fraction_used is None:
+            return LEVEL_NONE
+
+        if self.is_critical:
+            return LEVEL_CRITICAL
+
+        if self.is_nearly_full:
+            return LEVEL_WARNING
+
+        return LEVEL_OK
+
+    def text(self) -> str:
+        """E.g. 'context 20% (52,966 / 262,144)'"""
+        if self.measured_tokens is None:
+            return "context: not measured yet"
+
+        if self.window is None:
+            return (
+                f"context {self.measured_tokens:,} tokens (window unknown: "
+                "declare the room's agent.context_window, or pass "
+                "--context-window)"
+            )
+
+        return (
+            f"context {self.fraction_used:.0%} "
+            f"({self.measured_tokens:,} / {self.window:,})"
+        )
+
+
+class ContextMeter:
+    """The context reading for one thread, as the frontend keeps it
+
+    - the window is the room's (or an option's), handed in;
+    - a thread loaded from the server is seeded ('seed') from its newest
+      measured run;
+    - after each run, its usage is fetched ('fetch_started', then
+      'fetched' or 'fetch_failed'):  a run with no usage, or none
+      measured, leaves the reading as it was (it never reached the
+      model);  a failed fetch keeps it too, and never moves it back;  an
+      unreadable record reports nothing;
+    - fetches are ordered by when they were asked for:  an answer to an
+      older one never displaces a newer reading;
+    - 'warning_due' says, once, that the reading has crossed its warning
+      threshold:  a notice to dismiss, re-armed when the reading drops
+      back under it and climbs again.
+    """
+
+    def __init__(self, context_window: int | None = None):
+        self.context_window = context_window
+        self.measured: RunUsage | None = None
+        self._fetches = 0
+        self._armed = True
+
+    @property
+    def reading(self) -> ContextReading:
+        return ContextReading(
+            measured_tokens=(
+                None if self.measured is None else self.measured.context_tokens
+            ),
+            context_window=self.context_window,
+        )
+
+    def seed(self, runs: typing.Mapping[str, dict]) -> None:
+        """Take the reading from a loaded thread's runs (REST 'runs')
+
+        The newest run which measured something, by creation, skipping
+        runs with no usage, or none measured.  A record which cannot be
+        read ends the search:  an older run is not reported as current.
+        A reading already in hand is at least as new:  it is kept.
+        """
+        if self.measured is not None:
+            return
+
+        ordered = sorted(
+            runs.items(),
+            key=lambda item: item[1].get("created") or "",
+            reverse=True,
+        )
+
+        for run_id, run in ordered:
+            try:
+                usage = RunUsage.from_json(run_id, run.get("usage"))
+            except UnreadableUsage:
+                return
+
+            if usage is not None and usage.is_measured:
+                self.measured = usage
+                return
+
+    def fetch_started(self) -> int:
+        """Number a usage fetch, as it is asked for"""
+        self._fetches += 1
+        return self._fetches
+
+    def fetched(self, ticket: int, run_id: str, usage) -> None:
+        """A fetch's answer:  'usage' as 'GET .../usage' gave it"""
+        if ticket != self._fetches:  # a later fetch was asked for since
+            return
+
+        try:
+            found = RunUsage.from_json(run_id, usage)
+        except UnreadableUsage:
+            return
+
+        if found is not None and found.is_measured:
+            self.measured = found
+
+    def fetch_failed(self, ticket: int) -> None:
+        """A fetch which failed:  the previous reading stands"""
+
+    def warning_due(self) -> bool:
+        """Whether to warn now that the thread is nearly full (once)"""
+        if not self.reading.is_nearly_full:
+            self._armed = True
+            return False
+
+        due, self._armed = self._armed, False
+        return due
+
+
+def compaction_notice(report: ResendReport) -> str | None:
+    """A line saying what a POST compacted, or None if nothing
+
+    E.g. 'compacted 7 old tool results: ~61k -> ~9k tokens (kept newest
+    4)', at 'DEFAULT_CHARS_PER_TOKEN'.
+    """
+    if not report.compacted:
+        return None
+
+    plural = "" if report.compacted == 1 else "s"
+    before = _k(report.compacted_from_chars / DEFAULT_CHARS_PER_TOKEN)
+    after = _k(report.compacted_to_chars / DEFAULT_CHARS_PER_TOKEN)
+    return (
+        f"compacted {report.compacted} old tool result{plural}: "
+        f"~{before} \u2192 ~{after} tokens (kept newest {report.keep_recent})"
+    )
+
+
+#   What a model server says when a request is too long for its window.
+_OVERFLOW = re.compile(
+    r"token limit exceeded|maximum context length|context length|"
+    r"context window|too many tokens|prompt is too long",
+    re.IGNORECASE,
+)
+
+
+def is_context_overflow(message: str | None) -> bool:
+    """Does a run's error say its request overflowed the model's window?"""
+    return bool(message) and _OVERFLOW.search(message) is not None
+
+
+def context_breakdown(
+    run_input: agui_core.RunAgentInput,
+) -> list[tuple[str, int, int]]:
+    """What the history holds:  '(label, messages, JSON characters)' rows
+
+    One row per role, and per tool for tool results (with how many of
+    them are compacted), then the state:  e.g. for a UI's '/context'.
+    """
+    calls = _calls_by_id(run_input.messages)
+    rows: dict[str, list[int]] = {}
+
+    for message in run_input.messages:
+        if isinstance(message, agui_core.ToolMessage):
+            call = calls.get(message.tool_call_id)
+            tool = call.function.name if call is not None else "?"
+            label = f"tool result: {tool}"
+
+            if is_compacted(message.content):
+                label += " (compacted)"
+        else:
+            label = message.role
+
+        row = rows.setdefault(label, [0, 0])
+        row[0] += 1
+        row[1] += len(message.model_dump_json(exclude_none=True))
+
+    found = [(label, count, chars) for label, (count, chars) in rows.items()]
+    found.append(
+        ("state", 1, len(json.dumps(run_input.state, ensure_ascii=False))),
+    )
+    return found
+
+
+@dataclasses.dataclass
+class HarnessLog:
+    """Append one JSON line per POST's 'ResendReport' to a local file"""
+
+    path: pathlib.Path
+
+    def record(self, report: ResendReport) -> None:
+        entry = {
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+            **report.as_json(),
+            "notice": compaction_notice(report),
+        }
+
+        with pathlib.Path(self.path).open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(entry) + "\n")
 
 
 #
@@ -959,12 +1319,26 @@ class Harness:
     compaction: CompactionPolicy = CompactionPolicy()
     trim_rag_state: str = TRIM_BOUNDARY
     budget: ContextBudget = dataclasses.field(default_factory=ContextBudget)
+    meter: ContextMeter | None = None
     on_report: abc.Callable[[ResendReport], None] | None = None
+    on_reading: abc.Callable[[ContextReading], None] | None = None
     reports: list[ResendReport] = dataclasses.field(default_factory=list)
+    #   Set by 'compact_next':  the next POST compacts as 'always' would.
+    compact_now: bool = False
 
     def __post_init__(self):
         if self.trim_rag_state not in TRIM_MODES:
             raise InvalidTrimMode(self.trim_rag_state)
+
+        if self.meter is None:
+            self.meter = ContextMeter(self.budget.window_tokens)
+
+    def compact_next(self) -> None:
+        """Compact every eligible result but the newest, at the next POST
+
+        (Whatever the mode:  e.g. for a UI's '/compact'.)
+        """
+        self.compact_now = True
 
     def before_post(
         self,
@@ -999,13 +1373,26 @@ class Harness:
 
         chars = wire_chars(messages)
         indexes = self._to_compact(messages, chars)
-        saved = 0
+        saved = from_chars = to_chars = 0
+        originals = ()
 
         if indexes:
+            before = messages
             messages = compact_history(messages, indexes)
             run_input = run_input.model_copy(update={"messages": messages})
             saved = chars - wire_chars(messages)
             chars -= saved
+            calls = _calls_by_id(before)
+            originals = tuple(
+                (
+                    before[index].tool_call_id,
+                    calls[before[index].tool_call_id].function.name,
+                    before[index].content,
+                )
+                for index in indexes
+            )
+            from_chars = sum(_json_chars(before[i].content) for i in indexes)
+            to_chars = sum(_json_chars(messages[i].content) for i in indexes)
 
         if self.pairing_check:
             validate_pairing(messages)
@@ -1033,6 +1420,10 @@ class Harness:
             stale=self.budget.stale,
             answered=answered,
             trimmed=trimmed,
+            compacted_from_chars=from_chars,
+            compacted_to_chars=to_chars,
+            keep_recent=self.compaction.keep_recent,
+            originals=originals,
         )
         self.reports.append(report)
 
@@ -1048,6 +1439,10 @@ class Harness:
     ) -> list[int]:
         """The results to compact now, per 'compaction' and 'budget'"""
         policy = self.compaction
+
+        if self.compact_now:
+            self.compact_now = False
+            return compaction_candidates(messages, policy)
 
         if policy.mode == COMPACTION_OFF:
             return []
@@ -1077,9 +1472,7 @@ class Harness:
             tool = calls[message.tool_call_id].function.name
             compacted = compact_content(tool, message.content)
             # As 'wire_chars' counts it:  as JSON.
-            saved = len(json.dumps(message.content, ensure_ascii=False)) - len(
-                json.dumps(compacted, ensure_ascii=False),
-            )
+            saved = _json_chars(message.content) - _json_chars(compacted)
             estimate -= saved / self.budget.chars_per_token
             chosen.append(index)
 
@@ -1094,14 +1487,23 @@ class Harness:
 
         A usage which cannot be had (an HTTP error, a body which is not
         JSON, or not a usage record) leaves the anchor as it was, 'stale':
-        the run itself is not failed for it.
+        the run itself is not failed for it.  The meter takes the same
+        usage (see 'ContextMeter'), and 'on_reading' its new reading.
         """
+        ticket = self.meter.fetch_started()
+
         try:
             usage = client.run_usage(run_input.thread_id, run_input.run_id)
         except (client_tools.ClientToolsError, ValueError):
             usage = None
+            self.meter.fetch_failed(ticket)
+        else:
+            self.meter.fetched(ticket, run_input.run_id, usage)
 
         self.budget.anchor(usage, wire_chars(run_input.messages))
+
+        if self.on_reading is not None:
+            self.on_reading(self.meter.reading)
 
 
 PROBE_TIMEOUT = httpx.Timeout(5.0)

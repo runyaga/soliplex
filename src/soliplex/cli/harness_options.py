@@ -6,6 +6,8 @@ See 'soliplex.agui.harness', and 'docs/tui_harness.md'.
 
 from __future__ import annotations
 
+import pathlib
+
 import click
 import typer
 
@@ -133,6 +135,16 @@ TRIM_RAG_STATE = typer.Option(
     ),
 )
 
+HARNESS_LOG = typer.Option(
+    None,
+    "--harness-log",
+    envvar="SOLIPLEX_TUI_HARNESS_LOG",
+    help=(
+        "Append one JSON line per run's POST (the history's size, what was "
+        "compacted or trimmed, the estimate) to this file."
+    ),
+)
+
 #   Shown when '--trim-rag-state aggressive' is chosen.
 AGGRESSIVE_TRIM_WARNING = (
     "--trim-rag-state aggressive drops search results mid-question:  "
@@ -153,13 +165,15 @@ def harness_options(
     probe_model_window: bool,
     output_reserve: int,
     trim_rag_state: str = agui_harness.TRIM_BOUNDARY,
+    harness_log: pathlib.Path | None = None,
 ) -> dict:
     """'agui_harness.make_harness' options, from the command line's
 
-    Raises 'agui_harness.InvalidCompactionFractions' if the target is not
-    below the trigger.
+    With 'harness_log', each POST's report is appended to it
+    ('on_report').  Raises 'agui_harness.InvalidCompactionFractions' if
+    the target is not below the trigger.
     """
-    return {
+    options = {
         "pairing_check": pairing_check,
         "compaction": agui_harness.CompactionPolicy(
             mode=compaction,
@@ -173,3 +187,8 @@ def harness_options(
         "output_reserve": output_reserve,
         "trim_rag_state": trim_rag_state,
     }
+
+    if harness_log is not None:
+        options["on_report"] = agui_harness.HarnessLog(harness_log).record
+
+    return options

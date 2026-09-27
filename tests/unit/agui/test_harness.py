@@ -670,7 +670,20 @@ def test_harness_before_post_compacts_always():
         "stale": False,
         "answered": 0,
         "trimmed": [],
+        "compacted_from_chars": sum(
+            len(json.dumps(m.content, ensure_ascii=False))
+            for m in messages[2:5:2]
+        ),
+        "compacted_to_chars": sum(
+            len(json.dumps(m.content, ensure_ascii=False))
+            for m in found.messages[2:5:2]
+        ),
+        "keep_recent": 4,
     }
+    assert [original for _, _, original in report.originals] == [
+        messages[2].content,
+        messages[4].content,
+    ]
 
     # Again:  nothing more to do, and the same bytes.
     again = the_harness.before_post(mock.Mock(), found, first=False)
@@ -1809,3 +1822,440 @@ def test_trim_rag_state_aggressive_is_idempotent_mid_question():
 
     assert again is once
     assert names == []
+
+
+# -- the context meter (the frontend's rules) --------------------------------
+
+
+def test_run_usage_from_json():
+    usage = harness.RunUsage.from_json(
+        "r1",
+        {
+            "input_tokens": 251_428,  # every request of the run:  ignored
+            "final_input_tokens": 52_548,
+            "final_output_tokens": 418,
+        },
+    )
+
+    assert usage == harness.RunUsage("r1", 52_548, 418)
+    assert usage.is_measured
+    assert usage.context_tokens == 52_966
+
+
+def test_run_usage_from_json_w_no_record():
+    assert harness.RunUsage.from_json("r1", None) is None
+
+
+@pytest.mark.parametrize(
+    "usage, measured, tokens",
+    [
+        ({"final_input_tokens": None}, False, None),  # never reached it
+        ({"final_input_tokens": 100}, True, 100),  # an older server
+        ({"final_input_tokens": 100, "final_output_tokens": None}, True, 100),
+    ],
+)
+def test_run_usage_measured(usage, measured, tokens):
+    found = harness.RunUsage.from_json("r1", usage)
+
+    assert found.is_measured is measured
+    assert found.context_tokens == tokens
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        [1],
+        "text",
+        {"final_input_tokens": "100"},
+        {"final_input_tokens": True},
+        {"final_input_tokens": 100, "final_output_tokens": -1},
+    ],
+)
+def test_run_usage_unreadable(usage):
+    with pytest.raises(harness.UnreadableUsage):
+        harness.RunUsage.from_json("r1", usage)
+
+
+def test_context_reading_example():
+    # The spec's own example:  52,548 + 418 of 262,144.
+    reading = harness.ContextReading(52_966, 262_144)
+
+    assert reading.text() == "context 20% (52,966 / 262,144)"
+    assert reading.level == harness.LEVEL_OK
+
+
+def test_context_reading_not_measured():
+    # Absent is not zero:  no percentage, whatever the window.
+    reading = harness.ContextReading(None, 98_304)
+
+    assert reading.fraction_used is None
+    assert reading.level == harness.LEVEL_NONE
+    assert reading.is_nearly_full is False
+    assert reading.is_critical is False
+    assert reading.text() == "context: not measured yet"
+
+
+@pytest.mark.parametrize("window", [None, 0, -5])
+def test_context_reading_without_a_window(window):
+    reading = harness.ContextReading(52_966, window)
+
+    assert reading.window is None
+    assert reading.fraction_used is None
+    assert reading.warning_threshold is None
+    assert reading.level == harness.LEVEL_NONE
+    assert reading.text().startswith("context 52,966 tokens (window unknown")
+    assert "agent.context_window" in reading.text()
+    assert "--context-window" in reading.text()
+
+
+@pytest.mark.parametrize(
+    "window, threshold",
+    [(98_304, 0.80), (127_999, 0.80), (128_000, 0.85), (262_144, 0.85)],
+)
+def test_context_reading_warning_threshold(window, threshold):
+    assert harness.ContextReading(1, window).warning_threshold == threshold
+
+
+@pytest.mark.parametrize(
+    "tokens, window, level",
+    [
+        (78_000, 98_304, harness.LEVEL_OK),  # 79%
+        (78_700, 98_304, harness.LEVEL_WARNING),  # 80%
+        (220_000, 262_144, harness.LEVEL_OK),  # 84%
+        (223_000, 262_144, harness.LEVEL_WARNING),  # 85%
+        (88_500, 98_304, harness.LEVEL_CRITICAL),  # 90%
+        (300_000, 262_144, harness.LEVEL_CRITICAL),  # over:  100%
+    ],
+)
+def test_context_reading_levels(tokens, window, level):
+    reading = harness.ContextReading(tokens, window)
+
+    assert reading.level == level
+    assert 0.0 <= reading.fraction_used <= 1.0
+
+
+def test_context_reading_clamps_at_full():
+    assert harness.ContextReading(300_000, 262_144).text() == (
+        "context 100% (300,000 / 262,144)"
+    )
+
+
+def _run(created, usage):
+    return {"created": created, "usage": usage}
+
+
+def test_context_meter_seed_takes_the_newest_measured_run():
+    meter = harness.ContextMeter(262_144)
+    runs = {
+        "r1": _run("2026-09-26T10:00:00", {"final_input_tokens": 1_000}),
+        "r3": _run("2026-09-26T10:02:00", None),  # no usage:  skipped
+        "r2": _run(
+            "2026-09-26T10:01:00",
+            {"final_input_tokens": 5_000, "final_output_tokens": 10},
+        ),
+        # Never reached the model:  skipped.
+        "r4": _run("2026-09-26T10:03:00", {"final_input_tokens": None}),
+    }
+
+    meter.seed(runs)
+
+    assert meter.measured == harness.RunUsage("r2", 5_000, 10)
+    assert meter.reading.measured_tokens == 5_010
+
+
+def test_context_meter_seed_stops_at_an_unreadable_record():
+    # Not an older run reported as current.
+    meter = harness.ContextMeter(262_144)
+    runs = {
+        "r1": _run("2026-09-26T10:00:00", {"final_input_tokens": 1_000}),
+        "r2": _run("2026-09-26T10:01:00", {"final_input_tokens": "?"}),
+    }
+
+    meter.seed(runs)
+
+    assert meter.measured is None
+    assert meter.reading.text() == "context: not measured yet"
+
+
+def test_context_meter_seed_w_nothing_measured():
+    meter = harness.ContextMeter(262_144)
+
+    meter.seed({"r1": {"usage": None}, "r2": {}})
+
+    assert meter.measured is None
+
+
+def test_context_meter_seed_keeps_a_reading_in_hand():
+    meter = harness.ContextMeter(262_144)
+    meter.fetched(meter.fetch_started(), "r9", {"final_input_tokens": 9})
+
+    meter.seed({"r1": _run("x", {"final_input_tokens": 1})})
+
+    assert meter.measured.run_id == "r9"
+
+
+def test_context_meter_seed_after_a_failed_fetch():
+    # Frontend #557:  a fetch asked for, and failed, must not stop the
+    # seed -- only a measurement in hand does.
+    meter = harness.ContextMeter(262_144)
+    meter.fetch_failed(meter.fetch_started())
+
+    meter.seed({"r1": _run("x", {"final_input_tokens": 700})})
+
+    assert meter.reading.measured_tokens == 700
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        None,  # the run never reached the model
+        {"final_input_tokens": None},  # nothing measured
+        {"final_input_tokens": "garbled"},  # unreadable:  reports nothing
+    ],
+)
+def test_context_meter_fetched_w_nothing_new(usage):
+    meter = harness.ContextMeter(262_144)
+    meter.fetched(meter.fetch_started(), "r1", {"final_input_tokens": 40_000})
+
+    meter.fetched(meter.fetch_started(), "r2", usage)
+
+    # The previous reading stands.
+    assert meter.measured.run_id == "r1"
+    assert meter.reading.measured_tokens == 40_000
+
+
+def test_context_meter_failed_fetch_never_goes_backwards():
+    meter = harness.ContextMeter(262_144)
+    meter.fetched(meter.fetch_started(), "r1", {"final_input_tokens": 40_000})
+
+    meter.fetch_failed(meter.fetch_started())
+
+    assert meter.reading.measured_tokens == 40_000
+
+
+def test_context_meter_orders_by_fetch():
+    # A stale answer (to an older fetch) never displaces a newer reading.
+    meter = harness.ContextMeter(262_144)
+    older = meter.fetch_started()
+    newer = meter.fetch_started()
+
+    meter.fetched(newer, "r2", {"final_input_tokens": 2_000})
+    meter.fetched(older, "r1", {"final_input_tokens": 1_000})
+
+    assert meter.measured.run_id == "r2"
+
+
+def test_context_meter_warning_rearms():
+    meter = harness.ContextMeter(98_304)
+
+    def reading(tokens):
+        meter.fetched(
+            meter.fetch_started(), "r", {"final_input_tokens": tokens}
+        )
+        return meter.warning_due()
+
+    assert reading(10_000) is False
+    assert reading(80_000) is True  # crossed:  warn, once
+    assert reading(85_000) is False  # still over:  dismissed stays so
+    assert reading(20_000) is False  # back under:  re-armed
+    assert reading(81_000) is True  # climbed again:  warn again
+
+
+def test_context_meter_no_warning_without_a_window():
+    meter = harness.ContextMeter(None)
+    meter.fetched(meter.fetch_started(), "r", {"final_input_tokens": 10**9})
+
+    assert meter.warning_due() is False
+    assert meter.reading.level == harness.LEVEL_NONE
+
+
+def test_harness_meter_follows_after_run():
+    run_input = _run_input(_history(*_searches(1)))
+    client = mock.Mock(spec=["run_usage"])
+    client.run_usage.return_value = {
+        "final_input_tokens": 52_548,
+        "final_output_tokens": 418,
+    }
+    readings = []
+    the_harness = harness.make_harness(
+        {"agent": {"context_window": 262_144}},
+        on_reading=readings.append,
+    )
+
+    the_harness.after_run(client, run_input)
+
+    (reading,) = readings
+    assert reading.text() == "context 20% (52,966 / 262,144)"
+
+    # A failed fetch:  the reading stands.
+    client.run_usage.side_effect = ValueError("not JSON")
+    the_harness.after_run(client, run_input)
+
+    assert readings[-1] == reading
+
+
+def test_harness_meter_window_is_the_budgets():
+    the_harness = harness.Harness(
+        budget=harness.ContextBudget(window_tokens=98_304),
+    )
+
+    assert the_harness.meter.context_window == 98_304
+
+
+# -- notices, the harness log, '/context' and '/compact' ---------------------
+
+
+def _report(**fields):
+    base = {
+        "thread_id": "t",
+        "run_id": "r",
+        "parent_run_id": None,
+        "first": True,
+        "mode": "auto",
+        "messages": 3,
+        "resend_chars": 100,
+        "state_chars": 2,
+        "compacted": 0,
+        "compacted_chars": 0,
+        "compacted_total": 0,
+        "est_tokens": 30,
+        "window_tokens": None,
+        "window_source": None,
+        "stale": False,
+    }
+    return harness.ResendReport(**(base | fields))
+
+
+@pytest.mark.parametrize(
+    "fields, expected",
+    [
+        ({}, None),
+        (
+            {
+                "compacted": 7,
+                "compacted_from_chars": 213_500,
+                "compacted_to_chars": 31_500,
+                "keep_recent": 4,
+            },
+            "compacted 7 old tool results: ~61k \u2192 ~9.0k tokens "
+            "(kept newest 4)",
+        ),
+        (
+            {
+                "compacted": 1,
+                "compacted_from_chars": 3_500,
+                "compacted_to_chars": 700,
+                "keep_recent": 2,
+            },
+            "compacted 1 old tool result: ~1.0k \u2192 ~200 tokens "
+            "(kept newest 2)",
+        ),
+    ],
+)
+def test_compaction_notice(fields, expected):
+    assert harness.compaction_notice(_report(**fields)) == expected
+
+
+@pytest.mark.parametrize(
+    "message, expected",
+    [
+        (
+            "status_code: 400, body: Model token limit exceeded before any "
+            "response was generated",
+            True,
+        ),
+        ("This model's maximum context length is 98304 tokens", True),
+        ("The prompt is too long", True),
+        ("boom", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_context_overflow(message, expected):
+    assert harness.is_context_overflow(message) is expected
+
+
+def test_context_breakdown():
+    big = _search_result()
+    messages = _history(("search", big), ("search", big), ("shell", "{}"))
+    messages[2] = messages[2].model_copy(
+        update={"content": harness.compact_content("search", big)},
+    )
+    messages.append(_result("t-orphan", "no-call", "x"))
+    messages.append(_assistant("a-end", content="Done."))
+    run_input = _run_input(messages, state={"rag": {"x": 1}})
+
+    found = {
+        label: (count, chars)
+        for label, count, chars in harness.context_breakdown(run_input)
+    }
+
+    assert set(found) == {
+        "user",
+        "assistant",
+        "tool result: search (compacted)",
+        "tool result: search",
+        "tool result: shell",
+        "tool result: ?",
+        "state",
+    }
+    assert found["assistant"][0] == 4
+    assert found["tool result: search"][0] == 1
+    assert (
+        found["tool result: search (compacted)"][1]
+        < (found["tool result: search"][1])
+    )
+    assert found["state"] == (1, len('{"rag": {"x": 1}}'))
+
+
+def test_harness_log(tmp_path):
+    path = tmp_path / "harness.jsonl"
+    log = harness.HarnessLog(path)
+    report = _report(
+        compacted=2,
+        compacted_from_chars=7_000,
+        compacted_to_chars=700,
+        originals=(("c1", "search", "long text"),),
+    )
+
+    log.record(report)
+    log.record(_report())
+
+    first, second = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert first["compacted"] == 2
+    assert first["notice"] == harness.compaction_notice(report)
+    assert "originals" not in first
+    assert "timestamp" in first
+    assert second["notice"] is None
+
+
+def test_harness_compact_next_forces_one_batch():
+    messages = _history(*_searches(6))
+    the_harness = harness.Harness(
+        compaction=harness.CompactionPolicy(mode=harness.COMPACTION_OFF),
+    )
+    the_harness.compact_next()
+
+    found = the_harness.before_post(
+        mock.Mock(),
+        _run_input(messages),
+        first=True,
+    )
+
+    assert the_harness.reports[-1].compacted == 2  # all but the newest 4
+    assert the_harness.compact_now is False
+
+    # Once:  the next POST is back to the mode ('off').
+    grown = [*found.messages, *_history(*_searches(1, start=6), start=6)[1:]]
+    the_harness.before_post(mock.Mock(), _run_input(grown), first=True)
+
+    assert the_harness.reports[-1].compacted == 0
+
+
+def test_harness_w_a_meter_given():
+    meter = harness.ContextMeter(1_000)
+
+    assert harness.Harness(meter=meter).meter is meter

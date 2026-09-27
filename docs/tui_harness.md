@@ -234,6 +234,75 @@ before each POST: the history's size in characters (`resend_chars`,
 `compacted_chars`; `compacted_total` in all), the estimate
 (`est_tokens`) and the window (`window_tokens`, `window_source`).
 
+## The context meter
+
+The TUI shows how full the model's context window is, under the room
+and thread names:
+
+```text
+context 20% (52,966 / 262,144)
+```
+
+It reads the way the Flutter frontend's gauge does -- the reference is
+`soliplex/frontend` PR #545 (`feat/server-measured-context`) with its
+fixes #555 and #557:
+`packages/soliplex_client/lib/src/domain/run_usage.dart`,
+`packages/soliplex_agent/lib/src/metering/context_usage.dart` and
+`lib/src/modules/room/context_usage_controller.dart`. In Python it is
+`soliplex.agui.harness.ContextMeter` and `ContextReading`.
+
+- **Tokens** are the provider's own count for the last request of the
+  newest measured run, plus its reply, which the next request carries:
+  `final_input_tokens + (final_output_tokens or 0)`. A run is measured
+  when `final_input_tokens` is not null. `input_tokens` (every request
+  of the run, summed) is never used.
+- **The window** is the room's `agent.context_window`, read with the
+  room (or `--context-window`, or, with `--probe-model-window`, the model
+  server's). Without one there is no percentage: the meter shows the
+  measured tokens alone, and says to declare the window.
+- **The source of truth**: a thread loaded from the server is read from
+  its newest measured run, by creation, skipping runs with no usage. A
+  usage record which cannot be read ends that search: an older run is
+  not shown as current. After every run -- every hop of a chain of
+  client tool calls, and a run which failed -- the client fetches
+  `GET .../agui/{thread_id}/{run_id}/usage`. A null answer (the run
+  never reached the model), a failed fetch, or a record which cannot be
+  read leaves the previous reading as it was: it never goes backwards.
+  Fetches are ordered as they were asked for, so an older answer never
+  displaces a newer reading.
+- **Absent is not zero**: with nothing measured, the meter says
+  `context: not measured yet`; it never shows a percentage of nothing.
+- **Thresholds**: the meter turns to a warning at 80% of a window under
+  128,000 tokens and at 85% of a larger one, and to critical at 90%,
+  whatever the window. The reading decides; the TUI only paints. On
+  crossing the warning threshold it shows a notice, once; the notice
+  comes back only after the reading has dropped under the threshold and
+  climbed over it again.
+- **No draft estimate**: the frontend may add an estimate of the unsent
+  draft; the TUI does not. What it shows was measured.
+
+When compaction fires, the response says so, for example
+`compacted 7 old tool results: ~61k → ~9.0k tokens (kept newest 4)` (the
+sizes estimated at 3.5 characters a token), and a collapsed block below
+it holds the full text of each compacted result: the model now sees the
+compacted form, and the full one is a click away. `--harness-log PATH`
+(`SOLIPLEX_TUI_HARNESS_LOG`) appends one JSON line per POST -- the
+history's size, what was compacted or trimmed, the estimate, and that
+notice -- on either client.
+
+Two commands, typed as a prompt, are handled by the TUI itself and sent
+nowhere:
+
+- `/context` -- what the history holds: messages and characters by role,
+  and by tool for tool results (compacted ones apart), and the state;
+- `/compact` -- compact every old, large tool result but the newest
+  `--keep-recent` before the next prompt, whatever `--compaction` says.
+
+When a run fails because its request did not fit the window (`token
+limit exceeded`, `maximum context length`, ...), the TUI says so, and
+suggests `/compact`, `--compaction auto` with a known window, or a new
+thread.
+
 ## How it is tested
 
 Besides unit tests of each piece, `tests/unit/agui/test_harness_e2e.py`

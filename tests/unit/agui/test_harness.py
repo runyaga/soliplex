@@ -231,8 +231,9 @@ def test_compact_content_search():
     assert "Also matched, shown above: [c-1] [rank 6 of 6]" in skeleton
     assert "Content:" not in found
     assert "lorem" not in found
-    assert "Figure caption" not in found
-    assert len(found) < 1000
+    # The whole header block is kept.
+    assert found.count("Figure caption (#/pictures/0): a map") == 5
+    assert len(found) < 1500
     # Byte-stable:  the same result always compacts to the same text.
     assert harness.compact_content("search", content) == found
 
@@ -246,19 +247,47 @@ def test_compact_content_search_w_score_header():
     assert found.endswith("[c-1] (score: 0.87)")
 
 
-@pytest.mark.parametrize(
-    "content",
-    [
-        # A hit's first line is not a search header.
-        "Not a search\nContent:\n" + "text " * 400,
-        # A header, but no 'Content:'.
-        "[c-1] [rank 1 of 1]\n" + "text " * 400,
-    ],
-)
-def test_compact_content_not_a_search(content):
+def test_compact_content_search_w_rules_in_the_text():
+    # A horizontal rule within a hit's text is not a separator:  every
+    # hit's id survives.
+    body = "intro\n\n---\n\nmore text " * 100
+    content = "\n\n---\n\n".join(
+        f"[c-{k}] [rank {k} of 3]\nSource: doc\nContent:\n{body}"
+        for k in range(1, 4)
+    )
+
     found = harness.compact_content("search", content)
 
+    assert harness.compacted_info(found)["format"] == "headers"
+    assert found.split("\n", 2)[2] == (
+        "[c-1] [rank 1 of 3]\nSource: doc\n---\n"
+        "[c-2] [rank 2 of 3]\nSource: doc\n---\n"
+        "[c-3] [rank 3 of 3]\nSource: doc"
+    )
+
+
+NOT_A_SEARCH = [
+    # A hit's first line is not a search header.
+    "Not a search\nContent:\n" + "text " * 400,
+    # A header, but no 'Content:'.
+    "[c-1] [rank 1 of 1]\n" + "text " * 400,
+    # A header line with more after it.
+    "[c-1] [rank 1 of 1] and more\nContent:\n" + "text " * 400,
+]
+
+
+@pytest.mark.parametrize("content", NOT_A_SEARCH)
+def test_compact_content_not_a_search(content):
+    # From another tool:  cut like any other text.
+    found = harness.compact_content("other", content)
+
     assert harness.compacted_info(found)["format"] == "head_tail"
+
+
+@pytest.mark.parametrize("content", NOT_A_SEARCH)
+def test_compact_content_search_not_recognized(content):
+    # From 'search':  left alone, rather than lose its chunk ids.
+    assert harness.compact_content("search", content) == content
 
 
 def test_compact_content_shell_success():
@@ -305,6 +334,88 @@ def test_compact_content_shell_not_run():
     assert body["exit_code"] is None
     assert body["error"] == "Refused: x" * 200
     assert "stderr_tail" not in body
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"stdout": 42},
+        {"stderr": ["a", "b"]},
+        {"error": {"why": "x"}},
+        {"exit_code": "1"},
+        {"exit_code": True},
+        {"exit_code": 1.5},
+        {"timed_out": "no"},
+    ],
+)
+def test_compact_content_shell_w_unexpected_shape(fields):
+    # Not what the client makes:  left alone, lest a failure be lost.
+    content = json.dumps(
+        {"stdout": "x" * 3000, "stderr": "", "exit_code": 1} | fields,
+    )
+
+    assert harness.compact_content("shell", content) == content
+
+
+def test_compact_content_shell_w_null_streams():
+    content = json.dumps(
+        {
+            "stdout": None,
+            "stderr": None,
+            "exit_code": None,
+            "error": "e" * 2000,
+        },
+    )
+
+    body = json.loads(
+        harness.compact_content("shell", content).split("\n", 1)[1],
+    )
+
+    assert body["stdout_chars"] == body["stderr_chars"] == 0
+    assert body["error"] == "e" * 2000
+
+
+def test_compact_content_other_tool_w_exit_code():
+    # Only the client's 'shell' results are summarized so.
+    content = _shell_json(exit_code=1)
+
+    found = harness.compact_content("my_tool", content)
+
+    assert harness.compacted_info(found)["format"] == "head_tail"
+
+
+@pytest.mark.parametrize(
+    "tool",
+    ["other", "my tool", "a]b=c", "\u00fcn\u00efcode", "100%"],
+)
+def test_compact_content_marker_names_any_tool(tool):
+    content = "x" * 2000
+
+    found = harness.compact_content(tool, content)
+
+    first_line = found.split("\n", 1)[0]
+    assert first_line.count(" ") == 6  # the marker's, and its three words
+    assert harness.compacted_info(found) == {
+        "tool": tool,
+        "format": "head_tail",
+        "original_bytes": "2000",
+    }
+
+
+@pytest.mark.parametrize(
+    "tool, content",
+    [
+        ("search", _search_result()),
+        ("shell", _shell_json(exit_code=3, stderr="bad" * 500)),
+        ("execute_code", "z" * 5000),
+        ("other", "y" * 5000),
+    ],
+)
+def test_compact_content_is_idempotent(tool, content):
+    once = harness.compact_content(tool, content)
+
+    assert harness.compact_content(tool, once) == once
+    assert harness.compact_content("other", once) == once
 
 
 @pytest.mark.parametrize(
@@ -436,6 +547,53 @@ def test_compact_history():
     assert messages[2].content == _search_result("s0")  # not changed
 
 
+def test_compact_history_twice_and_w_duplicate_indexes():
+    messages = _history(
+        ("search", _search_result("s0")),
+        ("search", _search_result("s1")),
+    )
+
+    once = harness.compact_history(messages, [2, 2, 4])
+    twice = harness.compact_history(once, [4, 2])
+
+    assert [m.content for m in once] == [m.content for m in twice]
+    # Already compacted:  left the same object.
+    assert all(a is b for a, b in zip(once, twice, strict=True))
+
+
+def test_compacted_history_loads_on_the_server():
+    # The server's adapter keeps a compacted result as the string it is
+    # (it is not JSON), with its call, in the same number of messages.
+    from pydantic_ai import messages as ai_messages
+    from pydantic_ai.ui import ag_ui as ai_ag_ui
+
+    messages = _history(
+        ("search", _search_result("s0")),
+        ("shell", _shell_json(exit_code=1, stderr="oops" * 300)),
+        ("search", _search_result("s2")),
+    )
+    compacted = harness.compact_history(messages, [2, 4])
+
+    before = ai_ag_ui.AGUIAdapter.load_messages(messages)
+    after = ai_ag_ui.AGUIAdapter.load_messages(compacted)
+
+    assert len(after) == len(before)
+    returns = [
+        part
+        for message in after
+        for part in message.parts
+        if isinstance(part, ai_messages.ToolReturnPart)
+    ]
+    assert [part.tool_call_id for part in returns] == [
+        "call-0",
+        "call-1",
+        "call-2",
+    ]
+    assert returns[0].content == compacted[2].content
+    assert returns[1].content == compacted[4].content
+    assert harness.compacted_info(returns[1].content)["format"] == "shell"
+
+
 def test_wire_chars():
     messages = [_user(content="hé")]
 
@@ -511,3 +669,14 @@ def test_harness_before_post_w_compaction_off():
     (report,) = the_harness.reports
     assert report.mode == "off"
     assert report.compacted == 0
+
+
+def test_compacted_info_w_other_words():
+    content = f"{harness.COMPACTED_MARKER} format=x size=3]\nbody"
+
+    assert harness.compacted_info(content) == {"format": "x", "size": "3"}
+
+
+@pytest.mark.parametrize("content", ["not json " * 300, json.dumps([1] * 900)])
+def test_compact_content_shell_not_a_result(content):
+    assert harness.compact_content("shell", content) == content

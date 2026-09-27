@@ -53,15 +53,20 @@ rewrites the **content** of old, large tool results before each POST:
 
 A compacted result keeps what identifies it:
 
-- a haiku.rag **search** keeps each hit's header block -- its chunk id
-  and rank, collection, source and type -- without its text. The model
-  can still cite those chunk ids (haiku.rag resolves them from the run's
-  state, not from the message), or search again for the text;
+- a haiku.rag **search** keeps each hit's whole header block -- its
+  chunk id and rank, then collection, source, type, figure captions --
+  without its text. The model can still cite those chunk ids (haiku.rag
+  resolves them from the run's state, not from the message), or search
+  again for the text;
 - a client **`shell`** result keeps its exit code, timeout flag and
   output sizes as JSON, and the end of stderr when the command failed:
   a failure never reads as a success;
 - **`execute_code`** keeps its first and last 600 characters; any other
   tool its first and last 300.
+
+A `search` or `shell` result which is not of the shape expected (hits
+the client cannot parse, a result not made by this client) is left as
+it is, rather than risk losing its chunk ids or a failure.
 
 ### The compaction marker
 
@@ -74,7 +79,8 @@ the form:
 [compacted by soliplex-tui harness: tool=search format=headers original_bytes=10612]
 ```
 
-`tool` is the tool's name, `format` one of `headers`, `shell` or
+`tool` is the tool's name, percent-encoded (so a name holding a space,
+`]` or `=` cannot break the line), `format` one of `headers`, `shell` or
 `head_tail`, and `original_bytes` the size of the full result, in UTF-8
 bytes. A UI can match the prefix `[compacted by soliplex-tui harness:`
 to show "result compacted" (in Python,

@@ -28,6 +28,7 @@ import dataclasses
 import json
 import re
 from collections import abc
+from urllib import parse as urllib_parse
 
 from ag_ui import core as agui_core
 
@@ -131,6 +132,8 @@ DEFAULT_MIN_ELIDE_CHARS = 1024
 
 #   Every compacted tool result starts with this, then 'key=value' words
 #   ('tool', 'format', 'original_bytes') and ']':  see 'compacted_info'.
+#   The tool's name is percent-encoded ('urllib.parse.quote', nothing
+#   safe), so it holds no space, ']' or '='.
 COMPACTED_MARKER = "[compacted by soliplex-tui harness:"
 _COMPACTED_HEADER = re.compile(
     re.escape(COMPACTED_MARKER) + r"((?: [a-z_]+=\S+)+)\]",
@@ -149,18 +152,20 @@ STDERR_TAIL_CHARS = 400
 #   A haiku.rag search result:  hits joined by '---', each a header block
 #   (its first line '[chunk-id] [rank i of n]') then 'Content:' and the
 #   (context-expanded) text.
-_SEARCH_HIT_SEPARATOR = "\n\n---\n\n"
 _SEARCH_HIT_FIRST_LINE = re.compile(
-    r"\[[^\]\n]+\] (?:\[rank \d+(?: of \d+)?\]|\(score: [-\d.]+\))",
+    r"\[[^\]\n]+\] (?:\[rank \d+(?: of \d+)?\]|\(score: [-\d.]+\))$",
 )
 _SEARCH_ALSO_MATCHED = "Also matched, shown above: "
-_SEARCH_HEADER_PREFIXES = (
-    "[",
-    "Document ID: ",
-    "Collection: ",
-    "Source: ",
-    "Type: ",
+#   The separator between hits:  only where a hit's first line follows it,
+#   not a horizontal rule within a hit's text.
+_SEARCH_HIT_SEPARATOR = re.compile(
+    r"\n\n---\n\n(?=\[[^\]\n]+\] (?:\[rank |\(score: )"
+    + "|"
+    + re.escape(_SEARCH_ALSO_MATCHED)
+    + ")",
 )
+SEARCH_TOOL = "search"
+SHELL_TOOL = "shell"
 SEARCH_NOTE = (
     "Bodies omitted to save context; cite these chunk ids directly, or "
     "search again for the text."
@@ -215,13 +220,19 @@ def compacted_info(content: str) -> dict[str, str] | None:
     if match is None:
         return None
 
-    return dict(word.split("=", 1) for word in match.group(1).split())
+    info = dict(word.split("=", 1) for word in match.group(1).split())
+
+    if "tool" in info:
+        info["tool"] = urllib_parse.unquote(info["tool"])
+
+    return info
 
 
 def _header(tool: str, fmt: str, original: str) -> str:
     size = len(original.encode())
+    name = urllib_parse.quote(tool, safe="")
     return (
-        f"{COMPACTED_MARKER} tool={tool} format={fmt} original_bytes={size}]"
+        f"{COMPACTED_MARKER} tool={name} format={fmt} original_bytes={size}]"
     )
 
 
@@ -231,39 +242,58 @@ def _head_tail(text: str, keep: int) -> str:
 
 
 def _search_skeleton(content: str) -> str | None:
-    """A haiku.rag search result's headers, or None if it is not one"""
+    """A haiku.rag search result's headers, or None if it is not one
+
+    Each hit keeps its whole header block:  every line before its
+    'Content:' (chunk id and rank, then e.g. collection, source, type and
+    figure captions).  A hit already shown ('Also matched, ...') keeps
+    its one line.
+    """
     kept = []
 
-    for hit in content.split(_SEARCH_HIT_SEPARATOR):
+    for hit in _SEARCH_HIT_SEPARATOR.split(content):
         first = hit.partition("\n")[0]
 
-        if first.startswith(_SEARCH_ALSO_MATCHED):
+        if first.startswith(_SEARCH_ALSO_MATCHED) and first == hit:
             kept.append(first)
             continue
 
-        block, content, _ = hit.partition("\nContent:")
+        block, found, _ = hit.partition("\nContent:")
 
-        if not content or not _SEARCH_HIT_FIRST_LINE.match(first):
+        if not found or not _SEARCH_HIT_FIRST_LINE.match(first):
             return None
 
-        header = [first] + [
-            line
-            for line in block.split("\n")[1:]
-            if line.startswith(_SEARCH_HEADER_PREFIXES)
-        ]
-        kept.append("\n".join(header))
+        kept.append(block)
 
     return "\n---\n".join(kept)
 
 
+def _is_text(value) -> bool:
+    return value is None or isinstance(value, str)
+
+
 def _shell_summary(content: str) -> str | None:
-    """A 'shell' result's outcome, without its output;  None if not one"""
+    """A 'shell' result's outcome, without its output;  None if not one
+
+    Only for a result of the shape 'client_tools.tool_result_content'
+    makes:  anything else is left alone, lest a failure be lost.
+    """
     try:
         result = json.loads(content)
     except ValueError:
         return None
 
-    if not isinstance(result, dict) or "exit_code" not in result:
+    if (
+        not isinstance(result, dict)
+        or "exit_code" not in result
+        or not (
+            result["exit_code"] is None or type(result["exit_code"]) is int
+        )
+        or not all(
+            _is_text(result.get(key)) for key in ("stdout", "stderr", "error")
+        )
+        or not isinstance(result.get("timed_out", False), bool)
+    ):
         return None
 
     stdout = result.get("stdout") or ""
@@ -292,24 +322,35 @@ def compact_content(tool: str, content: str) -> str:
 
     Depends on nothing else, so that the same result always compacts to
     the same bytes (a history resent after compaction keeps the model
-    server's cached prefix).  The first line is the marker (see
-    'compacted_info'), then:
+    server's cached prefix);  content already compacted is returned as
+    it is.  The first line is the marker (see 'compacted_info'), then:
 
     - a haiku.rag search ('format=headers'):  each hit's header block
-      (chunk id and rank, collection, source, type), without its text;
+      (chunk id and rank, collection, source, type, ...), without its
+      text;
     - a client 'shell' result ('format=shell'):  exit code, timeout and
       output sizes as JSON, with the end of stderr if it failed;
     - 'execute_code' ('format=head_tail'):  its first and last
       'EXECUTE_CODE_KEEP_CHARS' characters;
     - anything else ('format=head_tail'):  its first and last
       'GENERIC_KEEP_CHARS'.
+
+    A 'search' or 'shell' result which is not of the expected shape is
+    returned as it is:  cutting it could lose its chunk ids, or a
+    failure.
     """
+    if is_compacted(content):
+        return content
+
     skeleton = _search_skeleton(content)
+    summary = _shell_summary(content) if tool == SHELL_TOOL else None
 
     if skeleton is not None:
         body, fmt = f"{SEARCH_NOTE}\n{skeleton}", "headers"
-    elif (summary := _shell_summary(content)) is not None:
+    elif summary is not None:
         body, fmt = summary, "shell"
+    elif tool in (SEARCH_TOOL, SHELL_TOOL):
+        return content
     else:
         keep = (
             EXECUTE_CODE_KEEP_CHARS
@@ -383,17 +424,19 @@ def compact_history(
     """A copy of 'messages', the results at 'indexes' compacted
 
     Only those results' content changes:  every message keeps its id and
-    place, and every other message is the same object.
+    place, and every other message (including a result 'compact_content'
+    leaves as it is) is the same object.
     """
     calls = _calls_by_id(messages)
     compacted = list(messages)
 
-    for index in indexes:
+    for index in sorted(set(indexes)):
         message = compacted[index]
         tool = calls[message.tool_call_id].function.name
-        compacted[index] = message.model_copy(
-            update={"content": compact_content(tool, message.content)},
-        )
+        content = compact_content(tool, message.content)
+
+        if content != message.content:
+            compacted[index] = message.model_copy(update={"content": content})
 
     return compacted
 

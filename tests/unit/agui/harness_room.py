@@ -164,10 +164,23 @@ def _check_window(chars: int) -> None:
 #
 #   One long question:  a chain of client tool calls
 #
-def big_search(query: str) -> str:
-    """Search the knowledge base (scripted)"""
+def big_search(
+    ctx: pydantic_ai.RunContext,
+    query: str,
+) -> ai_messages.ToolReturn:
+    """Search the knowledge base (scripted)
+
+    Keeps haiku.rag-shaped working evidence for the question, which stays
+    open through the whole chain.
+    """
     turn = int(query.rsplit("-", 1)[-1])
-    return search_result(turn)
+    rag = _rag_state(ctx)
+    rag["evidence"] = rag["evidence"] | {"question": 1, "in_progress": True}
+    rag["searches"][query] = [
+        {"chunk_id": f"chunk-{turn}-{k}"} for k in (1, 2)
+    ]
+    rag["citation_index"][f"chunk-{turn}-1"] = {"turn": turn}
+    return _snapshot(ctx, search_result(turn))
 
 
 async def _chain_stream(messages, info: ai_function.AgentInfo):

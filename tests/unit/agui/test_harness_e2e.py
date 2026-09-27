@@ -59,9 +59,17 @@ CONTEXT_WINDOW = 40_000
 #   Compaction batches over the 21 POSTs of a chain, at most.
 MAX_COMPACTION_EVENTS = 6
 
-#   A read timeout short of the server's 15-second SSE keepalive:  a run
-#   whose stream never ends fails the test, rather than hanging it.
+#   A read timeout;  but the server sends a keepalive every 15 seconds,
+#   so a stream which never ends would never time out:  every arm also
+#   has a watchdog, which closes its client after 'WATCHDOG_SECS'.
 HTTP_TIMEOUT = httpx.Timeout(10.0, read=20.0)
+WATCHDOG_SECS = 180.0
+
+
+def _http(**kwargs) -> httpx.Client:
+    """A client for the fixture's server only:  no proxy from the env"""
+    return httpx.Client(timeout=HTTP_TIMEOUT, trust_env=False, **kwargs)
+
 
 INSTALLATION_YAML = """\
 id: "harness-e2e"
@@ -115,6 +123,12 @@ def server_url(tmp_path_factory):
 
         for name in ("OPENAI_API_KEY", "OLLAMA_BASE_URL", "LOGFIRE_TOKEN"):
             monkeypatch.delenv(name, raising=False)
+
+        # No Logfire credentials from disk either:  nothing is sent.
+        monkeypatch.setenv(
+            "LOGFIRE_CREDENTIALS_DIR",
+            str(tmp_path_factory.mktemp("no-logfire")),
+        )
 
         monkeypatch.setattr(
             pydantic_ai.models,
@@ -213,10 +227,7 @@ class Recorder:
                 (request.method, request.url.path, response.status_code),
             )
 
-        http = httpx.Client(
-            timeout=HTTP_TIMEOUT,
-            event_hooks={"response": [on_response]},
-        )
+        http = _http(event_hooks={"response": [on_response]})
         client = client_tools.SoliplexClient(url, room_id, http=http)
         stream_run = client.stream_run
 
@@ -227,6 +238,28 @@ class Recorder:
 
         client.stream_run = capturing
         return client
+
+
+class Watchdog:
+    """Closes 'client' after 'secs' (its stream's read then fails at once)
+
+    For a stream which never ends:  the server's keepalives would keep a
+    read timeout from ever firing.  Records when it fired in 'fired'.
+    """
+
+    def __init__(self, secs: float, client, fired: list):
+        started = time.monotonic()
+
+        def bark():
+            fired.append(time.monotonic() - started)
+            client.close()
+
+        self._timer = threading.Timer(secs, bark)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def cancel(self) -> None:
+        self._timer.cancel()
 
 
 def fake_shell(args: dict, context: client_tools.ToolContext) -> dict:
@@ -267,11 +300,28 @@ class Arm:
 
     def get(self, path: str = "") -> dict:
         """'GET .../agui/{thread_id}{path}', from the server's REST API"""
-        with httpx.Client(timeout=HTTP_TIMEOUT) as http:
+        with _http() as http:
             response = http.get(f"{self.agui_url}/{self.thread_id}{path}")
 
         assert response.status_code == 200
         return response.json()
+
+    def finished_runs(self, deadline_secs: float = 10.0) -> dict:
+        """The thread's runs, once all of this arm's are marked finished
+
+        The stream ends a moment before the server stores that its run
+        finished:  poll, within a deadline.
+        """
+        deadline = time.monotonic() + deadline_secs
+
+        while True:
+            runs = self.get()["runs"]
+
+            if all(runs[run_id]["finished"] for run_id in self.result.run_ids):
+                return runs
+
+            assert time.monotonic() < deadline, "runs never finished"
+            time.sleep(0.05)
 
 
 def run_chain(
@@ -285,6 +335,7 @@ def run_chain(
     recorder = Recorder()
     context = client_tools.ToolContext(root=root)
     anchors = []
+    watchdog = []
 
     def after_run(client, run_input):
         the_harness.after_run(client, run_input)
@@ -295,6 +346,8 @@ def run_chain(
         run_input = client_tools.initial_run_input(thread, "chain", TOOLS)
         started = time.monotonic()
         error = None
+
+        timer = Watchdog(WATCHDOG_SECS, client, watchdog)
 
         try:
             result = client_tools.run_loop(
@@ -308,8 +361,12 @@ def run_chain(
             )
         except client_tools.ClientToolsError as exc:
             error, result = exc, exc.result
+        finally:
+            timer.cancel()
 
         elapsed = time.monotonic() - started
+
+    assert watchdog == [], "the chain hung, and its watchdog stopped it"
 
     return Arm(
         url=url,
@@ -328,6 +385,15 @@ def run_chain(
 def _off() -> harness.Harness:
     return harness.Harness(
         compaction=harness.CompactionPolicy(mode=harness.COMPACTION_OFF),
+    )
+
+
+def _always() -> harness.Harness:
+    return harness.Harness(
+        compaction=harness.CompactionPolicy(
+            mode=harness.COMPACTION_ALWAYS,
+            keep_recent=4,
+        ),
     )
 
 
@@ -363,6 +429,12 @@ def arms(server_url, tmp_path_factory):
             server_url,
             root,
             _on(),
+            window_chars=WINDOW_CHARS,
+        ),
+        "always_limited": run_chain(
+            server_url,
+            root,
+            _always(),
             window_chars=WINDOW_CHARS,
         ),
     }
@@ -481,7 +553,7 @@ def test_chain_answers_under_budget_with_compaction(arms):
     assert max(on_sizes) <= BUDGET_CHARS
     assert off_sizes[-1] > 2 * BUDGET_CHARS
     # ... and what the model was handed, too.
-    assert max(r["history_chars"] for r in on.model_requests) < WINDOW_CHARS
+    assert max(r["history_chars"] for r in on.model_requests) <= BUDGET_CHARS
     assert max(r["history_chars"] for r in off.model_requests) > WINDOW_CHARS
 
     for arm in (on, off):
@@ -512,10 +584,9 @@ def test_chain_every_post_accepted(arms):
         assert {status for _, _, status in arm.recorder.statuses} == {200}
 
     for arm in (arms["on_limited"], arms["off_unlimited"]):
-        runs = arm.get()["runs"]
+        runs = arm.finished_runs()
 
         assert set(runs) >= set(arm.result.run_ids)
-        assert all(runs[run_id]["finished"] for run_id in arm.result.run_ids)
 
 
 def _shape(sent: agui_core.RunAgentInput) -> list[tuple]:
@@ -680,6 +751,11 @@ def test_chain_marker_persisted(arms):
     ]
 
 
+def _set_fields(event: dict) -> dict:
+    """An event's fields which are set:  the store keeps the null ones"""
+    return {key: value for key, value in event.items() if value is not None}
+
+
 def _sse_events(response: httpx.Response) -> list[dict]:
     return list(client_tools.iter_sse_json(response.iter_lines()))
 
@@ -702,8 +778,11 @@ def test_chain_reconnect_to_a_compacted_run(arms):
     }
     assert compacted_ids
 
+    stored_events = on.get(f"/{sent.run_id}")["events"]
+    harness_room.reset()
+
     with (
-        httpx.Client(timeout=HTTP_TIMEOUT) as http,
+        _http() as http,
         http.stream(
             "POST",
             f"{on.agui_url}/{on.thread_id}/{sent.run_id}",
@@ -717,6 +796,12 @@ def test_chain_reconnect_to_a_compacted_run(arms):
         assert response.status_code == 200
         events = _sse_events(response)
 
+    # Exactly the stored events after the cursor, and the model not run
+    # again.
+    assert [_set_fields(event) for event in events] == [
+        _set_fields(event) for event in stored_events[1:]
+    ]
+    assert harness_room.REQUESTS == []
     types = [event["type"] for event in events]
     assert "RUN_ERROR" not in types
     assert types[-1] == "RUN_FINISHED"
@@ -779,7 +864,7 @@ def test_chain_orphan_refused_before_sending(arms, server_url, tmp_path):
     started = time.monotonic()
 
     with (
-        httpx.Client(timeout=HTTP_TIMEOUT) as http,
+        _http() as http,
         http.stream(
             "POST",
             f"{on.agui_url}/{on.thread_id}/{orphaned.run_id}",
@@ -787,6 +872,7 @@ def test_chain_orphan_refused_before_sending(arms, server_url, tmp_path):
             headers={"Accept": "text/event-stream"},
         ) as response,
     ):
+        assert response.status_code == 200
         types = [event["type"] for event in _sse_events(response)]
 
     assert types == ["RUN_STARTED", "RUN_ERROR"]
@@ -928,7 +1014,15 @@ def test_questions_state_trimmed_at_each_boundary(question_arms):
         assert again is sent.state
         assert names == []
 
-    # What was kept is what the server needs:  each question began anew.
+    # What was kept is what the server needs, exactly as untrimmed:  the
+    # citation index and the evidence ledger (each question began anew).
+    for kept, whole in zip(trimmed.posts, untrimmed.posts, strict=True):
+        kept_rag = kept.state.get(harness_room.RAG_NAMESPACE, {})
+        whole_rag = whole.state.get(harness_room.RAG_NAMESPACE, {})
+
+        for field in ("citation_index", "evidence"):
+            assert kept_rag.get(field) == whole_rag.get(field)
+
     assert [
         sent.state[harness_room.RAG_NAMESPACE]["evidence"]["question"]
         for sent in trimmed.posts[1:]
@@ -1024,3 +1118,77 @@ def test_room_rag_search_twice_in_a_question():
     (snapshot,) = found.metadata
     assert snapshot.snapshot == ctx.deps.state
     assert snapshot.snapshot is not ctx.deps.state
+
+
+def test_chain_always_compacts_all_but_the_newest(arms):
+    # Section E's 'always' arm:  deterministic, under budget -- but it
+    # rewrites a result on nearly every POST, which is why 'auto' batches.
+    always = arms["always_limited"]
+    last = always.posts[-1]
+    searches = _search_results(last)
+
+    assert always.error is None
+    assert always.result.response.startswith(
+        f"DONE r={harness_room.TURNS} pairs={2 * harness_room.TURNS}",
+    )
+    compacted = [m for m in searches if harness.is_compacted(m.content)]
+    assert len(compacted) == harness_room.TURNS - 4
+    assert all(not harness.is_compacted(m.content) for m in searches[-4:])
+    assert (
+        max(harness.wire_chars(sent.messages) for sent in always.posts)
+        <= BUDGET_CHARS
+    )
+    events = [report for report in always.harness.reports if report.compacted]
+    assert len(events) > MAX_COMPACTION_EVENTS
+
+
+def test_chain_open_question_state_never_trimmed(arms):
+    # Through the whole chain the RAG question stays open:  boundary
+    # trimming (the default) leaves its evidence alone on every POST,
+    # and the server's snapshot carries it forward.
+    on = arms["on_limited"]
+
+    for turn, sent in enumerate(on.posts[1:], start=1):
+        rag = sent.state[harness_room.RAG_NAMESPACE]
+        assert rag["evidence"]["in_progress"] is True
+        assert sorted(rag["searches"]) == sorted(f"q-{k}" for k in range(turn))
+        assert len(rag["citation_index"]) == turn
+
+    assert all(report.trimmed == [] for report in on.harness.reports)
+
+
+def test_watchdog_closes_a_stuck_client():
+    client = _http()
+    fired = []
+
+    Watchdog(0.01, client, fired)
+    deadline = time.monotonic() + 10
+
+    while not fired:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+    assert client.is_closed
+
+
+def test_arm_finished_runs_polls(monkeypatch):
+    arm = Arm(
+        url="u",
+        room_id="r",
+        thread_id="t",
+        result=client_tools.LoopResult(thread_id="t", run_ids=["a"]),
+        error=None,
+        recorder=Recorder(),
+        harness=harness.Harness(),
+        model_requests=[],
+        elapsed=0.0,
+    )
+    answers = iter(
+        [
+            {"runs": {"a": {"finished": None}}},
+            {"runs": {"a": {"finished": "2026-09-26T00:00:00"}}},
+        ],
+    )
+    monkeypatch.setattr(arm, "get", lambda: next(answers))
+
+    assert arm.finished_runs()["a"]["finished"]

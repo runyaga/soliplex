@@ -556,6 +556,7 @@ def test_ask_remote_w_bad_compaction_fractions(cli_runner, ask_remote):
         ["--output-reserve", "-1"],
         ["--keep-recent", "-1"],
         ["--trim-rag-state", "all"],
+        ["--harness-log", "."],  # a directory
     ],
 )
 def test_ask_remote_w_bad_output_cap(cli_runner, ask_remote, flags):

@@ -1837,7 +1837,7 @@ def _parse_run(
 
 #   Called after every run 'run_loop' makes, with the client and the history
 #   the run left (whose 'run_id' is the run's) -- or, for a run which failed
-#   ('RunFailed'), the history it was sent.
+#   (or whose stream did), the history it was sent.
 AfterRun = abc.Callable[[SoliplexClient, agui_core.RunAgentInput], None]
 
 #   Called before every POST 'run_loop' makes, with the client, the history
@@ -1944,8 +1944,10 @@ def _run_loop(
 
         try:
             run_input = _parse_run(client, run_input, on_event)
-        except RunFailed:
-            # A failed run ends too:  it may have reached the model.
+        except ClientToolsError:
+            # A run which failed, or whose stream did, ends too:  it may
+            # have reached the model (a server runs on when its client
+            # disconnects).
             if after_run is not None:
                 after_run(client, run_input)
             raise

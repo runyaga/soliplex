@@ -24,6 +24,7 @@ working evidence in the state, to check what boundary trimming resends.
 from __future__ import annotations
 
 import collections
+import contextlib
 import dataclasses
 import json
 import socket
@@ -60,15 +61,71 @@ CONTEXT_WINDOW = 40_000
 MAX_COMPACTION_EVENTS = 6
 
 #   A read timeout;  but the server sends a keepalive every 15 seconds,
-#   so a stream which never ends would never time out:  every arm also
-#   has a watchdog, which closes its client after 'WATCHDOG_SECS'.
+#   so a stream which never ends would never time out:  every client also
+#   has a deadline ('Deadline'), 'WATCHDOG_SECS' after it is made.
 HTTP_TIMEOUT = httpx.Timeout(10.0, read=20.0)
 WATCHDOG_SECS = 180.0
 
 
-def _http(**kwargs) -> httpx.Client:
-    """A client for the fixture's server only:  no proxy from the env"""
-    return httpx.Client(timeout=HTTP_TIMEOUT, trust_env=False, **kwargs)
+class DeadlinePassed(httpx.ReadTimeout):
+    """A response still being read when its client's deadline passed"""
+
+
+class Deadline(httpx.HTTPTransport):
+    """A transport whose responses fail once 'secs' have passed
+
+    Checked on every chunk read, keepalives included:  a watchdog which a
+    stream of keepalives cannot outrun.  Each time it stops a response,
+    it records when in 'fired'.
+    """
+
+    def __init__(self, secs: float = WATCHDOG_SECS):
+        super().__init__(trust_env=False)
+        self.started = time.monotonic()
+        self.deadline = self.started + secs
+        self.fired: list[float] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        response = super().handle_request(request)
+        response.stream = _Guarded(self, request, response.stream)
+        return response
+
+
+class _Guarded(httpx.SyncByteStream):
+    def __init__(self, deadline: Deadline, request, stream):
+        self._deadline = deadline
+        self._request = request
+        self._stream = stream
+
+    def __iter__(self):
+        for chunk in self._stream:
+            if time.monotonic() > self._deadline.deadline:
+                self._deadline.fired.append(
+                    time.monotonic() - self._deadline.started,
+                )
+                raise DeadlinePassed("watchdog", request=self._request)
+
+            yield chunk
+
+    def close(self) -> None:
+        self._stream.close()
+
+
+def _http(secs: float = WATCHDOG_SECS, **kwargs) -> httpx.Client:
+    """A client for the fixture's server only:  no proxy from the env,
+    and a deadline ('Deadline';  its transport is the client's
+    '_transport')
+    """
+    return httpx.Client(
+        timeout=HTTP_TIMEOUT,
+        trust_env=False,
+        transport=Deadline(secs),
+        **kwargs,
+    )
+
+
+def _fired(http: httpx.Client) -> list[float]:
+    return http._transport.fired
 
 
 INSTALLATION_YAML = """\
@@ -219,6 +276,7 @@ class Recorder:
     statuses: list[tuple[str, str, int]] = dataclasses.field(
         default_factory=list,
     )
+    http: httpx.Client | None = None
 
     def client(self, url: str, room_id: str) -> client_tools.SoliplexClient:
         def on_response(response: httpx.Response) -> None:
@@ -228,6 +286,7 @@ class Recorder:
             )
 
         http = _http(event_hooks={"response": [on_response]})
+        self.http = http
         client = client_tools.SoliplexClient(url, room_id, http=http)
         stream_run = client.stream_run
 
@@ -238,28 +297,6 @@ class Recorder:
 
         client.stream_run = capturing
         return client
-
-
-class Watchdog:
-    """Closes 'client' after 'secs' (its stream's read then fails at once)
-
-    For a stream which never ends:  the server's keepalives would keep a
-    read timeout from ever firing.  Records when it fired in 'fired'.
-    """
-
-    def __init__(self, secs: float, client, fired: list):
-        started = time.monotonic()
-
-        def bark():
-            fired.append(time.monotonic() - started)
-            client.close()
-
-        self._timer = threading.Timer(secs, bark)
-        self._timer.daemon = True
-        self._timer.start()
-
-    def cancel(self) -> None:
-        self._timer.cancel()
 
 
 def fake_shell(args: dict, context: client_tools.ToolContext) -> dict:
@@ -335,7 +372,6 @@ def run_chain(
     recorder = Recorder()
     context = client_tools.ToolContext(root=root)
     anchors = []
-    watchdog = []
 
     def after_run(client, run_input):
         the_harness.after_run(client, run_input)
@@ -346,8 +382,6 @@ def run_chain(
         run_input = client_tools.initial_run_input(thread, "chain", TOOLS)
         started = time.monotonic()
         error = None
-
-        timer = Watchdog(WATCHDOG_SECS, client, watchdog)
 
         try:
             result = client_tools.run_loop(
@@ -361,12 +395,10 @@ def run_chain(
             )
         except client_tools.ClientToolsError as exc:
             error, result = exc, exc.result
-        finally:
-            timer.cancel()
 
         elapsed = time.monotonic() - started
 
-    assert watchdog == [], "the chain hung, and its watchdog stopped it"
+    assert _fired(recorder.http) == [], "the chain hung:  its deadline passed"
 
     return Arm(
         url=url,
@@ -796,6 +828,7 @@ def test_chain_reconnect_to_a_compacted_run(arms):
         assert response.status_code == 200
         events = _sse_events(response)
 
+    assert _fired(http) == []
     # Exactly the stored events after the cursor, and the model not run
     # again.
     assert [_set_fields(event) for event in events] == [
@@ -875,6 +908,7 @@ def test_chain_orphan_refused_before_sending(arms, server_url, tmp_path):
         assert response.status_code == 200
         types = [event["type"] for event in _sse_events(response)]
 
+    assert _fired(http) == []
     assert types == ["RUN_STARTED", "RUN_ERROR"]
     assert time.monotonic() - started < 20
     assert harness_room.REQUESTS == []  # it never reached the model
@@ -927,6 +961,8 @@ def run_questions(url: str, root, the_harness: harness.Harness) -> Arm:
             )
             responses.append(result.response)
             run_input = result.run_input
+
+    assert _fired(recorder.http) == [], "the questions hung:  deadline passed"
 
     return Arm(
         url=url,
@@ -1157,20 +1193,6 @@ def test_chain_open_question_state_never_trimmed(arms):
     assert all(report.trimmed == [] for report in on.harness.reports)
 
 
-def test_watchdog_closes_a_stuck_client():
-    client = _http()
-    fired = []
-
-    Watchdog(0.01, client, fired)
-    deadline = time.monotonic() + 10
-
-    while not fired:
-        assert time.monotonic() < deadline
-        time.sleep(0.01)
-
-    assert client.is_closed
-
-
 def test_arm_finished_runs_polls(monkeypatch):
     arm = Arm(
         url="u",
@@ -1192,3 +1214,47 @@ def test_arm_finished_runs_polls(monkeypatch):
     monkeypatch.setattr(arm, "get", lambda: next(answers))
 
     assert arm.finished_runs()["a"]["finished"]
+
+
+def test_deadline_stops_an_endless_stream():
+    # A stream which only ever sends keepalives -- which a read timeout
+    # never stops -- is stopped by its client's deadline.
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    host, port = listener.getsockname()
+    stop = threading.Event()
+
+    def serve():
+        conn, _ = listener.accept()
+
+        # Until told to stop, or the client goes.
+        with conn, contextlib.suppress(OSError):
+            conn.recv(65536)
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: text/event-stream\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n",
+            )
+
+            while not stop.wait(0.05):
+                conn.sendall(b"d\r\n: keepalive\n\n\r\n")
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+
+    try:
+        with (
+            _http(secs=0.5) as http,
+            pytest.raises(DeadlinePassed),
+            http.stream("GET", f"http://{host}:{port}/") as response,
+        ):
+            for _ in response.iter_lines():
+                pass
+    finally:
+        stop.set()
+        listener.close()
+        server.join(timeout=5)
+
+    (fired,) = _fired(http)
+    assert 0.5 <= fired < 5

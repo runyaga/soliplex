@@ -42,6 +42,7 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import json
+import logging
 import pathlib
 import re
 import typing
@@ -53,6 +54,8 @@ import httpx
 from ag_ui import core as agui_core
 
 from soliplex.agui import client_tools
+
+_logger = logging.getLogger(__name__)
 
 
 class InconsistentHistory(client_tools.ClientToolsError):
@@ -795,9 +798,16 @@ def resolve_window(
     return None, None
 
 
+#   More tokens than any model has a window for:  not a count to trust.
+MAX_TOKENS = 10**12
+
+
 def _tokens(value) -> int | None:
     """'value' if it is a whole number of tokens (not a bool), else None"""
-    return value if type(value) is int and value >= 0 else None
+    if type(value) is int and 0 <= value <= MAX_TOKENS:
+        return value
+
+    return None
 
 
 def measured_tokens(usage: dict | None) -> int | None:
@@ -1177,11 +1187,18 @@ class ContextMeter:
             try:
                 usage = RunUsage.from_json(run_id, run.get("usage"))
             except UnreadableUsage:
+                _logger.warning(
+                    "Thread run %s has a usage record which cannot be read; "
+                    "no reading is taken from the thread",
+                    run_id,
+                )
                 return
 
             if usage is not None and usage.is_measured:
                 self.measured = usage
                 return
+
+        _logger.info("Thread history carried no measurement")
 
     def fetch_started(self) -> int:
         """Number a usage fetch, as it is asked for"""
@@ -1196,13 +1213,26 @@ class ContextMeter:
         try:
             found = RunUsage.from_json(run_id, usage)
         except UnreadableUsage:
+            _logger.warning(
+                "Run %s's usage record cannot be read; the previous reading "
+                "stands",
+                run_id,
+            )
             return
 
         if found is not None and found.is_measured:
             self.measured = found
+        else:
+            _logger.info(
+                "Run %s reported no measurement (record: %s); the previous "
+                "reading stands",
+                run_id,
+                found is not None,
+            )
 
     def fetch_failed(self, ticket: int) -> None:
         """A fetch which failed:  the previous reading stands"""
+        _logger.warning("Run usage fetch failed; keeping the previous reading")
 
     def warning_due(self) -> bool:
         """Whether to warn now that the thread is nearly full (once)"""
@@ -1285,14 +1315,18 @@ class HarnessLog:
     path: pathlib.Path
 
     def record(self, report: ResendReport) -> None:
+        """Append 'report';  a log which cannot be written fails nothing"""
         entry = {
             "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
             **report.as_json(),
             "notice": compaction_notice(report),
         }
 
-        with pathlib.Path(self.path).open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(entry) + "\n")
+        try:
+            with pathlib.Path(self.path).open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(entry) + "\n")
+        except OSError as exc:
+            _logger.warning("Cannot write the harness log: %s", exc)
 
 
 #
@@ -1334,11 +1368,36 @@ class Harness:
             self.meter = ContextMeter(self.budget.window_tokens)
 
     def compact_next(self) -> None:
-        """Compact every eligible result but the newest, at the next POST
+        """Compact every eligible result but the newest, before the next
+        prompt's first POST
 
-        (Whatever the mode:  e.g. for a UI's '/compact'.)
+        (Whatever the mode:  e.g. for a UI's '/compact'.)  Not undone by a
+        history refused before it is sent.
         """
         self.compact_now = True
+
+    def seed(
+        self,
+        runs: typing.Mapping[str, dict],
+        run_input: agui_core.RunAgentInput | None,
+    ) -> None:
+        """Take the reading, and the budget's anchor, from a loaded thread
+
+        'runs' are the thread's runs, as its REST API lists them, and
+        'run_input' the history rebuilt from them (see 'ContextMeter.seed'
+        and 'ContextBudget.anchor').
+        """
+        self.meter.seed(runs)
+        measured = self.meter.measured
+
+        if measured is not None and run_input is not None:
+            self.budget.anchor(
+                {
+                    "final_input_tokens": measured.final_input_tokens,
+                    "final_output_tokens": measured.final_output_tokens,
+                },
+                wire_chars(run_input.messages),
+            )
 
     def before_post(
         self,
@@ -1372,7 +1431,8 @@ class Harness:
                 run_input = run_input.model_copy(update={"state": state})
 
         chars = wire_chars(messages)
-        indexes = self._to_compact(messages, chars)
+        forced = self.compact_now and first
+        indexes = self._to_compact(messages, chars, forced=forced)
         saved = from_chars = to_chars = 0
         originals = ()
 
@@ -1396,6 +1456,9 @@ class Harness:
 
         if self.pairing_check:
             validate_pairing(messages)
+
+        if forced:
+            self.compact_now = False
 
         report = ResendReport(
             thread_id=run_input.thread_id,
@@ -1436,12 +1499,13 @@ class Harness:
         self,
         messages: abc.Sequence[agui_core.Message],
         chars: int,
+        *,
+        forced: bool,
     ) -> list[int]:
         """The results to compact now, per 'compaction' and 'budget'"""
         policy = self.compaction
 
-        if self.compact_now:
-            self.compact_now = False
+        if forced:
             return compaction_candidates(messages, policy)
 
         if policy.mode == COMPACTION_OFF:

@@ -265,7 +265,8 @@ fixes #555 and #557:
   usage record which cannot be read ends that search: an older run is
   not shown as current. After every run -- every hop of a chain of
   client tool calls, and a run which failed -- the client fetches
-  `GET .../agui/{thread_id}/{run_id}/usage`. A null answer (the run
+  `GET .../agui/{thread_id}/{run_id}/usage` (also when the stream
+  broke: the server runs on without its client). A null answer (the run
   never reached the model), a failed fetch, or a record which cannot be
   read leaves the previous reading as it was: it never goes backwards.
   Fetches are ordered as they were asked for, so an older answer never
@@ -286,9 +287,13 @@ When compaction fires, the response says so, for example
 sizes estimated at 3.5 characters a token), and a collapsed block below
 it holds the full text of each compacted result: the model now sees the
 compacted form, and the full one is a click away. `--harness-log PATH`
-(`SOLIPLEX_TUI_HARNESS_LOG`) appends one JSON line per POST -- the
-history's size, what was compacted or trimmed, the estimate, and that
-notice -- on either client.
+(`SOLIPLEX_TUI_HARNESS_LOG`) appends one JSON line per POST about to be
+sent -- the history's size, what was compacted or trimmed, the estimate,
+and that notice -- on either client. A log which cannot be written is
+reported (as a Python `logging` warning) and fails nothing. Why a
+reading stands -- a failed usage fetch, a run with no measurement, a
+record which cannot be read -- is logged the same way, as the frontend
+logs it.
 
 Two commands, typed as a prompt, are handled by the TUI itself and sent
 nowhere:
@@ -296,7 +301,13 @@ nowhere:
 - `/context` -- what the history holds: messages and characters by role,
   and by tool for tool results (compacted ones apart), and the state;
 - `/compact` -- compact every old, large tool result but the newest
-  `--keep-recent` before the next prompt, whatever `--compaction` says.
+  `--keep-recent` before the next prompt is sent, whatever
+  `--compaction` says (a history refused before it is sent leaves it to
+  do).
+
+One prompt runs at a time: a prompt sent while another is still running
+is refused, since both would build on one history. A reading or a
+compaction notice arriving for a thread no longer shown is dropped.
 
 When a run fails because its request did not fit the window (`token
 limit exceeded`, `maximum context length`, ...), the TUI says so, and

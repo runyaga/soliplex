@@ -2352,6 +2352,27 @@ def test_run_loop_w_failed_run_calls_after_run(root):
     assert seen == server.run_inputs[0]
 
 
+def test_run_loop_w_broken_stream_calls_after_run(root):
+    # A stream which fails (e.g., the connection drops) ends the run for
+    # the client, but the server may run on:  its usage is read too.
+    def handler(request):
+        raise httpx.ReadError("dropped", request=request)
+
+    after = []
+    client = _mock_client(handler)
+    context = client_tools.ToolContext(root=root)
+
+    with pytest.raises(client_tools.TransportFailure):
+        client_tools.run_loop(
+            client,
+            _run_input(),
+            context,
+            after_run=lambda client, run_input: after.append(run_input.run_id),
+        )
+
+    assert after == [RUN_ID]
+
+
 def test_run_loop_w_failed_run_without_after_run(root):
     server = ScriptedServer(
         {RUN_ID: [_started(), {"type": "RUN_ERROR", "message": "boom"}]},

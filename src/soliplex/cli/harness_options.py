@@ -138,6 +138,7 @@ TRIM_RAG_STATE = typer.Option(
 HARNESS_LOG = typer.Option(
     None,
     "--harness-log",
+    dir_okay=False,
     envvar="SOLIPLEX_TUI_HARNESS_LOG",
     help=(
         "Append one JSON line per run's POST (the history's size, what was "

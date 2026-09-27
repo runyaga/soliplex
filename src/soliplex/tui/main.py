@@ -1035,6 +1035,8 @@ class RoomView(t_screen.Screen):
     # What is done to this thread's history before each POST;  made anew
     # for each thread.
     harness: agui_harness.Harness | None = None
+    # Whether a prompt is running:  one at a time.
+    busy: bool = False
 
     def __init__(self, room_id, room_info, *args, **kwargs):
         self.room_id = room_id
@@ -1191,14 +1193,12 @@ class RoomView(t_screen.Screen):
         self.harness = None
         info = self.rest_api.get_thread(self.room_id, thread_id)
 
-        # The reading, from the thread's newest measured run.
+        # The reading (and the budget's anchor), from the thread's newest
+        # measured run:  once its history is rebuilt, below.
         try:
             self.harness = self.app.new_harness(self.room_info)
         except ValueError as exc:  # e.g., a window under the reserve
             self.query_one("#context-meter").update(f"context: {exc}")
-        else:
-            self.harness.meter.seed(info["runs"])
-            self._show_reading(self.harness.meter.reading)
         meta = info.get("metadata")
 
         if meta is not None:
@@ -1242,6 +1242,11 @@ class RoomView(t_screen.Screen):
                 ),
             )
 
+        if self.harness is not None:
+            self.harness.seed(info["runs"], self.run_agent_input)
+            self._show_reading(self.harness.meter.reading, self.harness)
+
+        if self.run_agent_input is not None:
             for message in self.run_agent_input.messages:
                 if message.role == "user":
                     scroller.mount(Prompt(message.content))
@@ -1268,6 +1273,15 @@ class RoomView(t_screen.Screen):
         if await self._slash_command(value.strip()):
             return
 
+        if self.busy:  # one prompt at a time:  they share the history
+            self.notify(
+                "A prompt is still running:  wait for its answer.",
+                severity="warning",
+            )
+            return
+
+        self.busy = True
+
         await chat_view.mount(Prompt(value))
         await chat_view.mount(response := Response())
 
@@ -1287,7 +1301,11 @@ class RoomView(t_screen.Screen):
 
         if command == "/compact":
             if self.harness is None:
-                self.harness = self.app.new_harness(self.room_info)
+                try:
+                    self.harness = self.app.new_harness(self.room_info)
+                except ValueError as exc:  # e.g., a window under the reserve
+                    await chat_view.mount(Response(f"** error ** {exc}"))
+                    return True
 
             self.harness.compact_next()
             await chat_view.mount(
@@ -1326,8 +1344,19 @@ class RoomView(t_screen.Screen):
         )
         return True
 
-    def _show_reading(self, reading: agui_harness.ContextReading) -> None:
-        """Paint the context meter;  warn once when it is nearly full"""
+    def _show_reading(
+        self,
+        reading: agui_harness.ContextReading,
+        harness: agui_harness.Harness | None = None,
+    ) -> None:
+        """Paint the context meter;  warn once when it is nearly full
+
+        Only for the thread shown:  a reading from 'harness' (a thread's)
+        is dropped once another thread, or a new one, is shown.
+        """
+        if harness is not None and harness is not self.harness:
+            return
+
         meter = self.query_one("#context-meter")
         meter.update(reading.text())
 
@@ -1339,7 +1368,7 @@ class RoomView(t_screen.Screen):
         ):
             meter.set_class(reading.level == level, f"level-{level}")
 
-        if self.harness is not None and self.harness.meter.warning_due():
+        if harness is not None and harness.meter.warning_due():
             self.notify(
                 f"{reading.text()}: the model's context window is nearly "
                 "full.  '/compact' compacts old tool results before the "
@@ -1349,8 +1378,18 @@ class RoomView(t_screen.Screen):
                 timeout=15,
             )
 
-    def _show_compacted(self, report: agui_harness.ResendReport) -> None:
-        """Mount the full text of the results a POST compacted, collapsed"""
+    def _show_compacted(
+        self,
+        report: agui_harness.ResendReport,
+        harness: agui_harness.Harness,
+    ) -> None:
+        """Mount the full text of the results a POST compacted, collapsed
+
+        (Only while that harness's thread is shown.)
+        """
+        if harness is not self.harness:
+            return
+
         chat_view = self.query_one("#chat-view")
         results = [
             t_widgets.Collapsible(
@@ -1378,6 +1417,12 @@ class RoomView(t_screen.Screen):
     @textual.work(thread=True)
     def send_agui_prompt(self, prompt: str, response: Response) -> None:
         """Get the AG-UI response in a thread."""
+        try:
+            self._send_agui_prompt(prompt, response)
+        finally:
+            self.busy = False
+
+    def _send_agui_prompt(self, prompt: str, response: Response) -> None:
         self.run_count += 1
 
         if self.run_agent_input is None:
@@ -1455,6 +1500,8 @@ class RoomView(t_screen.Screen):
                 self.app.call_from_thread(response.update, response_content)
                 return
 
+        harness = self.harness
+
         def on_report(report) -> None:
             nonlocal response_content
 
@@ -1466,14 +1513,18 @@ class RoomView(t_screen.Screen):
             if notice is not None:
                 response_content += f"\n\n** {notice} **"
                 self.app.call_from_thread(response.update, response_content)
-                self.app.call_from_thread(self._show_compacted, report)
+                self.app.call_from_thread(
+                    self._show_compacted,
+                    report,
+                    harness,
+                )
 
         def on_reading(reading) -> None:
-            self.app.call_from_thread(self._show_reading, reading)
+            self.app.call_from_thread(self._show_reading, reading, harness)
 
         # This prompt's display:  the harness itself is the thread's.
-        self.harness.on_report = on_report
-        self.harness.on_reading = on_reading
+        harness.on_report = on_report
+        harness.on_reading = on_reading
 
         worker = t_worker.get_current_worker()
 
@@ -1509,14 +1560,16 @@ class RoomView(t_screen.Screen):
                     on_event=on_event,
                     on_tool_result=on_tool_result,
                     tool_log=self.app.tool_log,
-                    before_post=self.harness.before_post,
-                    after_run=self.harness.after_run,
+                    before_post=harness.before_post,
+                    after_run=harness.after_run,
                 )
 
         except client_tools.ClientToolsError as exc:
             # Carry on from the history so far:  a call which already ran
-            # must not be asked for again.
-            self.run_agent_input = exc.result.run_input
+            # must not be asked for again.  (Unless another thread is
+            # shown by now.)
+            if harness is self.harness:
+                self.run_agent_input = exc.result.run_input
 
             if not isinstance(exc, client_tools.RunErrored):  # else shown
                 response_content += f"\n\n** error **\n\n{exc}"
@@ -1532,7 +1585,8 @@ class RoomView(t_screen.Screen):
             self.app.call_from_thread(response.update, response_content)
             return
 
-        self.run_agent_input = result.run_input
+        if harness is self.harness:
+            self.run_agent_input = result.run_input
 
     def _request_confirmation(self, name, args, reply) -> None:
         """Ask, in a dialog, before a client tool call runs (from a thread)"""

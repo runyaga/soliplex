@@ -2259,3 +2259,140 @@ def test_harness_w_a_meter_given():
     meter = harness.ContextMeter(1_000)
 
     assert harness.Harness(meter=meter).meter is meter
+
+
+# -- meter review ------------------------------------------------------------
+
+
+def test_run_usage_w_absurd_count():
+    # Rejected, rather than crash the meter when it divides.
+    with pytest.raises(harness.UnreadableUsage):
+        harness.RunUsage.from_json("r", {"final_input_tokens": 10**400})
+
+    assert harness.measured_tokens({"final_input_tokens": 10**400}) is None
+
+
+def test_context_reading_zero_is_a_measurement():
+    usage = harness.RunUsage.from_json("r", {"final_input_tokens": 0})
+
+    assert usage.is_measured
+    assert harness.ContextReading(0, 1_000).text() == "context 0% (0 / 1,000)"
+    assert harness.ContextReading(0, 1_000).level == harness.LEVEL_OK
+
+
+@pytest.mark.parametrize(
+    "tokens, window, level",
+    [
+        (80, 100, harness.LEVEL_WARNING),  # exactly 0.80
+        (79, 100, harness.LEVEL_OK),
+        (170_000, 200_000, harness.LEVEL_WARNING),  # exactly 0.85
+        (169_999, 200_000, harness.LEVEL_OK),
+        (90, 100, harness.LEVEL_CRITICAL),  # exactly 0.90
+        (180_000, 200_000, harness.LEVEL_CRITICAL),
+    ],
+)
+def test_context_reading_threshold_boundaries(tokens, window, level):
+    assert harness.ContextReading(tokens, window).level == level
+
+
+def test_context_meter_logs_why_a_reading_stands(caplog):
+    meter = harness.ContextMeter(1_000)
+
+    with caplog.at_level("INFO", logger="soliplex.agui.harness"):
+        meter.seed({"r1": {"usage": None}})
+        meter.fetched(meter.fetch_started(), "r2", None)
+        meter.fetched(meter.fetch_started(), "r3", {"final_input_tokens": "x"})
+        meter.fetch_failed(meter.fetch_started())
+        meter.seed({"r4": {"usage": {"final_input_tokens": []}}})
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        "Thread history carried no measurement",
+        "Run r2 reported no measurement (record: False); the previous "
+        "reading stands",
+        "Run r3's usage record cannot be read; the previous reading stands",
+        "Run usage fetch failed; keeping the previous reading",
+        "Thread run r4 has a usage record which cannot be read; no reading "
+        "is taken from the thread",
+    ]
+
+
+def test_harness_log_which_cannot_be_written(tmp_path, caplog):
+    # A directory:  the conversation goes on, and says why nothing logs.
+    log = harness.HarnessLog(tmp_path)
+
+    with caplog.at_level("WARNING", logger="soliplex.agui.harness"):
+        log.record(_report())
+
+    assert "Cannot write the harness log" in caplog.text
+
+
+def test_harness_compact_next_waits_for_a_prompt_start():
+    messages = _history(*_searches(6))
+    the_harness = harness.Harness(
+        compaction=harness.CompactionPolicy(mode=harness.COMPACTION_OFF),
+    )
+    the_harness.compact_next()
+
+    # A continuation of a chain:  not yet.
+    the_harness.before_post(mock.Mock(), _run_input(messages), first=False)
+
+    assert the_harness.reports[-1].compacted == 0
+    assert the_harness.compact_now is True
+
+    # A refused history:  still to do.
+    orphaned = [*messages, _result("t-orphan", "no-call")]
+
+    with pytest.raises(harness.InconsistentHistory):
+        the_harness.before_post(
+            mock.Mock(),
+            _run_input(orphaned),
+            first=True,
+        )
+
+    assert the_harness.compact_now is True
+
+    # The next prompt:  done, once.
+    the_harness.before_post(mock.Mock(), _run_input(messages), first=True)
+
+    assert the_harness.reports[-1].compacted == 2
+    assert the_harness.compact_now is False
+
+
+def test_harness_seed_takes_the_reading_and_the_anchor():
+    run_input = _run_input(_history(*_searches(2)))
+    the_harness = harness.Harness(
+        budget=harness.ContextBudget(window_tokens=262_144),
+    )
+    runs = {
+        "r1": {
+            "created": "2026-09-26T10:00:00",
+            "usage": {
+                "final_input_tokens": 52_548,
+                "final_output_tokens": 418,
+            },
+        },
+    }
+
+    the_harness.seed(runs, run_input)
+
+    assert the_harness.meter.reading.text() == "context 20% (52,966 / 262,144)"
+    assert the_harness.budget.anchor_tokens == 52_966
+    assert the_harness.budget.anchor_chars == harness.wire_chars(
+        run_input.messages,
+    )
+
+
+@pytest.mark.parametrize(
+    "runs, run_input",
+    [
+        ({"r1": {"usage": None}}, _run_input([_user()])),
+        ({"r1": {"usage": {"final_input_tokens": 5}}}, None),
+    ],
+)
+def test_harness_seed_w_nothing_to_anchor(runs, run_input):
+    the_harness = harness.Harness()
+
+    the_harness.seed(runs, run_input)
+
+    assert the_harness.budget.anchor_tokens is None

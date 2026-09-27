@@ -320,6 +320,7 @@ def test_compact_content_shell_success():
         "compacted": True,
         "exit_code": 0,
         "timed_out": False,
+        "truncated": False,
         "stdout_chars": 3000,
         "stderr_chars": 7,
         "note": harness.SHELL_NOTE,
@@ -460,6 +461,8 @@ def test_compact_content_head_tail(tool, content, keep):
 )
 def test_compacted_info_w_uncompacted(content):
     assert harness.compacted_info(content) is None
+    # Only a marker line which parses counts as compacted.
+    assert harness.is_compacted(content) is False
 
 
 def _history(*results, calls=None, start=0):
@@ -1120,3 +1123,191 @@ def test_make_harness_w_context_window():
         "option",
     )
     assert found.budget.output_reserve == harness.DEFAULT_OUTPUT_RESERVE
+
+
+# -- compaction:  review findings --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "keep_recent, min_elide_chars",
+    [(-1, 1024), (4, 0), (4, -5)],
+)
+def test_compaction_policy_w_bad_counts(keep_recent, min_elide_chars):
+    with pytest.raises(harness.InvalidCompactionCounts, match="keep_recent"):
+        harness.CompactionPolicy(
+            keep_recent=keep_recent,
+            min_elide_chars=min_elide_chars,
+        )
+
+
+def test_compact_content_haiku_rag_search_contract():
+    # The real formatter's output, joined as 'search_corpus' joins it.
+    from haiku.rag.store.models import chunk
+
+    results = [
+        chunk.SearchResult(
+            content=f"Body of hit {k}.\n\n---\n\nA rule within it. " * 60,
+            score=0.5,
+            chunk_id=f"chunk-{k}",
+            source="afman",
+            document_title="AFMAN 10-3500\nContent: Vol 2",  # a newline
+            headings=["Chapter 3", f"3.{k}"],
+            labels=["paragraph"],
+            picture_captions={"#/pictures/0": "A map"},
+        )
+        for k in range(1, 4)
+    ]
+    content = "\n\n---\n\n".join(
+        [
+            result.format_for_agent(
+                rank=k,
+                total=4,
+                include_collection=True,
+            )
+            for k, result in enumerate(results, 1)
+        ]
+        + ["Also matched, shown above: [chunk-1] [rank 4 of 4]"],
+    )
+
+    found = harness.compact_content("search", content)
+
+    assert harness.compacted_info(found)["format"] == "headers"
+    skeleton = found.split("\n", 2)[2]
+    blocks = skeleton.split("\n---\n")
+    assert blocks[-1] == "Also matched, shown above: [chunk-1] [rank 4 of 4]"
+    for k, block in enumerate(blocks[:-1], 1):
+        # The whole header block, the multi-line title included.
+        assert block == (
+            f"[chunk-{k}] [rank {k} of 4]\n"
+            "Collection: afman\n"
+            'Source: "AFMAN 10-3500\nContent: Vol 2" > Chapter 3 > '
+            f"3.{k}\n"
+            "Type: paragraph\n"
+            "Figure caption (#/pictures/0): A map"
+        )
+    assert "Body of hit" not in found
+
+
+def test_compact_content_shell_never_as_a_search():
+    # A (non-JSON) shell result shaped like a search is left alone:  its
+    # failure must not be cut away with the "body".
+    content = "[c1] [rank 1 of 1]\nContent:\n" + "x" * 2000 + "\nexit_code=1"
+
+    assert harness.compact_content("shell", content) == content
+
+
+def test_compact_content_shell_w_deep_nesting():
+    # Too deep for the JSON decoder:  left alone, not a failed POST.
+    content = "[" * 10_000 + "0" + "]" * 10_000
+    messages = _history(("shell", content))
+
+    assert harness.compact_content("shell", content) == content
+    assert (
+        harness.compaction_candidates(messages, _always(keep_recent=0)) == []
+    )
+
+
+@pytest.mark.parametrize(
+    "fields, expected",
+    [
+        ({"timed_out": True, "exit_code": -9}, {"timed_out": True}),
+        ({"truncated": True}, {"truncated": True}),
+    ],
+)
+def test_compact_content_shell_keeps_its_flags(fields, expected):
+    content = _shell_json(**fields)
+    content = json.dumps(json.loads(content) | fields)
+
+    body = json.loads(
+        harness.compact_content("shell", content).split("\n", 1)[1],
+    )
+
+    assert body.items() >= expected.items()
+
+
+def test_compact_content_shell_w_bad_truncated():
+    content = json.dumps(json.loads(_shell_json()) | {"truncated": "yes"})
+
+    assert harness.compact_content("shell", content) == content
+
+
+def test_compact_content_original_bytes_are_utf8():
+    content = "\u20ac" * 1000  # 3 bytes each
+
+    found = harness.compact_content("other", content)
+
+    assert harness.compacted_info(found)["original_bytes"] == "3000"
+
+
+def test_compaction_candidates_protects_search_tools():
+    messages = _history(("search_tools", "x" * 5000), ("other", "y" * 5000))
+
+    found = harness.compaction_candidates(messages, _always(keep_recent=0))
+
+    assert found == [4]
+
+
+@pytest.mark.parametrize("size, expected", [(1023, []), (1024, [2])])
+def test_compaction_candidates_at_min_elide_chars(size, expected):
+    messages = _history(("other", "x" * size))
+
+    found = harness.compaction_candidates(messages, _always(keep_recent=0))
+
+    assert found == expected
+
+
+def test_compaction_candidates_keep_recent_counts_only_the_eligible():
+    # Small, protected and compacted results are not among the "recent":
+    # the newest 2 *eligible* results are kept.
+    big = _search_result()
+    messages = _history(
+        ("search", big),
+        ("search", big),
+        ("search", big),
+        ("cite", "x" * 5000),
+        ("search", "small"),
+    )
+
+    found = harness.compaction_candidates(messages, _always(keep_recent=2))
+
+    assert found == [2]
+
+
+def test_harness_before_post_keeps_the_rest_of_the_input():
+    messages = _history(*_searches(6))
+    run_input = agui_core.RunAgentInput(
+        thread_id="thread-1",
+        run_id="run-2",
+        parent_run_id="run-1",
+        state={"rag": {"searches": {"q": [1, 2]}}},
+        messages=messages,
+        tools=[
+            agui_core.Tool(name="shell", description="d", parameters={}),
+        ],
+        context=[agui_core.Context(description="c", value="v")],
+        forwarded_props={"x": 1},
+    )
+    the_harness = harness.Harness(compaction=_always())
+
+    found = the_harness.before_post(mock.Mock(), run_input, first=False)
+
+    assert found.model_dump(exclude={"messages"}) == run_input.model_dump(
+        exclude={"messages"},
+    )
+    assert the_harness.reports[-1].parent_run_id == "run-1"
+    assert the_harness.reports[-1].compacted == 2
+
+
+def test_harness_before_post_compacts_then_checks_pairing():
+    # Compaction never hides an inconsistent history.
+    messages = [*_history(*_searches(6)), _result("t-orphan", "no-call")]
+    the_harness = harness.Harness(compaction=_always())
+
+    with pytest.raises(harness.InconsistentHistory, match="'no-call'"):
+        the_harness.before_post(
+            mock.Mock(),
+            _run_input(messages),
+            first=True,
+        )
+
+    assert the_harness.reports == []

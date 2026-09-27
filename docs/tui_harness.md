@@ -1,9 +1,10 @@
 # TUI Context Harness
 
 `soliplex-tui` and `soliplex-cli ask --url` own their thread's history:
-they send every message, and the AG-UI state, with each run, and the
-room's model reads all of it on every request. In a long, tool-heavy
-thread that history is what fills the model's context window. The
+they send every message, and the AG-UI state, with each run. The room's
+model reads every message on every request (the state is not model
+context: it costs upload and storage, not tokens). In a long, tool-heavy
+thread the messages are what fill the model's context window. The
 *context harness* is what these clients do to the history before each
 POST. The logic lives in `soliplex.agui.harness`, so both clients share
 it; the TUI only adds its display.
@@ -107,9 +108,18 @@ the form:
 `head_tail`, and `original_bytes` the size of the full result, in UTF-8
 bytes. A UI can match the prefix `[compacted by soliplex-tui harness:`
 to show "result compacted" (in Python,
-`soliplex.agui.harness.compacted_info` parses the line). The TUI's own
-chat view is drawn from the run's events as they stream, so it keeps
-showing the full output.
+`soliplex.agui.harness.compacted_info` parses the line).
+
+Where the marker shows today:
+
+- the thread REST API returns each run's `run_input`, compacted results
+  included, marker and all;
+- the TUI's chat view is drawn from each run's events as they stream,
+  so it keeps its own preview of the output; on reload it shows only the
+  user and assistant messages;
+- the Flutter frontend rebuilds a thread from each run's events plus its
+  last user message, not from the `run_input`'s tool messages, so it
+  neither shows the marker nor resends the compacted results.
 
 ### Byte-stable compaction
 

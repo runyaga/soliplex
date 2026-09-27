@@ -337,9 +337,16 @@ Options, all only with `--url`:
 - `--output-cap-bytes N` — the most bytes of each output stream sent to
   the model (default 16384, at least 256).
 - `--output-cap-mode head|head_tail` — how longer output is cut: its start
-  only, or its first 60% and its end with a `...[N bytes omitted]...` line
-  between (default `head_tail`). Both options also read
-  `SOLIPLEX_TUI_OUTPUT_CAP_BYTES` / `SOLIPLEX_TUI_OUTPUT_CAP_MODE`.
+  only, or its start and its end (60% / 40% of the room the
+  `...[N bytes omitted]...` line leaves) (default `head_tail`). Both
+  options also read `SOLIPLEX_TUI_OUTPUT_CAP_BYTES` /
+  `SOLIPLEX_TUI_OUTPUT_CAP_MODE`.
+- `--pairing-check/--no-pairing-check`, `--compaction off|auto|always`,
+  `--keep-recent N`, `--min-elide-chars N`, `--compaction-trigger F`,
+  `--compaction-target F`, `--context-window N`, `--probe-model-window`,
+  `--output-reserve N` — the context harness: see
+  [TUI Context Harness](../tui_harness.md). With `--json`, the output
+  also lists what was done before each POST as `resends`.
 
 A command's failure is **data for the model**, not an error of `ask`: a
 non-zero exit code, a timeout, or a refused path goes back to the model,

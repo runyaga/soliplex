@@ -61,6 +61,10 @@ content:
  "timed_out": false, "truncated": false}
 ```
 
+(Once old and large, a result may be resent compacted: a
+`[compacted by soliplex-tui harness: ...]` line, then JSON with the exit
+code and output sizes. See [TUI Context Harness](../tui_harness.md).)
+
 A non-zero exit is just an `exit_code`. A call that did not run (an
 unknown tool, bad arguments, a refused path, a declined confirmation)
 has `"exit_code": null` and an `"error"`. Even a call to a tool the

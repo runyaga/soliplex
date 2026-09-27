@@ -194,6 +194,14 @@ class InvalidCompactionMode(ValueError):
         )
 
 
+class InvalidCompactionCounts(ValueError):
+    def __init__(self, keep_recent, min_elide_chars):
+        super().__init__(
+            f"Compaction needs keep_recent ({keep_recent}) >= 0 and "
+            f"min_elide_chars ({min_elide_chars}) >= 1",
+        )
+
+
 class InvalidCompactionFractions(ValueError):
     def __init__(self, trigger, target):
         super().__init__(
@@ -230,6 +238,12 @@ class CompactionPolicy:
         if self.mode not in COMPACTION_MODES:
             raise InvalidCompactionMode(self.mode)
 
+        if self.keep_recent < 0 or self.min_elide_chars < 1:
+            raise InvalidCompactionCounts(
+                self.keep_recent,
+                self.min_elide_chars,
+            )
+
         if not 0 < self.target_fraction < self.trigger_fraction <= 1:
             raise InvalidCompactionFractions(
                 self.trigger_fraction,
@@ -238,7 +252,8 @@ class CompactionPolicy:
 
 
 def is_compacted(content: str) -> bool:
-    return content.startswith(COMPACTED_MARKER)
+    """Does 'content' start with a marker line 'compacted_info' can read?"""
+    return _COMPACTED_HEADER.match(content) is not None
 
 
 def compacted_info(content: str) -> dict[str, str] | None:
@@ -278,9 +293,11 @@ def _search_skeleton(content: str) -> str | None:
     """A haiku.rag search result's headers, or None if it is not one
 
     Each hit keeps its whole header block:  every line before its
-    'Content:' (chunk id and rank, then e.g. collection, source, type and
-    figure captions).  A hit already shown ('Also matched, ...') keeps
-    its one line.
+    'Content:' line (chunk id and rank, then e.g. collection, source, type
+    and figure captions).  A hit already shown ('Also matched, ...')
+    keeps its one line.  ('Content:' ends a line of its own, so a header
+    which merely holds the word -- a title with a newline in it -- is not
+    taken for the end of the block.)
     """
     kept = []
 
@@ -291,7 +308,7 @@ def _search_skeleton(content: str) -> str | None:
             kept.append(first)
             continue
 
-        block, found, _ = hit.partition("\nContent:")
+        block, found, _ = hit.partition("\nContent:\n")
 
         if not found or not _SEARCH_HIT_FIRST_LINE.match(first):
             return None
@@ -313,7 +330,7 @@ def _shell_summary(content: str) -> str | None:
     """
     try:
         result = json.loads(content)
-    except ValueError:
+    except (ValueError, RecursionError):  # e.g., '[[[...' nested too deep
         return None
 
     if (
@@ -326,6 +343,7 @@ def _shell_summary(content: str) -> str | None:
             _is_text(result.get(key)) for key in ("stdout", "stderr", "error")
         )
         or not isinstance(result.get("timed_out", False), bool)
+        or not isinstance(result.get("truncated", False), bool)
     ):
         return None
 
@@ -335,6 +353,7 @@ def _shell_summary(content: str) -> str | None:
         "compacted": True,
         "exit_code": result["exit_code"],
         "timed_out": result.get("timed_out", False),
+        "truncated": result.get("truncated", False),
         "stdout_chars": len(stdout),
         "stderr_chars": len(stderr),
     }
@@ -375,8 +394,12 @@ def compact_content(tool: str, content: str) -> str:
     if is_compacted(content):
         return content
 
-    skeleton = _search_skeleton(content)
-    summary = _shell_summary(content) if tool == SHELL_TOOL else None
+    # A 'shell' result is only ever summarized as one:  whatever else it
+    # looks like, its exit status must survive.
+    if tool == SHELL_TOOL:
+        skeleton, summary = None, _shell_summary(content)
+    else:
+        skeleton, summary = _search_skeleton(content), None
 
     if skeleton is not None:
         body, fmt = f"{SEARCH_NOTE}\n{skeleton}", "headers"
@@ -440,12 +463,11 @@ def compaction_candidates(
     if policy.keep_recent:
         eligible = eligible[: -policy.keep_recent]
 
-    def shorter(index: int) -> bool:
+    def shorter(index: int) -> bool:  # as sent:  as JSON
         message = messages[index]
         tool = calls[message.tool_call_id].function.name
-        return len(compact_content(tool, message.content)) < len(
-            message.content,
-        )
+        compacted = compact_content(tool, message.content)
+        return len(json.dumps(compacted)) < len(json.dumps(message.content))
 
     return [index for index in eligible if shorter(index)]
 
@@ -456,7 +478,9 @@ def compact_history(
 ) -> list[agui_core.Message]:
     """A copy of 'messages', the results at 'indexes' compacted
 
-    Only those results' content changes:  every message keeps its id and
+    'indexes' should come from 'compaction_candidates', which is what
+    leaves out protected and encrypted results.  Only those results'
+    content changes:  every message keeps its id and
     place, and every other message (including a result 'compact_content'
     leaves as it is) is the same object.
     """
@@ -475,7 +499,12 @@ def compact_history(
 
 
 def wire_chars(messages: abc.Sequence[agui_core.Message]) -> int:
-    """The size of 'messages' as JSON, in characters"""
+    """The size of 'messages' as JSON, in characters
+
+    A stable measure of what the history costs to send, and of what the
+    model reads:  JSON without null fields, so close to (not exactly)
+    the size of the POST's 'messages'.
+    """
     return len(
         json.dumps(
             [

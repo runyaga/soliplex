@@ -26,6 +26,7 @@ from pydantic_ai import messages as ai_messages
 
 from soliplex import main
 from soliplex.agui import client_tools
+from soliplex.agui import harness
 from soliplex.config import routing as config_routing
 from tests._dburi import sqlite_dburi
 from tests.unit.agui import scripted_shell_room
@@ -2042,6 +2043,125 @@ def test_run_loop_w_before_post_refusing(root):
     assert server.run_inputs == []
     assert exc_info.value.result.run_ids == []
     assert exc_info.value.result.run_input is original
+
+
+def _shell_then_answer(second_run=None):
+    first = [
+        _started(),
+        *_call("c1", "shell", '{"command": "echo hi"}'),
+        _finished(),
+    ]
+    second = second_run or [
+        _started(CHILD_RUN_ID),
+        *_text("a9", "Done."),
+        _finished(CHILD_RUN_ID),
+    ]
+    return ScriptedServer(
+        {RUN_ID: first, CHILD_RUN_ID: second},
+        child_ids=[CHILD_RUN_ID],
+    )
+
+
+def test_run_loop_w_before_post_refusing_second_post(root):
+    server = _shell_then_answer()
+
+    def before_post(client, run_input, *, first):
+        if not first:
+            raise client_tools.ClientToolsError("refused")
+        return run_input
+
+    client = _mock_client(server)
+    context = client_tools.ToolContext(root=root)
+
+    with pytest.raises(client_tools.ClientToolsError) as exc_info:
+        client_tools.run_loop(
+            client,
+            _run_input(),
+            context,
+            before_post=before_post,
+        )
+
+    # Only the first run was sent;  the history to carry on from holds
+    # the call which ran, and its result.
+    assert len(server.run_inputs) == 1
+    result = exc_info.value.result
+    assert result.run_ids == [RUN_ID]
+    (tool_message,) = [
+        message
+        for message in result.run_input.messages
+        if isinstance(message, agui_core.ToolMessage)
+    ]
+    assert tool_message.tool_call_id == "c1"
+    assert json.loads(tool_message.content)["exit_code"] == 0
+
+
+def test_run_loop_w_before_post_then_failed_run(root):
+    server = _shell_then_answer(
+        second_run=[
+            _started(CHILD_RUN_ID),
+            {"type": "RUN_ERROR", "message": "token limit exceeded"},
+        ],
+    )
+
+    def before_post(client, run_input, *, first):
+        return run_input.model_copy(update={"state": {"first": first}})
+
+    client = _mock_client(server)
+    context = client_tools.ToolContext(root=root)
+
+    with pytest.raises(client_tools.RunErrored) as exc_info:
+        client_tools.run_loop(
+            client,
+            _run_input(),
+            context,
+            before_post=before_post,
+        )
+
+    # The history to carry on from is the one the failed run was sent.
+    result = exc_info.value.result
+    assert result.run_ids == [RUN_ID, CHILD_RUN_ID]
+    assert result.run_input == server.run_inputs[-1]
+    assert result.run_input.state == {"first": False}
+    assert [
+        message.tool_call_id
+        for message in result.run_input.messages
+        if isinstance(message, agui_core.ToolMessage)
+    ] == ["c1"]
+
+
+def test_run_loop_w_harness_on_parsed_histories(root):
+    # What the parser builds -- a parent message made up for a call with
+    # none, results of tools the server ran -- passes the pairing check.
+    first = [
+        _started(),
+        *_text("a0", "Looking."),
+        *_call("c1", "shell", '{"command": "echo hi"}'),
+        *_call("c2", "server_tool", "{}"),
+        {
+            "type": "TOOL_CALL_RESULT",
+            "toolCallId": "c2",
+            "messageId": "r2",
+            "content": "server-result",
+        },
+        *_call("c3", "mystery", "{}", parent=None),
+        _finished(),
+    ]
+    server = _shell_then_answer()
+    server.runs[RUN_ID] = first
+    the_harness = harness.Harness()
+    client = _mock_client(server)
+    context = client_tools.ToolContext(root=root)
+
+    found = client_tools.run_loop(
+        client,
+        _run_input(),
+        context,
+        before_post=the_harness.before_post,
+    )
+
+    assert found.response == "Done."
+    _, continuation = server.run_inputs
+    assert harness.pairing_problems(continuation.messages) == []
 
 
 @pytest.mark.parametrize(

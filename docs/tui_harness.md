@@ -19,7 +19,7 @@ can also be set through a `SOLIPLEX_TUI_*` environment variable.
 Before each POST, the client checks that the history's tool calls and
 results pair up:
 
-- message ids, and tool call ids, are unique;
+- tool call ids are unique;
 - every tool result answers a call made by an **earlier** assistant
   message;
 - no call has more than one result;

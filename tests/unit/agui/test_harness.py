@@ -68,10 +68,6 @@ def test_pairing_problems_w_consistent_history():
     "messages, expected",
     [
         (
-            [_user(), _user()],
-            ["duplicate message id 'u1'"],
-        ),
-        (
             [_user(), _assistant("a1", "c1"), _assistant("a2", "c1")],
             [
                 "duplicate tool call id 'c1'",
@@ -119,6 +115,13 @@ def test_pairing_problems(messages, expected):
         "Refusing to send an inconsistent history: " + "; ".join(expected)
     )
     assert isinstance(exc_info.value, client_tools.ClientToolsError)
+
+
+def test_pairing_problems_w_duplicate_message_ids():
+    # Older TUI threads can hold these;  the server does not mind.
+    messages = [_user(), _assistant("a1", content="x"), _user()]
+
+    assert harness.pairing_problems(messages) == []
 
 
 def test_pairing_problems_w_allow_pending():

@@ -1,6 +1,7 @@
 import dataclasses
 import json
 import pathlib
+import uuid
 
 import requests
 import textual
@@ -1141,7 +1142,11 @@ class RoomView(t_screen.Screen):
                 run_id=run_id,
                 state=empty_rai["state"],
                 messages=[
-                    {"id": "user_001", "role": "user", "content": prompt}
+                    {
+                        "id": uuid.uuid4().hex,
+                        "role": "user",
+                        "content": prompt,
+                    },
                 ],
                 tools=[],
                 context=[],
@@ -1160,7 +1165,8 @@ class RoomView(t_screen.Screen):
 
             self.run_agent_input.messages.append(
                 agui_core.UserMessage(
-                    id=f"user_{self.run_count:03}",
+                    # Unique:  a count restarts when a thread is reloaded.
+                    id=uuid.uuid4().hex,
                     content=prompt,
                 )
             )

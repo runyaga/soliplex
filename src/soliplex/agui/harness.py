@@ -47,7 +47,7 @@ def pairing_problems(
 ) -> list[str]:
     """What makes 'messages' a history the server cannot load, if anything
 
-    - message ids, and tool call ids, must be unique;
+    - tool call ids must be unique (results are matched to calls by id);
     - every tool result must answer a call made by an *earlier* assistant
       message (else pydantic-ai fails the run:  'Tool call with ID ...
       not found in the history');
@@ -55,18 +55,16 @@ def pairing_problems(
     - unless 'allow_pending', every call must have its result (the server
       would silently drop a trailing unanswered call, and fail on any
       other).
+
+    Message ids are not checked:  the server does not rely on them, and
+    older TUI threads can hold duplicate user-message ids, which must not
+    stop the thread going on.
     """
     problems: list[str] = []
-    message_ids: set[str] = set()
     calls: dict[str, str] = {}  # call id -> tool name
     answered: set[str] = set()
 
     for message in messages:
-        if message.id in message_ids:
-            problems.append(f"duplicate message id {message.id!r}")
-
-        message_ids.add(message.id)
-
         if isinstance(message, agui_core.AssistantMessage):
             for call in message.tool_calls or ():
                 if call.id in calls:

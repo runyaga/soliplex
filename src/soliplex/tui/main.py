@@ -1197,7 +1197,12 @@ class RoomView(t_screen.Screen):
             self.app.call_from_thread(response.update, response_content)
 
         if self.harness is None:
-            self.harness = self.app.new_harness(self.room_info)
+            try:
+                self.harness = self.app.new_harness(self.room_info)
+            except ValueError as exc:  # e.g., a window under the reserve
+                response_content += f"\n\n** error **\n\n{exc}"
+                self.app.call_from_thread(response.update, response_content)
+                return
 
         worker = t_worker.get_current_worker()
 

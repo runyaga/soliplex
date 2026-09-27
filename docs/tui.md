@@ -61,6 +61,11 @@ Options:
   `...[N bytes omitted]...` line between -- the line counts toward the
   cap, and no character is cut in two (default: `head_tail`, since errors
   are usually at the end; `SOLIPLEX_TUI_OUTPUT_CAP_MODE`)
+- `--pairing-check/--no-pairing-check`, `--compaction off|auto|always`,
+  `--keep-recent N`, `--min-elide-chars N`, `--compaction-trigger F`,
+  `--compaction-target F`, `--context-window N`, `--probe-model-window`,
+  `--output-reserve N`, `--trim-rag-state off|boundary|aggressive` -- the
+  [context harness](tui_harness.md)
 - `--auto-approve` / `--yolo` -- run client tool calls **without asking**
   (default: off; see [Auto-approve](#auto-approve))
 - `-V` / `--version` -- print the version and exit

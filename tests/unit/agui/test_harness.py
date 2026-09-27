@@ -867,7 +867,8 @@ def test_context_budget_usable_and_fraction():
     budget = harness.ContextBudget(window_tokens=10_000, output_reserve=2_000)
 
     assert budget.usable_tokens == 8_000
-    assert budget.fraction(2_000) == 0.25
+    # A meter's reading:  of the whole window, not of what is usable.
+    assert budget.fraction(2_000) == 0.2
 
 
 @pytest.mark.parametrize(
@@ -1495,13 +1496,22 @@ def test_trim_rag_state_mid_question():
 
 
 def test_trim_rag_state_w_several_namespaces():
-    # Any namespace of that shape, not just 'rag'.
-    state = {"rag": _rag(False), "rag_b": _rag(False), "rag_c": _rag(True)}
+    # Any namespace of that shape, not just 'rag';  but not one lacking
+    # a 'citation_index'.
+    unrelated = _rag(False)
+    del unrelated["citation_index"]
+    state = {
+        "rag": _rag(False),
+        "rag_b": _rag(False),
+        "rag_c": _rag(True),
+        "other": unrelated,
+    }
 
     found, names = harness.trim_rag_state(state, harness.TRIM_BOUNDARY)
 
     assert names == ["rag", "rag_b"]
     assert found["rag_c"] is state["rag_c"]
+    assert found["other"] is state["other"]
 
 
 @pytest.mark.parametrize(
@@ -1510,12 +1520,24 @@ def test_trim_rag_state_w_several_namespaces():
         None,
         [],
         {"rag": "text"},
-        {"rag": {"searches": {"q": []}}},  # no evidence
-        {"rag": {"searches": {"q": []}, "evidence": []}},
-        {"rag": {"searches": {"q": []}, "evidence": {"in_progress": "no"}}},
+        {"rag": {"searches": {"q": []}, "citation_index": {}}},  # no evidence
+        {"rag": {"searches": {"q": []}, "citation_index": {}, "evidence": []}},
+        {
+            "rag": {
+                "searches": {"q": []},
+                "citation_index": {},
+                "evidence": {"in_progress": "no"},
+            },
+        },
         {"rag": {"searches": [1], "evidence": {"in_progress": False}}},
         # Already trimmed, and fields missing:  nothing to do.
-        {"rag": {"searches": {}, "evidence": {"in_progress": False}}},
+        {
+            "rag": {
+                "searches": {},
+                "citation_index": {},
+                "evidence": {"in_progress": False},
+            },
+        },
     ],
 )
 def test_trim_rag_state_w_nothing_to_trim(state):
@@ -1627,9 +1649,33 @@ def test_measured_tokens_w_bad_usage(usage):
 
 
 def test_measured_tokens_w_bad_output_tokens():
-    usage = {"final_input_tokens": 100, "final_output_tokens": "20"}
+    # A record which cannot be read reports nothing:  not an undercount.
+    usage = {"final_input_tokens": 100, "final_output_tokens": "8000"}
 
-    assert harness.measured_tokens(usage) == 100
+    assert harness.measured_tokens(usage) is None
+
+    budget = harness.ContextBudget(anchor_tokens=9_000, anchor_chars=10)
+    budget.anchor(usage, 20)
+
+    assert (budget.anchor_tokens, budget.stale) == (9_000, True)
+
+
+def test_probe_model_window_w_zero_window():
+    # No window, rather than a budget refused.
+    body = {"data": [{"id": "glimmer", "max_model_len": 0}]}
+    room_info = _vllm_room()
+
+    found = harness.probe_model_window(
+        room_info,
+        _models_http(lambda request: httpx.Response(200, json=body)),
+    )
+
+    assert found is None
+
+    with mock.patch.object(harness, "probe_model_window", return_value=None):
+        the_harness = harness.make_harness(room_info, probe_window=True)
+
+    assert the_harness.budget.window_tokens is None
 
 
 @pytest.mark.parametrize(
@@ -1753,3 +1799,13 @@ def test_compaction_candidates_counts_utf8_bytes():
 def test_unanswered_error_says_the_outcome_is_unknown():
     assert "unknown" in harness.UNANSWERED_ERROR
     assert "not run" not in harness.UNANSWERED_ERROR
+
+
+def test_trim_rag_state_aggressive_is_idempotent_mid_question():
+    state = {"rag": _rag(True)}
+
+    once, _ = harness.trim_rag_state(state, harness.TRIM_AGGRESSIVE)
+    again, names = harness.trim_rag_state(once, harness.TRIM_AGGRESSIVE)
+
+    assert again is once
+    assert names == []

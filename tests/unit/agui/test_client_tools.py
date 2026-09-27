@@ -2324,6 +2324,45 @@ def test_run_loop_w_before_post_then_failed_run(root):
     ] == ["c1"]
 
 
+def test_run_loop_w_failed_run_calls_after_run(root):
+    # A failed run ends too:  'after_run' sees it (e.g., to re-read the
+    # usage), with the history it was sent.
+    server = ScriptedServer(
+        {
+            RUN_ID: [
+                _started(),
+                {"type": "RUN_ERROR", "message": "token limit exceeded"},
+            ],
+        },
+    )
+    after = []
+    client = _mock_client(server)
+    context = client_tools.ToolContext(root=root)
+
+    with pytest.raises(client_tools.RunErrored):
+        client_tools.run_loop(
+            client,
+            _run_input(),
+            context,
+            after_run=lambda client, run_input: after.append(run_input),
+        )
+
+    (seen,) = after
+    assert seen.run_id == RUN_ID
+    assert seen == server.run_inputs[0]
+
+
+def test_run_loop_w_failed_run_without_after_run(root):
+    server = ScriptedServer(
+        {RUN_ID: [_started(), {"type": "RUN_ERROR", "message": "boom"}]},
+    )
+    client = _mock_client(server)
+    context = client_tools.ToolContext(root=root)
+
+    with pytest.raises(client_tools.RunErrored):
+        client_tools.run_loop(client, _run_input(), context)
+
+
 def test_run_loop_w_harness_on_parsed_histories(root):
     # What the parser builds -- a parent message made up for a call with
     # none, results of tools the server ran -- passes the pairing check.

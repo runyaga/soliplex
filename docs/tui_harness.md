@@ -174,8 +174,12 @@ messages.
 
 Trimming is idempotent: a trimmed namespace is left as it is. The server
 sends the whole state back after each run (`STATE_SNAPSHOT`), which
-holds only the current question's evidence, so what is resent stays
-bounded by one question's worth.
+holds only the current question's working evidence, so the working
+evidence resent stays bounded by one question's worth. (What is kept --
+`citation_index` and the `evidence` ledger -- still grows, slowly, with
+each question.) A namespace is taken for haiku.rag's only if it has a
+`citation_index`, `searches`, and an `evidence` record saying
+`in_progress`.
 
 ## Context budget
 
@@ -197,7 +201,10 @@ The **window** comes from, in order:
    server directly from the client, so it is off by default;
 4. otherwise it is unknown, and `auto` compacts nothing. There is no
    default: a guess (pydantic-ai-harness uses 200k) is badly wrong for
-   a 98k local model.
+   a 98k local model. (The design first had `auto` fall back to `always`
+   here; compacting every turn busts a model server's prefix cache every
+   turn, so it compacts nothing instead.) A model server reporting a
+   window of 0 counts as reporting none.
 
 `--output-reserve` tokens of the window are kept for the reply; the
 fractions apply to the rest. A window no larger than the reserve is
@@ -215,7 +222,9 @@ Before the first measurement it is the history's
 size at 3.5 characters a token, which leaves out the system prompt and
 tool definitions. A run with no usage (e.g., it failed) keeps the last
 anchor, marked stale; so does a usage the client cannot read (an HTTP
-error, a body which is not a usage record). Neither fails the run. The
+error, a body which is not a usage record, a count which is not a
+number). None of these fails the run. A run which fails is asked for
+its usage too: it may have reached the model. The
 usage is read after every run, so in a chain of client tool calls the
 anchor moves on with each hop.
 

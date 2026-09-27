@@ -1835,8 +1835,9 @@ def _parse_run(
     return esp.as_run_agent_input
 
 
-#   Called after every run 'run_loop' makes which finishes, with the client
-#   and the history the run left (whose 'run_id' is the run's).
+#   Called after every run 'run_loop' makes, with the client and the history
+#   the run left (whose 'run_id' is the run's) -- or, for a run which failed
+#   ('RunFailed'), the history it was sent.
 AfterRun = abc.Callable[[SoliplexClient, agui_core.RunAgentInput], None]
 
 #   Called before every POST 'run_loop' makes, with the client, the history
@@ -1882,7 +1883,7 @@ def run_loop(
     'before_post', if given, sees each history before it is sent, and
     returns the one to send (see 'BeforePost'):  what it returns is the
     history the run continues, and the result carries.  'after_run', if
-    given, sees the history each run which finishes leaves.
+    given, sees the history each run leaves (or, if it failed, was sent).
 
     Returns the result, whose 'run_input' is the final history (e.g., for
     the TUI's next prompt).  A 'ClientToolsError' carries the result so
@@ -1941,7 +1942,13 @@ def _run_loop(
         result.run_ids.append(run_input.run_id)
         previous_ids = {message.id for message in run_input.messages}
 
-        run_input = _parse_run(client, run_input, on_event)
+        try:
+            run_input = _parse_run(client, run_input, on_event)
+        except RunFailed:
+            # A failed run ends too:  it may have reached the model.
+            if after_run is not None:
+                after_run(client, run_input)
+            raise
 
         if after_run is not None:
             after_run(client, run_input)

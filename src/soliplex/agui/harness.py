@@ -630,11 +630,14 @@ def _rag_state_in_progress(value) -> bool | None:
     """For a haiku.rag 'RAGState' dump, whether its question is open
 
     None if 'value' is not one:  a dict with an 'evidence' record saying
-    'in_progress', and 'searches'.  (Keyed by any name:  a room may have
-    several RAG capabilities, each its own state namespace.)
+    'in_progress', 'searches' and a 'citation_index'.  (Keyed by any
+    name:  a room may have several RAG capabilities, each its own state
+    namespace.)
     """
-    if not isinstance(value, dict) or not isinstance(
-        value.get("searches"), dict
+    if (
+        not isinstance(value, dict)
+        or not isinstance(value.get("searches"), dict)
+        or not isinstance(value.get("citation_index"), dict)
     ):
         return None
 
@@ -746,7 +749,8 @@ def probe_model_window(
 
     for model in models:
         if isinstance(model, dict) and model.get("id") == model_name:
-            return _tokens(model.get("max_model_len"))
+            window = _tokens(model.get("max_model_len"))
+            return window or None  # a window of 0 tokens is no window
 
     return None
 
@@ -792,17 +796,26 @@ def measured_tokens(usage: dict | None) -> int | None:
     'final_input_tokens + final_output_tokens':  the last request's input,
     plus the reply it made, which the next request carries.  (Never the
     cumulative 'input_tokens', which counts every request of the run.)
-    None if the run recorded no usage, or not those (or not as numbers).
+    None if the run recorded no usage, or not those, or not as numbers:
+    a record which cannot be read reports nothing.  (A missing, or null,
+    'final_output_tokens' counts as none.)
     """
     if not isinstance(usage, dict):
         return None
 
     final_input = _tokens(usage.get("final_input_tokens"))
+    final_output = usage.get("final_output_tokens")
+
+    if final_output is not None:
+        final_output = _tokens(final_output)
+
+        if final_output is None:
+            return None
 
     if final_input is None:
         return None
 
-    return final_input + (_tokens(usage.get("final_output_tokens")) or 0)
+    return final_input + (final_output or 0)
 
 
 class InvalidContextBudget(ValueError):
@@ -874,13 +887,15 @@ class ContextBudget:
         self.stale = False
 
     def fraction(self, tokens: int) -> float | None:
-        """'tokens' as a fraction of the usable window;  None if unknown"""
-        usable = self.usable_tokens
+        """'tokens' as a fraction of the whole window;  None if unknown
 
-        if not usable:
+        (What a context meter shows.  Compaction's marks are fractions of
+        'usable_tokens' instead.)
+        """
+        if self.window_tokens is None:
             return None
 
-        return tokens / usable
+        return tokens / self.window_tokens
 
 
 @dataclasses.dataclass(frozen=True)

@@ -320,3 +320,13 @@ answer). It checks the pairing of every POST (and that the server's
 byte between batches, the marker in what the server stores, reconnecting
 to a compacted run, an orphaned result refused before sending, and,
 over 20 questions, the RAG state trimmed at each boundary.
+
+The TUI's own display is exempt from the coverage bar, but
+`tests/tui/test_tui_pilot.py` drives the real TUI against the same
+scripted rooms with Textual's pilot -- the meter, the compaction notice
+and its collapsed results, `/context`, and a multi-line prompt pasted
+whole. It needs the `tui` group, so it is run apart from the unit suite:
+
+```bash
+uv run --group tui pytest --no-cov tests/tui
+```

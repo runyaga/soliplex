@@ -1,6 +1,10 @@
 import dataclasses
 import json
+import os
 import pathlib
+import shlex
+import subprocess
+import tempfile
 import uuid
 
 import requests
@@ -10,6 +14,8 @@ from ag_ui import core as agui_core
 from textual import app as t_app
 from textual import binding as t_binding
 from textual import containers as t_containers
+from textual import events as t_events
+from textual import message as t_message
 from textual import reactive as t_reactive
 from textual import screen as t_screen
 from textual import widget as t_widget
@@ -857,6 +863,92 @@ class MCPTokenView(t_screen.Screen):
         yield t_widgets.Footer()
 
 
+INPUT_SINGLE = "single"
+INPUT_MULTI = "multi"
+INPUT_MODES = (INPUT_SINGLE, INPUT_MULTI)
+
+PROMPT_PLACEHOLDER = "How can I help you?"
+MULTI_LINE_PLACEHOLDER = (
+    "How can I help you?  (Enter sends;  Ctrl+J or Alt+Enter, a new line; "
+    " Ctrl+E, edit in $EDITOR)"
+)
+
+
+class PromptArea(t_widgets.TextArea):
+    """A multi-line prompt
+
+    Enter sends it ('Submitted');  Ctrl+J or Alt+Enter starts a new line
+    (Shift+Enter cannot be told from Enter in most terminals);  a paste
+    keeps its newlines (a single-line 'Input' keeps only its first
+    line);  Ctrl+E edits it in '$VISUAL' / '$EDITOR'.
+    """
+
+    DEFAULT_CSS = """
+    PromptArea {
+        height: auto;
+        min-height: 3;
+        max-height: 12;
+    }
+    """
+
+    BINDINGS = [
+        t_binding.Binding("ctrl+e", "edit_in_editor", "Editor", show=False),
+    ]
+
+    class Submitted(t_message.Message):
+        def __init__(self, prompt_area: "PromptArea", value: str):
+            self.prompt_area = prompt_area
+            self.value = value
+            super().__init__()
+
+    #   Textual calls each class's handler in turn ('TextArea''s after
+    #   these), unless one prevents the default:  so none calls 'super()'.
+    def _on_paste(self, event: t_events.Paste) -> None:
+        event.stop()  # 'TextArea' inserts it, once:  it goes no further
+
+    async def _on_key(self, event: t_events.Key) -> None:
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+
+            if self.text.strip():
+                self.post_message(self.Submitted(self, self.text))
+
+            return
+
+        if event.key in ("ctrl+j", "alt+enter"):
+            event.stop()
+            event.prevent_default()
+            self.insert("\n")
+
+    def action_edit_in_editor(self) -> None:
+        """Edit the prompt in the user's editor, the TUI suspended"""
+        editor = (
+            os.environ.get("VISUAL")
+            or os.environ.get("EDITOR")
+            or ("notepad" if os.name == "nt" else "vi")
+        )
+
+        with tempfile.NamedTemporaryFile(
+            "w",
+            suffix=".md",
+            delete=False,
+            encoding="utf-8",
+        ) as stream:
+            stream.write(self.text)
+
+        path = pathlib.Path(stream.name)
+
+        try:
+            with self.app.suspend():
+                subprocess.run([*shlex.split(editor), str(path)], check=False)
+
+            self.text = path.read_text(encoding="utf-8").rstrip("\n")
+            self.move_cursor(self.document.end)
+        finally:
+            path.unlink(missing_ok=True)
+
+
 class Prompt(t_widgets.Markdown):
     """Markdown for the user prompt."""
 
@@ -891,7 +983,7 @@ class RoomView(t_screen.Screen):
         t_binding.Binding("escape", "app.pop_screen", "Exit"),
     ]
 
-    AUTO_FOCUS = "Input"
+    AUTO_FOCUS = "#prompt"
     CSS = """
     Prompt {
         background: $primary 10%;
@@ -989,7 +1081,11 @@ class RoomView(t_screen.Screen):
             for suggestion in room_info["suggestions"]:
                 yield t_widgets.Static(f"- {suggestion}")
 
-        yield t_widgets.Input(placeholder="How can I help you?")
+        if self.app.input_mode == INPUT_MULTI:
+            yield PromptArea(id="prompt", placeholder=MULTI_LINE_PLACEHOLDER)
+        else:
+            yield t_widgets.Input(id="prompt", placeholder=PROMPT_PLACEHOLDER)
+
         yield t_widgets.Footer()
 
     def on_mount(self) -> None:
@@ -1154,19 +1250,28 @@ class RoomView(t_screen.Screen):
                 ):
                     scroller.mount(Response(message.content))
 
-    @textual.on(t_widgets.Input.Submitted)
+    @textual.on(t_widgets.Input.Submitted, "#prompt")
     async def on_input(self, event: t_widgets.Input.Submitted) -> None:
-        """When the user hits return."""
-        chat_view = self.query_one("#chat-view")
+        """When the user hits return (single-line input)."""
         event.input.clear()
+        await self._submit(event.value)
 
-        if await self._slash_command(event.value.strip()):
+    @textual.on(PromptArea.Submitted)
+    async def on_prompt_submitted(self, event: PromptArea.Submitted) -> None:
+        """When the user hits return (multi-line input)."""
+        event.prompt_area.clear()
+        await self._submit(event.value)
+
+    async def _submit(self, value: str) -> None:
+        chat_view = self.query_one("#chat-view")
+
+        if await self._slash_command(value.strip()):
             return
 
-        await chat_view.mount(Prompt(event.value))
+        await chat_view.mount(Prompt(value))
         await chat_view.mount(response := Response())
 
-        self.send_agui_prompt(event.value, response)
+        self.send_agui_prompt(value, response)
 
     async def _slash_command(self, command: str) -> bool:
         """Handle '/context' or '/compact', locally;  whether it was one"""
@@ -1195,8 +1300,15 @@ class RoomView(t_screen.Screen):
             return True
 
         rows = agui_harness.context_breakdown(self.run_agent_input)
+
+        def tokens(label: str, chars: int) -> str:
+            # The state is uploaded, but is not model context.
+            return (
+                "(not context)" if label == "state" else f"~{chars / 3.5:,.0f}"
+            )
+
         table = "\n".join(
-            f"| {label} | {count} | {chars:,} | ~{chars / 3.5:,.0f} |"
+            f"| {label} | {count} | {chars:,} | {tokens(label, chars)} |"
             for label, count, chars in rows
         )
         reading = (
@@ -1255,8 +1367,8 @@ class RoomView(t_screen.Screen):
             t_widgets.Collapsible(
                 *results,
                 title=(
-                    f"{agui_harness.compaction_notice(report)}: the model "
-                    "now sees headers and summaries; expand for the full text"
+                    f"{agui_harness.compaction_notice(report)} -- expand "
+                    "for the full text"
                 ),
                 collapsed=True,
                 classes="compacted-results",
@@ -1660,6 +1772,7 @@ class SoliplexTUI(t_app.App):
         tool_log: client_tools.ToolLog | None = None,
         auto_approve: bool = False,
         harness_options: dict | None = None,
+        input_mode: str = INPUT_MULTI,
         *args,
         **kw,
     ):
@@ -1684,6 +1797,8 @@ class SoliplexTUI(t_app.App):
         # where each POST's report is logged ('--harness-log'), if at all.
         self.harness_options = dict(harness_options or {})
         self.log_report = self.harness_options.pop("on_report", None)
+        # A multi-line prompt ('PromptArea'), or a single-line 'Input'.
+        self.input_mode = input_mode
         self.rest_api = rest_api.TUI_REST_API(soliplex_url)
         self._oidc_providers = None
 

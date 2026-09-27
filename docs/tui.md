@@ -67,6 +67,8 @@ Options:
   `--output-reserve N`, `--trim-rag-state off|boundary|aggressive`,
   `--harness-log PATH` -- the [context harness](tui_harness.md), whose
   context meter the room view shows
+- `--input-mode multi|single` -- the prompt (default: `multi`;
+  `SOLIPLEX_TUI_INPUT_MODE`): see [The prompt](#the-prompt)
 - `--auto-approve` / `--yolo` -- run client tool calls **without asking**
   (default: off; see [Auto-approve](#auto-approve))
 - `-V` / `--version` -- print the version and exit
@@ -112,6 +114,25 @@ Viewing a run:
 
 - `ctrl+f` -- submit feedback on the run
 - `ctrl+z` -- edit run metadata
+
+### The prompt
+
+The prompt is multi-line (`--input-mode multi`, the default):
+
+- `enter` -- send it;
+- `ctrl+j` or `alt+enter` -- start a new line (most terminals cannot tell
+  `shift+enter` from `enter`);
+- a paste keeps its newlines: the whole text is sent (a single-line
+  prompt keeps only a paste's first line);
+- `ctrl+e` -- edit it in `$VISUAL` / `$EDITOR` (the TUI is suspended
+  until the editor exits).
+
+`--input-mode single` keeps the older single-line prompt.
+
+Under the room and thread names, the room view shows the
+[context meter](tui_harness.md#the-context-meter). Typed as a prompt,
+`/context` and `/compact` are handled by the TUI itself: see
+[TUI Context Harness](tui_harness.md#the-context-meter).
 
 ## Client tools
 

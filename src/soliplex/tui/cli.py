@@ -1,6 +1,7 @@
 import pathlib
 from importlib.metadata import version
 
+import click
 import typer
 from rich import console
 
@@ -115,6 +116,16 @@ def tui(
     output_reserve: int = harness_options.OUTPUT_RESERVE,
     trim_rag_state: str = harness_options.TRIM_RAG_STATE,
     harness_log: pathlib.Path | None = harness_options.HARNESS_LOG,
+    input_mode: str = typer.Option(
+        main.INPUT_MULTI,
+        "--input-mode",
+        click_type=click.Choice(main.INPUT_MODES),
+        envvar="SOLIPLEX_TUI_INPUT_MODE",
+        help=(
+            "The prompt:  'multi' line (Enter sends, Ctrl+J or Alt+Enter a "
+            "new line, pastes keep their newlines), or 'single' line."
+        ),
+    ),
     auto_approve: bool = typer.Option(
         False,
         "--auto-approve",
@@ -167,6 +178,7 @@ def tui(
         ),
         auto_approve=auto_approve,
         harness_options=options,
+        input_mode=input_mode,
     )
 
     tui_app.run()

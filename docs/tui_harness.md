@@ -233,3 +233,21 @@ before each POST: the history's size in characters (`resend_chars`,
 `state_chars`), how many results it compacted (`compacted`, saving
 `compacted_chars`; `compacted_total` in all), the estimate
 (`est_tokens`) and the window (`window_tokens`, `window_source`).
+
+## How it is tested
+
+Besides unit tests of each piece, `tests/unit/agui/test_harness_e2e.py`
+runs the harness end to end, with no LLM and no network: a real Soliplex
+app, with scripted `FunctionModel` rooms (`tests/unit/agui/harness_room.py`),
+served by uvicorn on a loopback socket, driven by `client_tools.run_loop`
+as `ask --url` and the TUI drive it. A 20-run chain, each run adding a
+10.6 KB search result and a client `shell` result, is run with
+compaction off (over twice the budget; with a simulated 150,000-character
+model window it fails with `Model token limit exceeded`, promptly) and
+with `auto` (under the budget, compacted in a few batches, with the same
+answer). It checks the pairing of every POST (and that the server's
+`AGUIAdapter.load_messages` takes it), that every POST is accepted,
+`parent_run_id` and the run order, that the history is resent byte for
+byte between batches, the marker in what the server stores, reconnecting
+to a compacted run, an orphaned result refused before sending, and,
+over 20 questions, the RAG state trimmed at each boundary.

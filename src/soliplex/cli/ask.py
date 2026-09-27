@@ -370,6 +370,26 @@ def ask(
             "are left out;  'SOLIPLEX_TOKEN' always is."
         ),
     ),
+    output_cap_bytes: int = typer.Option(
+        client_tools.DEFAULT_OUTPUT_CAP_BYTES,
+        "--output-cap-bytes",
+        min=client_tools.MIN_OUTPUT_CAP_BYTES,
+        envvar="SOLIPLEX_TUI_OUTPUT_CAP_BYTES",
+        help=(
+            "With '--url': the most bytes of each output stream of a "
+            "client tool call sent to the model."
+        ),
+    ),
+    output_cap_mode: str = typer.Option(
+        client_tools.DEFAULT_OUTPUT_CAP_MODE,
+        "--output-cap-mode",
+        click_type=click.Choice(client_tools.OUTPUT_CAP_MODES),
+        envvar="SOLIPLEX_TUI_OUTPUT_CAP_MODE",
+        help=(
+            "With '--url': how longer output is cut -- keep its start "
+            "('head'), or its start and its end ('head_tail')."
+        ),
+    ),
 ):
     """Send a single prompt to a room's agent and print the response.
 
@@ -402,6 +422,8 @@ def ask(
                 root=root,
                 allow_anywhere=allow_anywhere,
                 timeout_secs=tool_timeout,
+                output_cap_bytes=output_cap_bytes,
+                output_cap_mode=output_cap_mode,
                 pass_env=pass_env,
             )
             result = _ask_remote(

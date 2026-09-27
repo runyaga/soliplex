@@ -367,6 +367,10 @@ def test_ask_remote_w_options(cli_runner, ask_remote, tmp_path):
             "--tool-log",
             str(log_path),
             "--pass-env",
+            "--output-cap-bytes",
+            "1000",
+            "--output-cap-mode",
+            "head",
         ],
     )
 
@@ -380,8 +384,25 @@ def test_ask_remote_w_options(cli_runner, ask_remote, tmp_path):
         root=root,
         allow_anywhere=True,
         timeout_secs=5.0,
+        output_cap_bytes=1000,
+        output_cap_mode="head",
         pass_env=True,
     )
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [["--output-cap-bytes", "255"], ["--output-cap-mode", "tail"]],
+)
+def test_ask_remote_w_bad_output_cap(cli_runner, ask_remote, flags):
+    result = cli_runner.invoke(
+        cli_ask.app,
+        ["--url", URL, "room", "hi", *flags],
+    )
+
+    assert result.exit_code == 2
+    assert flags[0] in _plain(result.stderr)
+    ask_remote.assert_not_called()
 
 
 def test_ask_remote_w_token_from_env(cli_runner, ask_remote, monkeypatch):

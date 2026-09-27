@@ -109,8 +109,11 @@ network access**. Its safeguards:
   it started (its process group on POSIX, its process tree on Windows),
   after `--tool-timeout` seconds (default 60) — and at once if the client
   is interrupted (Ctrl-C) or cancelled while it runs.
-- **Output cap.** Each of stdout and stderr is capped (16 KiB by default)
-  before it is sent to the model; the result says `"truncated": true`.
+- **Output cap.** Each of stdout and stderr is capped (16 KiB by default,
+  `--output-cap-bytes`) before it is sent to the model; by default the
+  start and the end of the stream are kept, with a
+  `...[N bytes omitted]...` line between (`--output-cap-mode head` keeps
+  the start only). The result says `"truncated": true`.
 - **Confirmation.** `soliplex-cli ask --url --confirm` asks before each
   call; the TUI asks in a dialog, unless auto-approve is on (see
   [Auto-approve](../tui.md#auto-approve)).

@@ -59,7 +59,17 @@ from soliplex.agui import parser as agui_parser
 
 DEFAULT_TOOL_TIMEOUT_SECS = 60.0
 DEFAULT_OUTPUT_CAP_BYTES = 16 * 1024
+MIN_OUTPUT_CAP_BYTES = 256
 DEFAULT_MAX_TURNS = 10
+
+#   How a stream longer than the cap is cut:  'head' keeps its start only;
+#   'head_tail' keeps its start and its end (where e.g. a build's errors
+#   are), 'OUTPUT_CAP_HEAD_FRACTION' of the cap for the start.
+OUTPUT_CAP_HEAD = "head"
+OUTPUT_CAP_HEAD_TAIL = "head_tail"
+OUTPUT_CAP_MODES = (OUTPUT_CAP_HEAD, OUTPUT_CAP_HEAD_TAIL)
+DEFAULT_OUTPUT_CAP_MODE = OUTPUT_CAP_HEAD_TAIL
+OUTPUT_CAP_HEAD_FRACTION = 0.6
 
 #   Connect / write / pool timeouts, and the read timeout:  the server
 #   sends an SSE keepalive every 15 seconds, so a long read timeout only
@@ -205,6 +215,14 @@ class RootNotADirectory(ValueError):
         super().__init__(f"--root is not a directory: {root}")
 
 
+class InvalidOutputCapMode(ValueError):
+    def __init__(self, mode):
+        super().__init__(
+            f"Unknown output cap mode {mode!r} "
+            f"(one of: {', '.join(OUTPUT_CAP_MODES)})",
+        )
+
+
 class InvalidShellArgs(ValueError):
     def __init__(self):
         super().__init__("'shell' requires a non-empty string 'command'")
@@ -217,7 +235,8 @@ class ToolContext:
     'root' is the working directory for commands (resolved on creation);
     unless 'allow_anywhere', a command naming a path outside it is
     refused.  'timeout_secs' bounds each command, and 'output_cap_bytes'
-    each of its output streams.  Commands see 'child_environment()':  a
+    each of its output streams, cut as 'output_cap_mode' says (see
+    'OUTPUT_CAP_MODES').  Commands see 'child_environment()':  a
     scrubbed copy of this process's environment, unless 'pass_env'.
 
     'is_cancelled', if given, is polled while a command runs (e.g., from a
@@ -229,6 +248,7 @@ class ToolContext:
     allow_anywhere: bool = False
     timeout_secs: float = DEFAULT_TOOL_TIMEOUT_SECS
     output_cap_bytes: int = DEFAULT_OUTPUT_CAP_BYTES
+    output_cap_mode: str = DEFAULT_OUTPUT_CAP_MODE
     pass_env: bool = False
     is_cancelled: abc.Callable[[], bool] | None = dataclasses.field(
         default=None,
@@ -240,6 +260,9 @@ class ToolContext:
 
         if not root.is_dir():
             raise RootNotADirectory(root)
+
+        if self.output_cap_mode not in OUTPUT_CAP_MODES:
+            raise InvalidOutputCapMode(self.output_cap_mode)
 
         object.__setattr__(self, "root", root)
 
@@ -919,12 +942,41 @@ def _reap(
     return proc.wait()
 
 
-def _read_capped(stream, cap: int) -> tuple[str, int, bool]:
+def omitted_marker(omitted: int) -> str:
+    """The line standing in for the middle of a stream cut 'head_tail'"""
+    return f"\n...[{omitted} bytes omitted]...\n"
+
+
+def _read_capped(
+    stream,
+    cap: int,
+    mode: str = DEFAULT_OUTPUT_CAP_MODE,
+) -> tuple[str, int, bool]:
+    """Read a stream of at most 'cap' bytes;  its text, size, and if cut
+
+    Longer, it keeps its first 'cap' bytes ('head'), or its first
+    'OUTPUT_CAP_HEAD_FRACTION' of them and its last bytes, with
+    'omitted_marker' between ('head_tail').  A character cut in two
+    decodes as U+FFFD.
+    """
     size = stream.seek(0, os.SEEK_END)
     stream.seek(0)
-    data = stream.read(cap)
-    text = data.decode("utf-8", errors="replace")
-    return text, size, size > cap
+
+    if size <= cap or mode == OUTPUT_CAP_HEAD:
+        data = stream.read(cap)
+        return data.decode("utf-8", errors="replace"), size, size > cap
+
+    head_bytes = int(cap * OUTPUT_CAP_HEAD_FRACTION)
+    tail_bytes = cap - head_bytes
+    head = stream.read(head_bytes)
+    stream.seek(size - tail_bytes)
+    tail = stream.read(tail_bytes)
+    text = (
+        head.decode("utf-8", errors="replace")
+        + omitted_marker(size - cap)
+        + tail.decode("utf-8", errors="replace")
+    )
+    return text, size, True
 
 
 #   How often 'run_shell' checks whether the command has exited, or been
@@ -988,7 +1040,7 @@ def run_shell(args: dict, context: ToolContext) -> dict:
     to temporary files rather than
     pipes, so a runaway command cannot exhaust memory, and a grandchild
     holding the output open cannot hang us;  each stream is capped at
-    'context.output_cap_bytes'.
+    'context.output_cap_bytes' (see '_read_capped').
 
     Returns '{stdout, stderr, exit_code, timed_out, truncated}', plus the
     streams' full sizes for the tool log.  A non-zero exit is data for the
@@ -1047,8 +1099,17 @@ def run_shell(args: dict, context: ToolContext) -> dict:
                 exit_code = _reap(proc, job, kill=not exited)
 
             cap = context.output_cap_bytes
-            stdout, stdout_bytes, stdout_cut = _read_capped(stdout_file, cap)
-            stderr, stderr_bytes, stderr_cut = _read_capped(stderr_file, cap)
+            mode = context.output_cap_mode
+            stdout, stdout_bytes, stdout_cut = _read_capped(
+                stdout_file,
+                cap,
+                mode,
+            )
+            stderr, stderr_bytes, stderr_cut = _read_capped(
+                stderr_file,
+                cap,
+                mode,
+            )
     finally:
         # Windows:  kills anything left in the job, even should the reap
         # above have been interrupted.

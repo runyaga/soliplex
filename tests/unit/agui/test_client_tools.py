@@ -4,6 +4,7 @@ import _thread
 import asyncio
 import ctypes
 import dataclasses
+import io
 import json
 import os
 import pathlib
@@ -64,6 +65,12 @@ def test_toolcontext_resolves_root(root, monkeypatch):
     assert found.allow_anywhere is False
     assert found.timeout_secs == client_tools.DEFAULT_TOOL_TIMEOUT_SECS
     assert found.output_cap_bytes == client_tools.DEFAULT_OUTPUT_CAP_BYTES
+    assert found.output_cap_mode == client_tools.OUTPUT_CAP_HEAD_TAIL
+
+
+def test_toolcontext_w_bad_output_cap_mode(root):
+    with pytest.raises(client_tools.InvalidOutputCapMode, match="'tail'"):
+        client_tools.ToolContext(root=root, output_cap_mode="tail")
 
 
 def test_toolcontext_w_file_root(root):
@@ -436,12 +443,13 @@ def test_run_shell_output_cwd_stdin_exit_code(root):
     assert found["stdout_bytes"] == len(found["stdout"].encode())
 
 
-def test_run_shell_caps_output(root):
+def test_run_shell_caps_output_head(root):
     command = _script(root, "big.py", "print('x' * 100)\n")
     context = client_tools.ToolContext(
         root=root,
         allow_anywhere=True,
         output_cap_bytes=10,
+        output_cap_mode=client_tools.OUTPUT_CAP_HEAD,
     )
 
     found = client_tools.run_shell({"command": command}, context)
@@ -450,6 +458,48 @@ def test_run_shell_caps_output(root):
     assert found["stdout_bytes"] > 100
     assert found["truncated"] is True
     assert found["exit_code"] == 0
+
+
+def test_run_shell_caps_output_head_tail(root):
+    # The end of the output (e.g. a build's errors) survives the cap.
+    command = _script(
+        root,
+        "big.py",
+        "import sys\nsys.stdout.write('a' * 100 + 'END')\n",
+    )
+    context = client_tools.ToolContext(
+        root=root,
+        allow_anywhere=True,
+        output_cap_bytes=10,
+    )
+
+    found = client_tools.run_shell({"command": command}, context)
+
+    assert found["stdout_bytes"] == 103
+    assert found["stdout"] == "aaaaaa" + client_tools.omitted_marker(93) + (
+        "aEND"
+    )
+    assert found["truncated"] is True
+
+
+@pytest.mark.parametrize("mode", client_tools.OUTPUT_CAP_MODES)
+def test__read_capped_under_the_cap(mode):
+    stream = io.BytesIO(b"short")
+
+    assert client_tools._read_capped(stream, 5, mode) == ("short", 5, False)
+
+
+def test__read_capped_head_tail_splits_a_character():
+    # A character cut in two decodes as U+FFFD, rather than failing.
+    stream = io.BytesIO("é".encode() * 10)  # 20 bytes
+
+    text, size, cut = client_tools._read_capped(stream, 11)
+
+    assert size == 20
+    assert cut is True
+    head, tail = text.split(client_tools.omitted_marker(9))
+    assert head == "ééé"  # 6 bytes
+    assert tail == "\ufffdéé"  # the last 5 bytes
 
 
 def test_run_shell_times_out_and_kills_the_command(root):

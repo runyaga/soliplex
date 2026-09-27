@@ -53,6 +53,13 @@ Options:
   [limitations](server/cli.md#limitations))
 - `--tool-log PATH` -- append one JSON line per client tool call to `PATH`
   (as for [`ask --url`](server/cli.md#remote-mode-client-tools))
+- `--output-cap-bytes N` -- the most bytes of each of a client tool call's
+  stdout and stderr sent to the model (default: 16384; at least 256;
+  `SOLIPLEX_TUI_OUTPUT_CAP_BYTES`)
+- `--output-cap-mode head|head_tail` -- how longer output is cut: keep its
+  start only, or its first 60% and its end, with a
+  `...[N bytes omitted]...` line between (default: `head_tail`, since
+  errors are usually at the end; `SOLIPLEX_TUI_OUTPUT_CAP_MODE`)
 - `--auto-approve` / `--yolo` -- run client tool calls **without asking**
   (default: off; see [Auto-approve](#auto-approve))
 - `-V` / `--version` -- print the version and exit
@@ -119,7 +126,7 @@ The response then shows each call: how it ended (`ran, exit code N`,
 `not run`, `ran, and timed out`, or `killed while it ran`), then, in a
 code block, the command, why it did not run, and the first 20 lines of
 its stdout and stderr (long lines cut short). The model receives up to
-16 KiB of each.
+`--output-cap-bytes` (16 KiB) of each: its start and its end.
 
 The same safeguards as for `ask --url` apply: no stdin, a timeout (and a
 command still running when the TUI quits is killed), capped output, a

@@ -334,6 +334,12 @@ Options, all only with `--url`:
   `timestamp`, `tool`, `args`, `cwd`, `exit_code`, `duration_secs`,
   `timed_out`, `truncated`, `stdout_bytes`, `stderr_bytes` and `error`.
   Output sizes are recorded, not the output.
+- `--output-cap-bytes N` — the most bytes of each output stream sent to
+  the model (default 16384, at least 256).
+- `--output-cap-mode head|head_tail` — how longer output is cut: its start
+  only, or its first 60% and its end with a `...[N bytes omitted]...` line
+  between (default `head_tail`). Both options also read
+  `SOLIPLEX_TUI_OUTPUT_CAP_BYTES` / `SOLIPLEX_TUI_OUTPUT_CAP_MODE`.
 
 A command's failure is **data for the model**, not an error of `ask`: a
 non-zero exit code, a timeout, or a refused path goes back to the model,
@@ -381,8 +387,8 @@ is never repeated behind the user's back.
   see [Auto-approve](../tui.md#auto-approve)).
 - **The per-run limit is 50 model requests**, from pydantic-ai's default
   usage limit; a run which needs more fails.
-- **Long output is capped** (16 KiB per stream) before it reaches the
-  model. On Ollama, a small default context window can also silently
+- **Long output is capped** (`--output-cap-bytes`, 16 KiB per stream, its
+  start and end kept) before it reaches the model. On Ollama, a small default context window can also silently
   truncate what the model sees.
 - **There is no stdin** (commands read end-of-file), **and there is a
   timeout** (`--tool-timeout`, default 60 seconds).

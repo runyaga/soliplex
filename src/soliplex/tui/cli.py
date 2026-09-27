@@ -1,6 +1,7 @@
 import pathlib
 from importlib.metadata import version
 
+import click
 import typer
 from rich import console
 
@@ -57,6 +58,29 @@ TOOL_LOG = typer.Option(
 )
 
 
+OUTPUT_CAP_BYTES = typer.Option(
+    client_tools.DEFAULT_OUTPUT_CAP_BYTES,
+    "--output-cap-bytes",
+    min=client_tools.MIN_OUTPUT_CAP_BYTES,
+    envvar="SOLIPLEX_TUI_OUTPUT_CAP_BYTES",
+    help=(
+        "The most bytes of each output stream (stdout, stderr) of a "
+        "client tool call sent to the model."
+    ),
+)
+
+OUTPUT_CAP_MODE = typer.Option(
+    client_tools.DEFAULT_OUTPUT_CAP_MODE,
+    "--output-cap-mode",
+    click_type=click.Choice(client_tools.OUTPUT_CAP_MODES),
+    envvar="SOLIPLEX_TUI_OUTPUT_CAP_MODE",
+    help=(
+        "How output over --output-cap-bytes is cut:  keep its start "
+        "('head'), or its start and its end ('head_tail')."
+    ),
+)
+
+
 @the_cli.command()
 def tui(
     version: bool = typer.Option(None, "--version", "-V"),
@@ -100,6 +124,8 @@ def tui(
         ),
     ),
     tool_log: pathlib.Path | None = TOOL_LOG,
+    output_cap_bytes: int = OUTPUT_CAP_BYTES,
+    output_cap_mode: str = OUTPUT_CAP_MODE,
     auto_approve: bool = typer.Option(
         False,
         "--auto-approve",
@@ -115,6 +141,8 @@ def tui(
             root=root,
             allow_anywhere=allow_anywhere,
             timeout_secs=tool_timeout,
+            output_cap_bytes=output_cap_bytes,
+            output_cap_mode=output_cap_mode,
             pass_env=pass_env,
         )
     except (OSError, ValueError) as exc:

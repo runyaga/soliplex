@@ -1249,8 +1249,7 @@ def test_deadline_stops_an_endless_stream():
             pytest.raises(DeadlinePassed),
             http.stream("GET", f"http://{host}:{port}/") as response,
         ):
-            for _ in response.iter_lines():
-                pass
+            collections.deque(response.iter_lines(), maxlen=0)  # read it all
     finally:
         stop.set()
         listener.close()

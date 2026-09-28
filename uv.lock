@@ -260,7 +260,7 @@ wheels = [
 
 [[package]]
 name = "bubble-sandbox"
-version = "0.12.0"
+version = "0.13"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic-ai-backend" },
@@ -268,9 +268,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d3/a4/47a761f37727019e0275492625bd76b76ff38dce26b788c12f62ae42482b/bubble_sandbox-0.12.0.tar.gz", hash = "sha256:09c23a43280178abfde4c5af72d78512dc2af589c9ea5952e1ea3f4911e11ddd", size = 9465, upload-time = "2026-08-21T15:40:02.07Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/17/5fc524e2a1dc159b9a7e95ab47e7a7923122cae1c2330b334fa5e20d1fa0/bubble_sandbox-0.13.tar.gz", hash = "sha256:45e6fbb6f23286c3ef8cdf95dc7c34f53169835d1ea7e58742f5ea84f2b3e27d", size = 12262, upload-time = "2026-09-28T20:29:28.316Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/44/b1/e7024115be4bea5dae14e42d22de72c713e952ad502f4e246dce3d7667a7/bubble_sandbox-0.12.0-py3-none-any.whl", hash = "sha256:0814c0dc1b462b198ede67d0c96b09a0ca90e8ec07d282ac53ce2555906f6ffa", size = 11455, upload-time = "2026-08-21T15:40:01.142Z" },
+    { url = "https://files.pythonhosted.org/packages/b4/5f/498a965ebd05d49e2230db3b405c3a383aad3686085ec30d9918cbcf8778/bubble_sandbox-0.13-py3-none-any.whl", hash = "sha256:673394b86a8baa8186a6ca69700818ba9d6ffd44ef5748d34191268cd8e08ba5", size = 14467, upload-time = "2026-09-28T20:29:27.389Z" },
 ]
 
 [[package]]
@@ -3200,6 +3200,7 @@ dependencies = [
     { name = "jwcrypto" },
     { name = "logfire", extra = ["fastapi"] },
     { name = "mcp" },
+    { name = "packaging" },
     { name = "pillow" },
     { name = "pyasn1" },
     { name = "pydantic-ai-slim", extra = ["google"] },
@@ -3251,7 +3252,7 @@ requires-dist = [
     { name = "aiosqlite" },
     { name = "alembic", specifier = ">=1.18.4,<1.19" },
     { name = "authlib" },
-    { name = "bubble-sandbox", specifier = ">=0.12.0,<0.13" },
+    { name = "bubble-sandbox", specifier = ">=0.13.0,<0.14" },
     { name = "certifi", specifier = ">=2025.11.12" },
     { name = "cryptography", specifier = ">=50.0.0" },
     { name = "fakeredis", specifier = "!=2.35.0" },
@@ -3266,6 +3267,7 @@ requires-dist = [
     { name = "jwcrypto" },
     { name = "logfire", extras = ["fastapi"] },
     { name = "mcp", specifier = ">=1.27.2" },
+    { name = "packaging" },
     { name = "pillow", specifier = ">=12.3.0,<12.4" },
     { name = "psycopg", marker = "extra == 'postgres'" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres-binary'" },

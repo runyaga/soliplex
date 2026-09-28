@@ -315,13 +315,15 @@ class SandboxConfig:
             return None
 
     @property
-    def workdirs_path(self) -> pathlib.Path:
-        """Directory holding "workdirs" for each run
+    def workdirs_path(self) -> pathlib.Path | None:
+        """Directory holding each thread's sandbox workspace
 
-        A workdir will be named with the run ID, with parent directories
-        for the room ID and thread ID.
+        Named with the thread ID, under a directory for the room ID.  The
+        workspace persists across the thread's turns, and the workdirs
+        endpoint serves the files at its top level.
 
-        If not set, the sandox workdir will be a temporary directory.
+        If not set, each command gets a temporary directory instead, which
+        is discarded when it ends and which the endpoint cannot serve.
         """
         if self._config_path is not None and self._workdirs_path is not None:
             return (self._config_path.parent / self._workdirs_path).resolve()

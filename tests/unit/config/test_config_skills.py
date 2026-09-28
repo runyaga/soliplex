@@ -51,6 +51,7 @@ def installation_config(temp_dir):
     config.skill_configs = {}
     config.haiku_rag_config = hr_config.AppConfig(environment="testing")
     config.get_environment.return_value = str(temp_dir)
+    config.sandbox_config = None
     return config
 
 
@@ -391,9 +392,8 @@ def test_bwrap_sandbox_config_from_yaml(installation_config, temp_dir):
         {
             "kind": bwrap_sandbox.SKILL_PROPERTIES.name,
             "id": "sandbox-id",
-            "default_environment": "python",
-            "allowed_environments": ["python"],
-            "sandbox_config": {"max_output_chars": 1234},
+            "environment": "python",
+            "max_output_chars": 1234,
             "volumes": {
                 "data": {
                     "host_path": str(volume_path),
@@ -406,16 +406,14 @@ def test_bwrap_sandbox_config_from_yaml(installation_config, temp_dir):
     capability = config.capability
     assert isinstance(capability, bwrap_sandbox.SandboxCapability)
     assert capability.id == "sandbox-id"
-    assert capability.default_environment == "python"
+    assert capability.environment == "python"
+    assert capability.sandbox_config.max_output_chars == 1234
     assert config.name == bwrap_sandbox.SKILL_PROPERTIES.name
     assert config.description == bwrap_sandbox.SKILL_PROPERTIES.description
     assert config.state_type is None
     assert config.state_namespace is None
     assert config.agui_feature_names == ()
-    assert config.extra_parameters == {
-        "default_environment": "python",
-        "allowed_environments": ["python"],
-    }
+    assert config.extra_parameters == {"environment": "python"}
     assert isinstance(config.volumes["data"], bs_models.VolumeInfo)
     assert config.as_yaml["id"] == "sandbox-id"
     assert config.as_yaml["volumes"]["data"] == {
@@ -431,10 +429,10 @@ def test_bwrap_sandbox_config_minimal(installation_config):
 
     assert config.as_yaml == {
         "kind": bwrap_sandbox.SKILL_PROPERTIES.name,
-        "default_environment": "bare",
+        "environment": "bare",
         "defer_loading": False,
     }
-    assert config.extra_parameters == {"default_environment": "bare"}
+    assert config.extra_parameters == {"environment": "bare"}
 
 
 def _round_trip_bwrap_skill(installation_config, config_path, config_dict):
@@ -465,13 +463,9 @@ def test_bwrap_sandbox_config_as_yaml_round_trips(
     if w_full:
         config_dict |= {
             "id": "sandbox-id",
-            "default_environment": "python",
-            "allowed_environments": ["python"],
-            "sandbox_config": {
-                "environments_pathname": "test-environments",
-                "execution_timeout_seconds": 66.0,
-                "max_output_chars": 1234,
-            },
+            "environment": "python",
+            "execution_timeout_seconds": 66.0,
+            "max_output_chars": 1234,
             "volumes": {
                 "data": {
                     "host_path": str(temp_dir / "volume"),
@@ -624,12 +618,7 @@ def test_room_skills_config_combines_capabilities(
     }
     assert bws_yaml == {
         "kind": bwrap_sandbox.SKILL_PROPERTIES.name,
-        "default_environment": "bare",
-        "sandbox_config": {
-            "environments_pathname": "environments",
-            "execution_timeout_seconds": 30.0,
-            "max_output_chars": 100000,
-        },
+        "environment": "bare",
         "defer_loading": False,
     }
 
@@ -1076,3 +1065,66 @@ def test_room_skills_config_rejects_bad_installation_skill_entry(
         )
 
     assert isinstance(raised.value.__cause__, exp_cause)
+
+
+@pytest.mark.parametrize(
+    "w_key", ["default_environment", "allowed_environments"]
+)
+def test_bwrap_sandbox_config_rejects_removed_keys(
+    installation_config,
+    temp_dir,
+    w_key,
+):
+    """The keys 'environment' replaced fail rather than being ignored."""
+    with pytest.raises(config_exc.FromYamlException):
+        config_skills.BwrapSandboxSkillConfig.from_yaml(
+            installation_config,
+            temp_dir / "room.yaml",
+            {
+                "kind": bwrap_sandbox.SKILL_PROPERTIES.name,
+                w_key: "python",
+            },
+        )
+
+
+def test_bwrap_sandbox_config_wo_room_limits(installation_config, temp_dir):
+    """A room that sets neither limit runs on the module defaults."""
+    config = config_skills.BwrapSandboxSkillConfig.from_yaml(
+        installation_config,
+        temp_dir / "room.yaml",
+        {"kind": bwrap_sandbox.SKILL_PROPERTIES.name},
+    )
+
+    sandbox_config = config.capability.sandbox_config
+
+    assert (
+        sandbox_config.execution_timeout_seconds
+        == config_skills.DEFAULT_EXECUTION_TIMEOUT_SECONDS
+    )
+    assert (
+        sandbox_config.max_output_chars
+        == config_skills.DEFAULT_MAX_OUTPUT_CHARS
+    )
+    # Defaults are not the room's to record: writing them back would pin
+    # this room to today's default.
+    assert "execution_timeout_seconds" not in config.as_yaml
+    assert "max_output_chars" not in config.as_yaml
+
+
+def test_bwrap_sandbox_config_w_room_limits(installation_config, temp_dir):
+    config = config_skills.BwrapSandboxSkillConfig.from_yaml(
+        installation_config,
+        temp_dir / "room.yaml",
+        {
+            "kind": bwrap_sandbox.SKILL_PROPERTIES.name,
+            "execution_timeout_seconds": 5.0,
+            "max_output_chars": 99,
+        },
+    )
+
+    sandbox_config = config.capability.sandbox_config
+
+    assert sandbox_config.execution_timeout_seconds == 5.0
+    assert sandbox_config.max_output_chars == 99
+    assert config.as_yaml["execution_timeout_seconds"] == 5.0
+    assert config.as_yaml["max_output_chars"] == 99

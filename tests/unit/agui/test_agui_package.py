@@ -941,3 +941,109 @@ async def test_apply_delivery_strategy(strategy, expected):
     ]
 
     assert _summary(found) == expected
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_cancel_does_not_interrupt_normal_close():
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    outcome = []
+
+    class SlowClose(Upstream):
+        async def aclose(self):
+            close_started.set()
+            await release_close.wait()
+            outcome.append("closed")
+
+    upstream = SlowClose([TEXT_CONTENT_1_A])
+    consumer = asyncio.create_task(
+        _drain(agui.coalesce_event_stream(upstream, **BOUNDED_KW)),
+    )
+    async with asyncio.timeout(HANG_GUARD_SECS):
+        await close_started.wait()
+
+    consumer.cancel()
+    await asyncio.sleep(0)
+    release_close.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(HANG_GUARD_SECS):
+            await consumer
+    assert outcome == ["closed"]
+
+
+@pytest.mark.anyio
+@mock.patch("soliplex.agui.logfire")
+async def test_coalesce_event_stream_logs_close_error_after_early_close(
+    logfire,
+):
+    upstream = Upstream(
+        [TEXT_CONTENT_1_A, TEXT_CONTENT_1_B],
+        close_fail=RuntimeError("close failed"),
+    )
+    stream = agui.coalesce_event_stream(
+        upstream,
+        **(BOUNDED_KW | {"max_deltas": 1}),
+    )
+
+    assert await anext(stream) == TEXT_CONTENT_1_A
+    await _until(lambda: upstream.closed_in)
+    await stream.aclose()
+
+    logfire.error.assert_called_once()
+    error = logfire.error.call_args.kwargs["error"]
+    assert str(error) == "close failed"
+
+
+class JumpingClock:
+    """Clock which advances by each of 'jumps' after successive reads"""
+
+    def __init__(self, jumps):
+        self.now = 0.0
+        self.jumps = list(jumps)
+
+    def __call__(self):
+        found = self.now
+        if self.jumps:
+            self.now += self.jumps.pop(0)
+        return found
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "jump, expected",
+    [
+        (1.0, ["a", "b", "c"]),
+        (0.0, ["a", "bc"]),
+    ],
+)
+async def test_coalesce_event_stream_expired_hold_with_event_queued(
+    monkeypatch,
+    jump,
+    expected,
+):
+    clock = JumpingClock([])
+    monkeypatch.setattr(agui, "_hold_clock", clock)
+    channel = Channel()
+    channel.send(
+        _text("a", MESSAGE_ID_1),
+        _text("b", MESSAGE_ID_2),
+        _text("c", MESSAGE_ID_2),
+    )
+    stream = agui.coalesce_event_stream(
+        channel,
+        max_deltas=1_000,
+        max_bytes=1_000_000,
+        max_ms=250,
+    )
+
+    first = await anext(stream)
+    await _until(lambda: channel.queue.empty())
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    clock.jumps = [jump]
+    channel.send(None)
+    rest = [event async for event in stream]
+
+    assert _summary([first, *rest]) == expected

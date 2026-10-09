@@ -39,9 +39,10 @@ class AGUI_SSEDeliveryStrategy(enum.StrEnum):
 class AGUI_SSEDeliveryConfig:
     """How the AG-UI run endpoint groups streamed deltas into SSE events
 
-    'message' sends each message, and each tool call's arguments, as one
-    event once complete.  'bounded' sends the merged deltas once they hold
-    'max_deltas' deltas or 'max_bytes' bytes, or have been held 'max_ms'
+    'message' merges adjacent deltas of one message or tool call, sending
+    them when any other event arrives (normally the message's end).
+    'bounded' also sends the merged deltas once they hold 'max_deltas'
+    deltas or 'max_bytes' bytes, or have been held about 'max_ms'
     milliseconds, whichever comes first.
     """
 

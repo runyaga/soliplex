@@ -423,10 +423,11 @@ groups the model's streamed deltas (text, thinking, reasoning and tool-call
 arguments) into SSE events, for every room which has no stanza of its own
 (see [Room Configuration](rooms.md#ag-ui-sse-delivery)).
 
-- `strategy: "message"` (the default when no stanza is configured) sends
-  each message, and each tool call's arguments, as one event once it is
-  complete. This uses the fewest bytes, events and stored rows, but no text
-  reaches the client until the message ends.
+- `strategy: "message"` (the default when no stanza is configured) merges
+  adjacent deltas of one message, or of one tool call's arguments, and
+  sends them when any other event arrives -- normally the message's end.
+  This uses the fewest bytes, events and stored rows, but text generally
+  reaches the client only when the message ends.
 
 - `strategy: "bounded"` merges deltas the same way, but sends the merged
   event as soon as it holds `max_deltas` deltas, or `max_bytes` bytes of
@@ -444,9 +445,10 @@ agui_sse_delivery:
 
 `bounded` sends text sooner, at the cost of more SSE events, more bytes
 (each event carries its own envelope), and one stored row, saved in its own
-transaction, per event. `max_ms` bounds how long text is held before it is
-sent; saving each event to the database, and the network, add to the delay
-a client sees. No default bounds are provided: suitable values depend on
+transaction, per event. `max_ms` is a target for how long merged text is held,
+not a guarantee: it is checked when the server's event loop gets to it, and
+time spent before the text is held, saving each event to the database, and
+the network all add to the delay a client sees. No default bounds are provided: suitable values depend on
 the pace at which the room's model produces deltas.
 
 Unknown keys, unknown strategies, bounds given with `message`, and missing

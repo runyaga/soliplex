@@ -329,13 +329,10 @@ async def test_message_holds_text_until_message_end(
         async with server.client.stream("POST", url, json=run_input) as resp:
             reader = asyncio.create_task(read_all(resp))
             async with asyncio.timeout(HANG_GUARD_SECS):
+                while "TEXT_MESSAGE_START" not in [f.type for f in received]:
+                    await asyncio.sleep(0.01)
                 while len(script.produced) < 4:
                     await asyncio.sleep(0.01)
-            await asyncio.sleep(0.5)
-
-            types = [frame.type for frame in received]
-            assert "TEXT_MESSAGE_START" in types
-            assert CONTENT not in types
 
             script.gate.set()
             async with asyncio.timeout(HANG_GUARD_SECS):

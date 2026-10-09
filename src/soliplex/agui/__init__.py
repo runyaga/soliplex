@@ -652,19 +652,25 @@ _TIMEOUT = object()
 _BACKGROUND_PUMPS: set[asyncio.Task] = set()
 
 
-class _PumpEnd:
-    def __init__(self, error: Exception | None = None):
-        self.error = error
+class _PumpState:
+    def __init__(self):
+        self.closing = False
+        self.error: Exception | None = None
 
 
-async def _pump(stream: AGUI_EventStream, queue: asyncio.Queue):
-    """Iterate and close 'stream' in this one task, then queue a '_PumpEnd'
+async def _pump(
+    stream: AGUI_EventStream,
+    queue: asyncio.Queue,
+    state: _PumpState,
+) -> _PumpState:
+    """Iterate and close 'stream' in this one task, putting events on 'queue'
 
-    If the task is cancelled, nothing more is queued, and an error from
-    iterating or closing the stream is logged, as nobody will read it.
+    Returns 'state', holding any error from iterating or closing the
+    stream.  'state.closing' is set before closing, after which the task is
+    no longer cancelled.  If the task is cancelled, the error is logged, as
+    nobody will read it.
     """
     cancelled = False
-    error = None
 
     try:
         async for event in stream:
@@ -672,35 +678,36 @@ async def _pump(stream: AGUI_EventStream, queue: asyncio.Queue):
     except asyncio.CancelledError:
         cancelled = True
     except Exception as exc:
-        error = exc
+        state.error = exc
 
+    state.closing = True
     aclose = getattr(stream, "aclose", None)
     if aclose is not None:
         try:
             await aclose()
         except Exception as close_exc:
-            if error is None:
-                error = close_exc
+            if state.error is None:
+                state.error = close_exc
             else:
-                error.add_note(
+                state.error.add_note(
                     f"Closing the stream also failed: {close_exc!r}"
                 )
 
     if cancelled or asyncio.current_task().cancelling():
-        if error is not None:
+        if state.error is not None:
             logfire.error(
                 "AG-UI event stream failed after cancellation: {error!r}",
-                error=error,
+                error=state.error,
             )
         raise asyncio.CancelledError
 
-    await queue.put(_PumpEnd(error))
+    return state
 
 
 async def _next_item(queue: asyncio.Queue, pump: asyncio.Future, timeout):
-    """Return the next queued item, or '_TIMEOUT' after 'timeout' seconds
+    """Return the next queued event, else the pump's result once it is done
 
-    Raises if 'pump' ends without queueing a '_PumpEnd'.
+    Returns '_TIMEOUT' if neither arrives within 'timeout' seconds.
     """
     if queue.empty() and not pump.done():
         getter = asyncio.ensure_future(queue.get())
@@ -724,7 +731,7 @@ async def _next_item(queue: asyncio.Queue, pump: asyncio.Future, timeout):
     if pump.done():
         if pump.cancelled():
             raise asyncio.CancelledError
-        raise pump.exception()
+        return pump.result()
 
     return _TIMEOUT
 
@@ -745,7 +752,9 @@ async def coalesce_event_stream(
     while the upstream is quiet.
     """
     queue = asyncio.Queue(maxsize=1)
-    pump = asyncio.create_task(_pump(stream, queue))
+    state = _PumpState()
+    pump = asyncio.create_task(_pump(stream, queue, state))
+    delivered = False
     held = held_attr = held_id = None
     held_count = 0
     deadline = 0.0
@@ -765,11 +774,12 @@ async def coalesce_event_stream(
             if item is _TIMEOUT:
                 continue
 
-            if isinstance(item, _PumpEnd):
+            if item is state:
+                delivered = True
                 if held is not None:
                     yield held
-                if item.error is not None:
-                    raise item.error
+                if state.error is not None:
+                    raise state.error
                 return
 
             if (
@@ -802,7 +812,8 @@ async def coalesce_event_stream(
                 yield to_yield
 
     finally:
-        pump.cancel()
+        if not state.closing:
+            pump.cancel()
         try:
             await asyncio.shield(pump)
         except asyncio.CancelledError:
@@ -810,6 +821,13 @@ async def coalesce_event_stream(
                 _BACKGROUND_PUMPS.add(pump)
                 pump.add_done_callback(_BACKGROUND_PUMPS.discard)
                 raise
+        else:
+            if not delivered and state.error is not None:
+                logfire.error(
+                    "AG-UI event stream failed after its consumer closed: "
+                    "{error!r}",
+                    error=state.error,
+                )
 
 
 def apply_delivery_strategy(

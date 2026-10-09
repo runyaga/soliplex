@@ -440,10 +440,14 @@ arguments) into SSE events, for every room which has no stanza of its own
 ```yaml
 agui_sse_delivery:
     strategy: "bounded"
-    max_deltas: 8
-    max_bytes: 256
-    max_ms: 250
+    max_deltas: 16
+    max_bytes: 1024
+    max_ms: 100
 ```
+
+With a model producing about 25 deltas a second, these bounds send about
+eight updates a second, each holding about three deltas: on loopback, an
+80-delta answer took 27 events and about 3.8 times the bytes of `message`.
 
 `bounded` sends text sooner, at the cost of more SSE events, more bytes
 (each event carries its own envelope), and one stored row, saved in its own

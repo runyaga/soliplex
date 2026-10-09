@@ -121,13 +121,11 @@ async def _serve(installation_path):
     finally:
         _release_script()
         server.should_exit = True
-        try:
-            async with asyncio.timeout(HANG_GUARD_SECS):
-                await task
-        except TimeoutError:
+        done, _ = await asyncio.wait({task}, timeout=HANG_GUARD_SECS)
+        if not done:
             task.cancel()
-            await asyncio.wait({task})
-            raise
+            await asyncio.wait({task}, timeout=HANG_GUARD_SECS)
+            pytest.fail("uvicorn did not shut down")
 
 
 def _release_script():

@@ -515,24 +515,18 @@ async def test_coalesce_event_stream_no_merge_across_tool_call_ids():
 @pytest.mark.anyio
 async def test_coalesce_event_stream_prefetches_at_most_two_events():
     produced = []
+    received = []
 
     async def upstream():
         for index in range(10):
             produced.append(index)
             yield agui_core.CustomEvent(name="test", value=index)
 
-    stream = agui.coalesce_event_stream(upstream(), **BOUNDED_KW)
+    async for event in agui.coalesce_event_stream(upstream(), **BOUNDED_KW):
+        received.append(event.value)
+        assert len(produced) <= len(received) + 2
 
-    first = await anext(stream)
-    for _ in range(20):
-        await asyncio.sleep(0)
-
-    assert first.value == 0
-    assert len(produced) <= 3
-
-    rest = [event.value async for event in stream]
-
-    assert rest == list(range(1, 10))
+    assert received == list(range(10))
 
 
 @pytest.mark.anyio
@@ -805,21 +799,24 @@ async def test_coalesce_event_stream_consumer_cancelled_during_close():
     consumer = asyncio.create_task(
         _drain(agui.coalesce_event_stream(upstream(), **BOUNDED_KW)),
     )
-    await _until(waiting.is_set)
-    consumer.cancel()
-    async with asyncio.timeout(HANG_GUARD_SECS):
-        await close_started.wait()
-    (pump,) = iterated_in
+    try:
+        await _until(waiting.is_set)
+        consumer.cancel()
+        async with asyncio.timeout(HANG_GUARD_SECS):
+            await close_started.wait()
+        (pump,) = iterated_in
 
-    consumer.cancel()
+        consumer.cancel()
 
-    with pytest.raises(asyncio.CancelledError):
-        await consumer
-    assert not closed.is_set()
-    assert pump in agui._BACKGROUND_PUMPS
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+        assert not closed.is_set()
+        assert pump in agui._BACKGROUND_PUMPS
 
-    release_close.set()
-    await _until(lambda: pump not in agui._BACKGROUND_PUMPS)
+        release_close.set()
+        await _until(lambda: pump not in agui._BACKGROUND_PUMPS)
+    finally:
+        release_close.set()
 
     assert closed.is_set()
 
@@ -993,7 +990,7 @@ async def test_apply_delivery_strategy(strategy, expected):
 
 
 @pytest.mark.anyio
-async def test_coalesce_event_stream_cancel_does_not_interrupt_normal_close():
+async def test_coalesce_event_stream_early_close_waits_for_normal_close():
     close_started = asyncio.Event()
     release_close = asyncio.Event()
     outcome = []
@@ -1004,20 +1001,24 @@ async def test_coalesce_event_stream_cancel_does_not_interrupt_normal_close():
             await release_close.wait()
             outcome.append("closed")
 
-    upstream = SlowClose([TEXT_CONTENT_1_A])
-    consumer = asyncio.create_task(
-        _drain(agui.coalesce_event_stream(upstream, **BOUNDED_KW)),
-    )
-    async with asyncio.timeout(HANG_GUARD_SECS):
-        await close_started.wait()
-
-    consumer.cancel()
-    await asyncio.sleep(0)
-    release_close.set()
-
-    with pytest.raises(asyncio.CancelledError):
+    upstream = SlowClose([OTHER])
+    stream = agui.coalesce_event_stream(upstream, **BOUNDED_KW)
+    try:
+        assert await anext(stream) == OTHER
         async with asyncio.timeout(HANG_GUARD_SECS):
-            await consumer
+            await close_started.wait()
+
+        closer = asyncio.ensure_future(stream.aclose())
+        await asyncio.sleep(0)
+
+        assert not closer.done()
+
+        release_close.set()
+        async with asyncio.timeout(HANG_GUARD_SECS):
+            await closer
+    finally:
+        release_close.set()
+
     assert outcome == ["closed"]
 
 
@@ -1044,23 +1045,23 @@ async def test_coalesce_event_stream_logs_close_error_after_early_close(
     assert str(error) == "close failed"
 
 
-class JumpingClock:
-    """Clock which advances by each of 'jumps' after successive reads"""
+class TimedDelta(str):
+    """Delta text whose UTF-8 encoding advances 'clock' by 'cost' seconds"""
 
-    def __init__(self, jumps):
-        self.now = 0.0
-        self.jumps = list(jumps)
-
-    def __call__(self):
-        found = self.now
-        if self.jumps:
-            self.now += self.jumps.pop(0)
+    def __new__(cls, text, clock, cost):
+        found = super().__new__(cls, text)
+        found.clock = clock
+        found.cost = cost
         return found
+
+    def encode(self, *args, **kwargs):
+        self.clock[0] += self.cost
+        return super().encode(*args, **kwargs)
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "jump, expected",
+    "cost, expected",
     [
         (1.0, ["a", "b", "c"]),
         (0.0, ["a", "bc"]),
@@ -1068,36 +1069,35 @@ class JumpingClock:
 )
 async def test_coalesce_event_stream_expired_hold_with_event_queued(
     monkeypatch,
-    jump,
+    cost,
     expected,
 ):
     """A hold that expires with the next event already queued is flushed
 
     No await separates establishing a hold from the next deadline check,
-    so time can pass there only while the code runs: the clock jumps on
-    the read which establishes the hold for 'b', while 'c' is queued.
+    so time can pass there only while the code runs: measuring the held
+    delta for 'b' takes 'cost' seconds, while 'c' is already queued.
     """
-    clock = JumpingClock([])
-    monkeypatch.setattr(agui, "_hold_clock", clock)
-    channel = Channel()
-    channel.send(
-        _text("a", MESSAGE_ID_1),
-        _text("b", MESSAGE_ID_2),
-        _text("c", MESSAGE_ID_2),
+    clock = [0.0]
+    monkeypatch.setattr(agui, "_hold_clock", lambda: clock[0])
+    timed_b = _text("b", MESSAGE_ID_2).model_copy(
+        update={"delta": TimedDelta("b", clock, cost)},
     )
+    channel = Channel()
+    channel.send(_text("a", MESSAGE_ID_1), timed_b, _text("c", MESSAGE_ID_2))
     stream = agui.coalesce_event_stream(
         channel,
         max_deltas=1_000,
         max_bytes=1_000_000,
         max_ms=250,
     )
-
-    first = await anext(stream)
-    await _until(channel.queue.empty)
-
-    clock.jumps = [jump]
-    channel.send(None)
-    rest = [event async for event in stream]
+    try:
+        first = await anext(stream)
+        await _until(channel.queue.empty)
+        channel.send(None)
+        rest = [event async for event in stream]
+    finally:
+        await stream.aclose()
 
     assert _summary([first, *rest]) == expected
 
@@ -1132,30 +1132,31 @@ async def test_coalesce_event_stream_logs_detached_close_error(logfire):
             await release_close.wait()
             raise RuntimeError(CLOSE_FAILED)
 
-    upstream = FailingSlowClose([TEXT_CONTENT_1_A])
-    consumer = asyncio.create_task(
-        _drain(agui.coalesce_event_stream(upstream, **BOUNDED_KW)),
-    )
-    async with asyncio.timeout(HANG_GUARD_SECS):
-        await close_started.wait()
-    pump = upstream.iterated_in
-
-    consumer.cancel()
-    await asyncio.sleep(0)
-    assert not consumer.done()
-
-    consumer.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    upstream = FailingSlowClose([OTHER])
+    stream = agui.coalesce_event_stream(upstream, **BOUNDED_KW)
+    try:
+        assert await anext(stream) == OTHER
         async with asyncio.timeout(HANG_GUARD_SECS):
-            await consumer
-    assert pump in agui._BACKGROUND_PUMPS
-    logfire.error.assert_not_called()
+            await close_started.wait()
+        pump = upstream.iterated_in
 
-    release_close.set()
-    await _until(lambda: pump not in agui._BACKGROUND_PUMPS)
+        closer = asyncio.ensure_future(stream.aclose())
+        await asyncio.sleep(0)
+        closer.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            async with asyncio.timeout(HANG_GUARD_SECS):
+                await closer
+        assert pump in agui._BACKGROUND_PUMPS
+        logfire.error.assert_not_called()
+
+        release_close.set()
+        await _until(lambda: pump not in agui._BACKGROUND_PUMPS)
+    finally:
+        release_close.set()
 
     logfire.error.assert_called_once()
-    assert str(logfire.error.call_args.kwargs["error"]) == "close failed"
+    assert str(logfire.error.call_args.kwargs["error"]) == CLOSE_FAILED
 
 
 @pytest.mark.anyio

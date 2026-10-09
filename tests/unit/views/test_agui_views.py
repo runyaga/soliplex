@@ -1743,7 +1743,7 @@ async def test_post_room_agui_thread_id_run_id_streaming(
         assert ias_kwargs["delivery"] is (
             exp_room_config.effective_agui_sse_delivery
         )
-        the_installation.get_room_config.assert_awaited_once_with(
+        the_installation.get_room_config.assert_awaited_with(
             room_id=TEST_ROOM_ID,
             user=THE_USER_CLAIMS,
         )

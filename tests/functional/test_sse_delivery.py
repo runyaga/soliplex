@@ -102,14 +102,14 @@ async def _serve(installation_path):
         ),
     )
     task = asyncio.create_task(server.serve())
-    async with asyncio.timeout(HANG_GUARD_SECS):
-        while not server.started:
-            assert not task.done()
-            await asyncio.sleep(0.01)
-
-    (sock,) = server.servers[0].sockets
-    host, port = sock.getsockname()[:2]
     try:
+        async with asyncio.timeout(HANG_GUARD_SECS):
+            while not server.started:
+                assert not task.done()
+                await asyncio.sleep(0.01)
+
+        (sock,) = server.servers[0].sockets
+        host, port = sock.getsockname()[:2]
         async with httpx.AsyncClient(
             base_url=f"http://{host}:{port}",
             headers={"Accept-Encoding": "identity"},
@@ -119,8 +119,22 @@ async def _serve(installation_path):
             yield the_server
             await the_server.background_done()
     finally:
+        _release_script()
         server.should_exit = True
-        await task
+        try:
+            async with asyncio.timeout(HANG_GUARD_SECS):
+                await task
+        except TimeoutError:
+            task.cancel()
+            await asyncio.wait({task})
+            raise
+
+
+def _release_script():
+    script = sse_delivery_agent.SCRIPT
+    script.gate.set()
+    if script.hold is not None:
+        script.hold.set()
 
 
 async def _new_run(client):
@@ -163,16 +177,26 @@ class Frame:
 
 
 async def _frames(response):
-    frame_id = None
+    """Yield each SSE frame once its terminating blank line arrives"""
+    lines = []
     async for line in response.aiter_lines():
-        if line.startswith("id: "):
-            frame_id = line.removeprefix("id: ")
-        elif line.startswith("data: "):
-            data = json.loads(line.removeprefix("data: "))
-            yield Frame(id=frame_id, data=data)
-            frame_id = None
-        elif line.startswith(":"):
-            yield Frame(comment=line)
+        if line:
+            lines.append(line)
+            continue
+
+        frame = Frame()
+        for field in lines:
+            if field.startswith(":"):
+                frame.comment = field
+            elif field.startswith("id: "):
+                frame.id = field.removeprefix("id: ")
+            else:
+                assert field.startswith("data: "), field
+                frame.data = json.loads(field.removeprefix("data: "))
+        lines = []
+        yield frame
+
+    assert lines == [], f"unterminated SSE frame: {lines}"
 
 
 def _data(frames):
@@ -203,23 +227,23 @@ def _set_script(monkeypatch, **kw):
     return script
 
 
-_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_UUID = rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _ID_RE = re.compile(
-    r"(?:(?<=^id: )"
-    r'|(?<="threadId":")|(?<="runId":")'
-    r'|(?<="messageId":")|(?<="toolCallId":"))' + _UUID,
+    rb"(?:(?<=^id: )"
+    rb'|(?<="threadId":")|(?<="runId":")'
+    rb'|(?<="messageId":")|(?<="toolCallId":"))' + _UUID,
     re.MULTILINE,
 )
-_TS_RE = re.compile(r'(?<="timestamp":)\d+')
+_TS_RE = re.compile(rb'(?<="timestamp":)\d+')
 
 
-def _normalise(body):
+def _normalise(body: bytes) -> bytes:
     ids = {}
 
     def _sub(match):
-        return ids.setdefault(match.group(0), f"<id-{len(ids)}>")
+        return ids.setdefault(match.group(0), b"<id-%d>" % len(ids))
 
-    return _TS_RE.sub("0", _ID_RE.sub(_sub, body))
+    return _TS_RE.sub(b"0", _ID_RE.sub(_sub, body))
 
 
 @pytest.mark.anyio
@@ -231,8 +255,8 @@ async def test_default_body_unchanged(tmp_path, monkeypatch):
         url, run_input = await _new_run(server.client)
         response = await server.client.post(url, json=run_input)
 
-    found = _normalise(response.text)
-    golden = (GOLDEN_DIR / "default_body.sse").read_text()
+    found = _normalise(response.content)
+    golden = (GOLDEN_DIR / "default_body.sse").read_bytes()
     assert found == golden
 
 

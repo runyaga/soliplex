@@ -109,6 +109,18 @@ W_INVALID_SSE_DELIVERY_ROOM_CONFIG_YAML = f"""\
 agui_sse_delivery: {{}}
 """
 
+W_NULL_SSE_DELIVERY_ROOM_CONFIG_YAML = f"""\
+{BARE_ROOM_CONFIG_YAML}
+agui_sse_delivery: null
+"""
+
+W_INCOMPLETE_SSE_DELIVERY_ROOM_CONFIG_YAML = f"""\
+{BARE_ROOM_CONFIG_YAML}
+agui_sse_delivery:
+    strategy: "bounded"
+    max_ms: 100
+"""
+
 
 def _replace_w_entries(config, **changes):
     """Replace a DB-bearing config, carrying changes into 'rag_databases'
@@ -336,6 +348,10 @@ NoRaise = contextlib.nullcontext()
         (
             W_INVALID_SSE_DELIVERY_ROOM_CONFIG_YAML,
             pytest.raises(config_exc.FromYamlException),
+        ),
+        (
+            W_NULL_SSE_DELIVERY_ROOM_CONFIG_YAML,
+            contextlib.nullcontext(BARE_ROOM_CONFIG_KW),
         ),
         (
             FULL_ROOM_CONFIG_YAML,
@@ -613,6 +629,25 @@ def test_roomconfig_effective_agui_sse_delivery_wo_installation_config(
 
     expected = room_block or config_sse_delivery.DEFAULT_SSE_DELIVERY
     assert room_config.effective_agui_sse_delivery == expected
+
+
+def test_roomconfig_from_yaml_incomplete_block_not_completed_by_installation(
+    installation_config,
+    temp_dir,
+):
+    installation_config.agui_sse_delivery = SSE_BOUNDED_8
+    yaml_file = temp_dir / "test.yaml"
+
+    with pytest.raises(config_exc.FromYamlException) as exc_info:
+        config_rooms.RoomConfig.from_yaml(
+            installation_config,
+            yaml_file,
+            yaml.safe_load(W_INCOMPLETE_SSE_DELIVERY_ROOM_CONFIG_YAML),
+        )
+
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, config_sse_delivery.InvalidSSEDeliveryConfig)
+    assert "'max_deltas' is required" in str(cause)
 
 
 def test_roomconfig_as_yaml_round_trip_keeps_inherited_sse_delivery(

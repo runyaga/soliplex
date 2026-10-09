@@ -451,6 +451,11 @@ agui_sse_delivery:
     max_ms: 250
 """
 
+W_NULL_SSE_DELIVERY_INSTALLATION_CONFIG_YAML = f"""\
+id: "{INSTALLATION_ID}"
+agui_sse_delivery: null
+"""
+
 W_SANDBOX_TRANSCRIPTS_INSTALLATION_CONFIG_KW = {
     "id": INSTALLATION_ID,
     "sandbox_config": config_installation.SandboxConfig(
@@ -2387,6 +2392,11 @@ def _marshal_iconfig_kw(iconfig_kw, config_path):
         (
             W_SSE_DELIVERY_INSTALLATION_CONFIG_YAML,
             W_SSE_DELIVERY_INSTALLATION_CONFIG_KW.copy(),
+            no_depr_warning,
+        ),
+        (
+            W_NULL_SSE_DELIVERY_INSTALLATION_CONFIG_YAML,
+            BARE_INSTALLATION_CONFIG_KW.copy(),
             no_depr_warning,
         ),
         (

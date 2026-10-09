@@ -89,13 +89,6 @@ def test_sse_delivery_config_from_yaml_does_not_mutate_input():
             {"strategy": "bounded", "max_deltas": 8, "max_bytes": 256},
             "'max_ms' is required",
         ),
-        (BOUNDED_YAML | {"max_deltas": 0}, "'max_deltas' must be"),
-        (BOUNDED_YAML | {"max_bytes": -1}, "'max_bytes' must be"),
-        (BOUNDED_YAML | {"max_ms": 0}, "'max_ms' must be"),
-        (BOUNDED_YAML | {"max_ms": True}, "'max_ms' must be"),
-        (BOUNDED_YAML | {"max_ms": 2.5}, "'max_ms' must be"),
-        (BOUNDED_YAML | {"max_ms": "250"}, "'max_ms' must be"),
-        (BOUNDED_YAML | {"max_ms": None}, "'max_ms' must be"),
     ],
 )
 def test_sse_delivery_config_from_yaml_invalid(config_yaml, match):
@@ -109,6 +102,19 @@ def test_sse_delivery_config_from_yaml_invalid(config_yaml, match):
         )
 
     assert exc_info.value._config_path == CONFIG_PATH
+
+
+@pytest.mark.parametrize("key", ["max_deltas", "max_bytes", "max_ms"])
+@pytest.mark.parametrize("value", [0, -1, True, False, 2.5, "8", None, [8]])
+def test_sse_delivery_config_from_yaml_invalid_bound(key, value):
+    with pytest.raises(
+        config_sse_delivery.InvalidSSEDeliveryConfig,
+        match=f"'{key}' must be a positive integer",
+    ):
+        config_sse_delivery.AGUI_SSEDeliveryConfig.from_yaml(
+            CONFIG_PATH,
+            BOUNDED_YAML | {key: value},
+        )
 
 
 @pytest.mark.parametrize(

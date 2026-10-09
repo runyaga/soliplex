@@ -401,18 +401,30 @@ class Channel:
 
 
 class Upstream:
-    """Async iterator with an 'aclose' which can fail or be gated"""
+    """Async iterator with an 'aclose' which can fail
+
+    'started' is set, and 'iterated_in' records the task, on the first
+    '__anext__'.
+    """
 
     def __init__(self, events, *, fail=None, close_fail=None):
         self.events = list(events)
         self.fail = fail
         self.close_fail = close_fail
+        self.started = asyncio.Event()
+        self.iterated_in = None
         self.closed_in = []
 
     def __aiter__(self):
         return self
 
+    def _note_start(self):
+        if not self.started.is_set():
+            self.started.set()
+            self.iterated_in = asyncio.current_task()
+
     async def __anext__(self):
+        self._note_start()
         if self.events:
             return self.events.pop(0)
         if self.fail is not None:
@@ -466,7 +478,7 @@ async def test_coalesce_event_stream_count_and_byte_triggers(
         *expected,
         agui_core.EventType.TEXT_MESSAGE_END,
     ]
-    assert "".join(expected) == "".join(deltas)
+    assert "".join(e.delta for e in found[1:-1]) == "".join(deltas)
 
 
 @pytest.mark.anyio
@@ -485,6 +497,42 @@ async def test_coalesce_event_stream_no_merge_across_ids():
         MESSAGE_ID_1,
         MESSAGE_ID_2,
     ]
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_no_merge_across_tool_call_ids():
+    other_args = agui_core.ToolCallArgsEvent(
+        tool_call_id="other-tool-call-id",
+        delta="X",
+    )
+    events = [TOOL_CALL_ARGS_A, other_args, TOOL_CALL_ARGS_B]
+
+    found = [event async for event in _coalesce(events)]
+
+    assert found == events
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_prefetches_at_most_two_events():
+    produced = []
+
+    async def upstream():
+        for index in range(10):
+            produced.append(index)
+            yield agui_core.CustomEvent(name="test", value=index)
+
+    stream = agui.coalesce_event_stream(upstream(), **BOUNDED_KW)
+
+    first = await anext(stream)
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    assert first.value == 0
+    assert len(produced) <= 3
+
+    rest = [event.value async for event in stream]
+
+    assert rest == list(range(1, 10))
 
 
 @pytest.mark.anyio
@@ -712,18 +760,20 @@ async def test_coalesce_event_stream_early_aclose_closes_upstream_in_pump():
 @pytest.mark.anyio
 async def test_coalesce_event_stream_consumer_cancelled_while_waiting():
     gate = asyncio.Event()
+    waiting = asyncio.Event()
     closed = asyncio.Event()
 
     async def upstream():
         try:
             yield TEXT_CONTENT_1_A
+            waiting.set()
             await gate.wait()
         finally:
             closed.set()
 
     stream = agui.coalesce_event_stream(upstream(), **BOUNDED_KW)
     consumer = asyncio.create_task(_drain(stream))
-    await asyncio.sleep(0)
+    await _until(waiting.is_set)
 
     consumer.cancel()
 
@@ -735,13 +785,17 @@ async def test_coalesce_event_stream_consumer_cancelled_while_waiting():
 @pytest.mark.anyio
 async def test_coalesce_event_stream_consumer_cancelled_during_close():
     gate = asyncio.Event()
+    waiting = asyncio.Event()
     close_started = asyncio.Event()
     release_close = asyncio.Event()
     closed = asyncio.Event()
+    iterated_in = []
 
     async def upstream():
+        iterated_in.append(asyncio.current_task())
         try:
             yield TEXT_CONTENT_1_A
+            waiting.set()
             await gate.wait()
         finally:
             close_started.set()
@@ -751,16 +805,11 @@ async def test_coalesce_event_stream_consumer_cancelled_during_close():
     consumer = asyncio.create_task(
         _drain(agui.coalesce_event_stream(upstream(), **BOUNDED_KW)),
     )
-    await asyncio.sleep(0)
+    await _until(waiting.is_set)
     consumer.cancel()
     async with asyncio.timeout(HANG_GUARD_SECS):
         await close_started.wait()
-
-    (pump,) = (
-        task
-        for task in asyncio.all_tasks()
-        if task.get_coro().__name__ == "_pump"
-    )
+    (pump,) = iterated_in
 
     consumer.cancel()
 
@@ -770,12 +819,9 @@ async def test_coalesce_event_stream_consumer_cancelled_during_close():
     assert pump in agui._BACKGROUND_PUMPS
 
     release_close.set()
-    async with asyncio.timeout(HANG_GUARD_SECS):
-        await asyncio.wait({pump})
-    await asyncio.sleep(0)
+    await _until(lambda: pump not in agui._BACKGROUND_PUMPS)
 
     assert closed.is_set()
-    assert pump not in agui._BACKGROUND_PUMPS
 
 
 @pytest.mark.anyio
@@ -785,13 +831,14 @@ async def test_coalesce_event_stream_logs_close_error_after_cancel(logfire):
 
     class Blocked(Upstream):
         async def __anext__(self):
+            self._note_start()
             await gate.wait()
 
     upstream = Blocked([], close_fail=RuntimeError("close failed"))
     consumer = asyncio.create_task(
         _drain(agui.coalesce_event_stream(upstream, **BOUNDED_KW)),
     )
-    await asyncio.sleep(0)
+    await _until(upstream.started.is_set)
 
     consumer.cancel()
 
@@ -808,6 +855,7 @@ async def test_coalesce_event_stream_logs_error_raised_on_cancel(logfire):
 
     class FailsOnCancel(Upstream):
         async def __anext__(self):
+            self._note_start()
             try:
                 await gate.wait()
             except asyncio.CancelledError:
@@ -817,7 +865,7 @@ async def test_coalesce_event_stream_logs_error_raised_on_cancel(logfire):
     consumer = asyncio.create_task(
         _drain(agui.coalesce_event_stream(upstream, **BOUNDED_KW)),
     )
-    await asyncio.sleep(0)
+    await _until(upstream.started.is_set)
 
     consumer.cancel()
 
@@ -1023,6 +1071,12 @@ async def test_coalesce_event_stream_expired_hold_with_event_queued(
     jump,
     expected,
 ):
+    """A hold that expires with the next event already queued is flushed
+
+    No await separates establishing a hold from the next deadline check,
+    so time can pass there only while the code runs: the clock jumps on
+    the read which establishes the hold for 'b', while 'c' is queued.
+    """
     clock = JumpingClock([])
     monkeypatch.setattr(agui, "_hold_clock", clock)
     channel = Channel()
@@ -1039,9 +1093,7 @@ async def test_coalesce_event_stream_expired_hold_with_event_queued(
     )
 
     first = await anext(stream)
-    await _until(lambda: channel.queue.empty())
-    for _ in range(10):
-        await asyncio.sleep(0)
+    await _until(channel.queue.empty)
 
     clock.jumps = [jump]
     channel.send(None)
@@ -1086,11 +1138,7 @@ async def test_coalesce_event_stream_logs_detached_close_error(logfire):
     )
     async with asyncio.timeout(HANG_GUARD_SECS):
         await close_started.wait()
-    (pump,) = (
-        task
-        for task in asyncio.all_tasks()
-        if task.get_coro().__name__ == "_pump"
-    )
+    pump = upstream.iterated_in
 
     consumer.cancel()
     await asyncio.sleep(0)
@@ -1104,11 +1152,8 @@ async def test_coalesce_event_stream_logs_detached_close_error(logfire):
     logfire.error.assert_not_called()
 
     release_close.set()
-    async with asyncio.timeout(HANG_GUARD_SECS):
-        await asyncio.wait({pump})
-    await asyncio.sleep(0)
+    await _until(lambda: pump not in agui._BACKGROUND_PUMPS)
 
-    assert pump not in agui._BACKGROUND_PUMPS
     logfire.error.assert_called_once()
     assert str(logfire.error.call_args.kwargs["error"]) == "close failed"
 

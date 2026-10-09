@@ -63,7 +63,7 @@ class RoomConfig:
     skills: config_skills.RoomSkillsConfig = None
 
     #
-    # AG-UI SSE delivery: replaces the installation's block as a whole
+    # AG-UI SSE delivery
     #
     agui_sse_delivery: config_sse_delivery.AGUI_SSEDeliveryConfig | None = None
 

@@ -689,7 +689,7 @@ class InstallationConfig:
     sandbox_config: SandboxConfig | None = None
 
     #
-    # AG-UI SSE delivery: default for rooms without their own block
+    # AG-UI SSE delivery
     #
     agui_sse_delivery: config_sse_delivery.AGUI_SSEDeliveryConfig | None = None
 

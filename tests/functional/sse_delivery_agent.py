@@ -3,8 +3,8 @@
 The test sets 'SCRIPT' before starting a run.  The first model turn yields
 'SCRIPT.deltas', waiting on 'SCRIPT.gate' before the delta at index
 'SCRIPT.gate_before' and pausing 'SCRIPT.interval' seconds before each
-delta.  If 'SCRIPT.hold' is set, the turn then calls the 'hold' tool, which
-keeps the run open until 'SCRIPT.hold' is set; a second turn yields
+delta.  If 'SCRIPT.hold' is an event, the turn then calls the 'hold' tool,
+which keeps the run open until the event is set; a second turn yields
 'SCRIPT.final_deltas'.
 """
 

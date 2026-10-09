@@ -346,13 +346,15 @@ def _coalesce(events, **kw):
 class FakeTime:
     """Hold clock and wait seam driven by the test
 
-    A timed wait returns when an awaited future completes, or when the
-    test calls 'expire', which advances the clock by that wait's timeout.
+    A timed wait returns when an awaited future completes, or once the test
+    advances the clock to that wait's deadline with 'advance_to'.
+    'wait_started' is the clock time at which the latest timed wait began.
     """
 
     def __init__(self):
         self.now = 0.0
-        self.timeouts = []
+        self.wait_started = None
+        self._deadline = None
         self._expired = None
 
     def clock(self):
@@ -363,13 +365,15 @@ class FakeTime:
             await asyncio.wait(fs, return_when=return_when)
             return
 
-        self.timeouts.append(timeout)
+        self.wait_started = self.now
+        self._deadline = self.now + timeout
         self._expired = asyncio.get_running_loop().create_future()
         await asyncio.wait({*fs, self._expired}, return_when=return_when)
 
-    def expire(self):
-        self.now += self.timeouts[-1]
-        self._expired.set_result(None)
+    def advance_to(self, now):
+        self.now = now
+        if not self._expired.done() and now >= self._deadline:
+            self._expired.set_result(None)
 
 
 @pytest.fixture
@@ -756,27 +760,29 @@ async def test_coalesce_event_stream_early_aclose_closes_upstream_in_pump():
 
 
 @pytest.mark.anyio
-async def test_coalesce_event_stream_consumer_cancelled_while_waiting():
+async def test_coalesce_event_stream_consumer_cancelled_while_holding(
+    fake_time,
+):
     gate = asyncio.Event()
-    waiting = asyncio.Event()
     closed = asyncio.Event()
 
     async def upstream():
         try:
             yield TEXT_CONTENT_1_A
-            waiting.set()
             await gate.wait()
         finally:
             closed.set()
 
     stream = agui.coalesce_event_stream(upstream(), **BOUNDED_KW)
-    consumer = asyncio.create_task(_drain(stream))
-    await _until(waiting.is_set)
+    found = []
+    consumer = asyncio.create_task(_drain(stream, found))
+    await _until(lambda: fake_time.wait_started is not None)
 
     consumer.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await consumer
+    assert found == []
     assert closed.is_set()
 
 
@@ -890,12 +896,11 @@ async def test_coalesce_event_stream_hold_age_while_upstream_quiet(fake_time):
     consumer = asyncio.create_task(_drain(stream, found))
 
     channel.send(TEXT_CONTENT_1_A)
-    await _until(lambda: fake_time.timeouts)
+    await _until(lambda: fake_time.wait_started is not None)
 
-    assert fake_time.timeouts == [0.25]
     assert found == []
 
-    fake_time.expire()
+    fake_time.advance_to(0.25)
     await _until(lambda: found)
 
     assert found == [TEXT_CONTENT_1_A]
@@ -931,7 +936,7 @@ async def test_coalesce_event_stream_event_received_after_deadline(
     consumer = asyncio.create_task(_drain(stream, found))
 
     channel.send(TEXT_CONTENT_1_A)
-    await _until(lambda: fake_time.timeouts)
+    await _until(lambda: fake_time.wait_started is not None)
     fake_time.now += advance
     channel.send(TEXT_CONTENT_1_B, None)
 
@@ -954,15 +959,14 @@ async def test_coalesce_event_stream_merge_keeps_hold_deadline(fake_time):
     consumer = asyncio.create_task(_drain(stream, found))
     try:
         channel.send(TEXT_CONTENT_1_A)
-        await _until(lambda: len(fake_time.timeouts) == 1)
-        fake_time.now = 0.2
+        await _until(lambda: fake_time.wait_started == 0.0)
+        fake_time.advance_to(0.2)
         channel.send(TEXT_CONTENT_1_B)
-        await _until(lambda: len(fake_time.timeouts) == 2)
+        await _until(lambda: fake_time.wait_started == 0.2)
 
-        assert fake_time.timeouts[1] == pytest.approx(0.05)
         assert found == []
 
-        fake_time.expire()
+        fake_time.advance_to(0.25)
         await _until(lambda: found)
 
         assert found == [TEXT_CONTENT_1_AB]
@@ -973,24 +977,41 @@ async def test_coalesce_event_stream_merge_keeps_hold_deadline(fake_time):
 
 
 @pytest.mark.anyio
-async def test_next_item_reraises_pump_exception():
-    queue = asyncio.Queue(maxsize=1)
-    pump = asyncio.get_running_loop().create_future()
-    pump.set_exception(KeyboardInterrupt())
+async def test_coalesce_event_stream_real_clock_flushes_quiet_hold():
+    channel = Channel()
+    stream = agui.coalesce_event_stream(
+        channel,
+        max_deltas=1_000,
+        max_bytes=1_000_000,
+        max_ms=1,
+    )
+    channel.send(TEXT_CONTENT_1_A)
+    try:
+        async with asyncio.timeout(HANG_GUARD_SECS):
+            first = await anext(stream)
+    finally:
+        channel.send(None)
+        await stream.aclose()
 
-    with pytest.raises(KeyboardInterrupt):
-        await agui._next_item(queue, pump, None)
+    assert first == TEXT_CONTENT_1_A
+
+
+class Fatal(BaseException):
+    """Neither an 'Exception' nor a cancellation"""
 
 
 @pytest.mark.anyio
-async def test_next_item_timeout():
-    queue = asyncio.Queue(maxsize=1)
-    pump = asyncio.get_running_loop().create_future()
+async def test_coalesce_event_stream_reraises_fatal_upstream_error():
+    upstream = Upstream([TEXT_CONTENT_1_A], fail=Fatal())
+    found = []
 
-    found = await agui._next_item(queue, pump, 0)
+    with pytest.raises(Fatal):
+        await _drain(
+            agui.coalesce_event_stream(upstream, **BOUNDED_KW),
+            found,
+        )
 
-    assert found is agui._TIMEOUT
-    assert queue.empty()
+    assert found == []
 
 
 @pytest.mark.anyio
@@ -1156,18 +1177,31 @@ async def test_coalesce_event_stream_logs_error_closed_at_final_yield(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "close_error, w_log",
+    [
+        (RuntimeError(CLOSE_FAILED), True),
+        (None, False),
+        (Fatal(), False),
+    ],
+)
 @mock.patch("soliplex.agui.logfire")
-async def test_coalesce_event_stream_logs_detached_close_error(logfire):
+async def test_coalesce_event_stream_detached_close(
+    logfire,
+    close_error,
+    w_log,
+):
     close_started = asyncio.Event()
     release_close = asyncio.Event()
 
-    class FailingSlowClose(Upstream):
+    class SlowClose(Upstream):
         async def aclose(self):
             close_started.set()
             await release_close.wait()
-            raise RuntimeError(CLOSE_FAILED)
+            if close_error is not None:
+                raise close_error
 
-    upstream = FailingSlowClose([OTHER])
+    upstream = SlowClose([OTHER])
     stream = agui.coalesce_event_stream(upstream, **BOUNDED_KW)
     try:
         assert await anext(stream) == OTHER
@@ -1190,22 +1224,9 @@ async def test_coalesce_event_stream_logs_detached_close_error(logfire):
     finally:
         release_close.set()
 
-    logfire.error.assert_called_once()
-    assert str(logfire.error.call_args.kwargs["error"]) == CLOSE_FAILED
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("w_exception", [False, True])
-@mock.patch("soliplex.agui.logfire")
-async def test_forget_background_pump_wo_error(logfire, w_exception):
-    pump = asyncio.get_running_loop().create_future()
-    if w_exception:
-        pump.set_exception(KeyboardInterrupt())
+    if w_log:
+        logfire.error.assert_called_once()
+        error = logfire.error.call_args.kwargs["error"]
+        assert str(error) == CLOSE_FAILED
     else:
-        pump.set_result(agui._PumpState())
-    agui._BACKGROUND_PUMPS.add(pump)
-
-    agui._forget_background_pump(pump)
-
-    assert pump not in agui._BACKGROUND_PUMPS
-    logfire.error.assert_not_called()
+        logfire.error.assert_not_called()

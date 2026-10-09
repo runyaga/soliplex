@@ -101,7 +101,7 @@ def test_sse_delivery_config_from_yaml_invalid(config_yaml, match):
             config_yaml,
         )
 
-    assert exc_info.value._config_path == CONFIG_PATH
+    assert str(CONFIG_PATH) in str(exc_info.value)
 
 
 @pytest.mark.parametrize("key", ["max_deltas", "max_bytes", "max_ms"])

@@ -704,6 +704,22 @@ async def _pump(
     return state
 
 
+def _log_undelivered(error: Exception):
+    logfire.error(
+        "AG-UI event stream failed after its consumer closed: {error!r}",
+        error=error,
+    )
+
+
+def _forget_background_pump(pump: asyncio.Task):
+    """Drop a pump left closing by a cancelled consumer, logging its error"""
+    _BACKGROUND_PUMPS.discard(pump)
+    if not pump.cancelled() and pump.exception() is None:
+        error = pump.result().error
+        if error is not None:
+            _log_undelivered(error)
+
+
 async def _next_item(queue: asyncio.Queue, pump: asyncio.Future, timeout):
     """Return the next queued event, else the pump's result once it is done
 
@@ -746,8 +762,9 @@ async def coalesce_event_stream(
     """Merge deltas as 'compact_event_stream' does, within bounds
 
     The merged event is yielded once it holds 'max_deltas' deltas, or
-    'max_bytes' bytes of UTF-8 text, or has been held 'max_ms'
-    milliseconds, or when any other event arrives.  The upstream is
+    'max_bytes' bytes of UTF-8 text, or has been held about 'max_ms'
+    milliseconds (a target, checked when the event loop runs this
+    generator), or when any other event arrives.  The upstream is
     iterated and closed in a separate task, so the time bound applies
     while the upstream is quiet.
     """
@@ -775,9 +792,9 @@ async def coalesce_event_stream(
                 continue
 
             if item is state:
-                delivered = True
                 if held is not None:
                     yield held
+                delivered = True
                 if state.error is not None:
                     raise state.error
                 return
@@ -819,15 +836,11 @@ async def coalesce_event_stream(
         except asyncio.CancelledError:
             if asyncio.current_task().cancelling():
                 _BACKGROUND_PUMPS.add(pump)
-                pump.add_done_callback(_BACKGROUND_PUMPS.discard)
+                pump.add_done_callback(_forget_background_pump)
                 raise
         else:
             if not delivered and state.error is not None:
-                logfire.error(
-                    "AG-UI event stream failed after its consumer closed: "
-                    "{error!r}",
-                    error=state.error,
-                )
+                _log_undelivered(state.error)
 
 
 def apply_delivery_strategy(

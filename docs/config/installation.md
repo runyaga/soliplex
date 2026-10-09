@@ -426,14 +426,16 @@ arguments) into SSE events, for every room which has no stanza of its own
 - `strategy: "message"` (the default when no stanza is configured) merges
   adjacent deltas of one message, or of one tool call's arguments, and
   sends them when any other event arrives -- normally the message's end.
-  This uses the fewest bytes, events and stored rows, but text generally
-  reaches the client only when the message ends.
+  This keeps bytes, events and stored rows low, but text generally reaches
+  the client only when the message ends.
 
-- `strategy: "bounded"` merges deltas the same way, but sends the merged
-  event as soon as it holds `max_deltas` deltas, or `max_bytes` bytes of
+- `strategy: "bounded"` merges adjacent deltas of one message or tool call
+  in the same way, and also sends the merged event as soon as it holds `max_deltas` deltas, or `max_bytes` bytes of
   UTF-8 text, or has been held for `max_ms` milliseconds, whichever comes
   first. All three are required, as positive integers. A single delta is
-  never split, so one large delta can exceed `max_bytes`.
+  never split, so one large delta can exceed `max_bytes`. (One difference:
+  after a different message's delta, `message` sends the next delta on its
+  own, while `bounded` starts merging again.)
 
 ```yaml
 agui_sse_delivery:

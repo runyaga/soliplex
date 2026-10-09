@@ -306,6 +306,7 @@ HANG_GUARD_SECS = 5
 BOUNDED_KW = {"max_deltas": 1_000, "max_bytes": 1_000_000, "max_ms": BIG_MS}
 TEST_VAR = contextvars.ContextVar("test_var")
 FAILED_WHILE_CANCELLED = "failed while cancelled"
+CLOSE_FAILED = "close failed"
 
 
 def _text(delta, message_id=MESSAGE_ID_1, **kw):
@@ -1047,3 +1048,83 @@ async def test_coalesce_event_stream_expired_hold_with_event_queued(
     rest = [event async for event in stream]
 
     assert _summary([first, *rest]) == expected
+
+
+@pytest.mark.anyio
+@mock.patch("soliplex.agui.logfire")
+async def test_coalesce_event_stream_logs_error_closed_at_final_yield(
+    logfire,
+):
+    upstream = Upstream(
+        [TEXT_CONTENT_1_A],
+        close_fail=RuntimeError("close failed"),
+    )
+    stream = agui.coalesce_event_stream(upstream, **BOUNDED_KW)
+
+    assert await anext(stream) == TEXT_CONTENT_1_A
+    await stream.aclose()
+
+    logfire.error.assert_called_once()
+    assert str(logfire.error.call_args.kwargs["error"]) == "close failed"
+
+
+@pytest.mark.anyio
+@mock.patch("soliplex.agui.logfire")
+async def test_coalesce_event_stream_logs_detached_close_error(logfire):
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+
+    class FailingSlowClose(Upstream):
+        async def aclose(self):
+            close_started.set()
+            await release_close.wait()
+            raise RuntimeError(CLOSE_FAILED)
+
+    upstream = FailingSlowClose([TEXT_CONTENT_1_A])
+    consumer = asyncio.create_task(
+        _drain(agui.coalesce_event_stream(upstream, **BOUNDED_KW)),
+    )
+    async with asyncio.timeout(HANG_GUARD_SECS):
+        await close_started.wait()
+    (pump,) = (
+        task
+        for task in asyncio.all_tasks()
+        if task.get_coro().__name__ == "_pump"
+    )
+
+    consumer.cancel()
+    await asyncio.sleep(0)
+    assert not consumer.done()
+
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        async with asyncio.timeout(HANG_GUARD_SECS):
+            await consumer
+    assert pump in agui._BACKGROUND_PUMPS
+    logfire.error.assert_not_called()
+
+    release_close.set()
+    async with asyncio.timeout(HANG_GUARD_SECS):
+        await asyncio.wait({pump})
+    await asyncio.sleep(0)
+
+    assert pump not in agui._BACKGROUND_PUMPS
+    logfire.error.assert_called_once()
+    assert str(logfire.error.call_args.kwargs["error"]) == "close failed"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("w_exception", [False, True])
+@mock.patch("soliplex.agui.logfire")
+async def test_forget_background_pump_wo_error(logfire, w_exception):
+    pump = asyncio.get_running_loop().create_future()
+    if w_exception:
+        pump.set_exception(KeyboardInterrupt())
+    else:
+        pump.set_result(agui._PumpState())
+    agui._BACKGROUND_PUMPS.add(pump)
+
+    agui._forget_background_pump(pump)
+
+    assert pump not in agui._BACKGROUND_PUMPS
+    logfire.error.assert_not_called()

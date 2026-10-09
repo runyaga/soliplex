@@ -522,9 +522,13 @@ async def test_coalesce_event_stream_prefetches_at_most_two_events():
             produced.append(index)
             yield agui_core.CustomEvent(name="test", value=index)
 
-    async for event in agui.coalesce_event_stream(upstream(), **BOUNDED_KW):
-        received.append(event.value)
-        assert len(produced) <= len(received) + 2
+    stream = agui.coalesce_event_stream(upstream(), **BOUNDED_KW)
+    try:
+        async for event in stream:
+            received.append(event.value)
+            assert len(produced) <= len(received) + 2
+    finally:
+        await stream.aclose()
 
     assert received == list(range(10))
 
@@ -935,6 +939,37 @@ async def test_coalesce_event_stream_event_received_after_deadline(
         await consumer
 
     assert found == expected
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_merge_keeps_hold_deadline(fake_time):
+    channel = Channel()
+    stream = agui.coalesce_event_stream(
+        channel,
+        max_deltas=1_000,
+        max_bytes=1_000_000,
+        max_ms=250,
+    )
+    found = []
+    consumer = asyncio.create_task(_drain(stream, found))
+    try:
+        channel.send(TEXT_CONTENT_1_A)
+        await _until(lambda: len(fake_time.timeouts) == 1)
+        fake_time.now = 0.2
+        channel.send(TEXT_CONTENT_1_B)
+        await _until(lambda: len(fake_time.timeouts) == 2)
+
+        assert fake_time.timeouts[1] == pytest.approx(0.05)
+        assert found == []
+
+        fake_time.expire()
+        await _until(lambda: found)
+
+        assert found == [TEXT_CONTENT_1_AB]
+    finally:
+        channel.send(None)
+        async with asyncio.timeout(HANG_GUARD_SECS):
+            await consumer
 
 
 @pytest.mark.anyio

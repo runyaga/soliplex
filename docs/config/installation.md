@@ -416,6 +416,43 @@ entirely can **disable room uploads** by leaving `rooms_upload_path` unset: the
 room-upload endpoint then returns `404` and no `room` volume is mounted into
 the sandbox.
 
+## AG-UI SSE Delivery
+
+The optional `agui_sse_delivery` stanza sets how the AG-UI run endpoint
+groups the model's streamed deltas (text, thinking, reasoning and tool-call
+arguments) into SSE events, for every room which has no stanza of its own
+(see [Room Configuration](rooms.md#ag-ui-sse-delivery)).
+
+- `strategy: "message"` (the default when no stanza is configured) sends
+  each message, and each tool call's arguments, as one event once it is
+  complete. This uses the fewest bytes, events and stored rows, but no text
+  reaches the client until the message ends.
+
+- `strategy: "bounded"` merges deltas the same way, but sends the merged
+  event as soon as it holds `max_deltas` deltas, or `max_bytes` bytes of
+  UTF-8 text, or has been held for `max_ms` milliseconds, whichever comes
+  first. All three are required, as positive integers. A single delta is
+  never split, so one large delta can exceed `max_bytes`.
+
+```yaml
+agui_sse_delivery:
+    strategy: "bounded"
+    max_deltas: 8
+    max_bytes: 256
+    max_ms: 250
+```
+
+`bounded` sends text sooner, at the cost of more SSE events, more bytes
+(each event carries its own envelope), and one stored row, saved in its own
+transaction, per event. `max_ms` bounds how long text is held before it is
+sent; saving each event to the database, and the network, add to the delay
+a client sees. No default bounds are provided: suitable values depend on
+the pace at which the room's model produces deltas.
+
+Unknown keys, unknown strategies, bounds given with `message`, and missing
+or non-positive bounds with `bounded` are rejected when the configuration
+loads.
+
 ## Room Configuration Paths
 
 The `room_paths` element specify one or more filesystem paths to

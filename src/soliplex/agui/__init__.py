@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import abc
+import asyncio
 import collections.abc
 import datetime
 import enum
+import time
 import typing
 
 import fastapi
+import logfire
 from ag_ui import core as agui_core
 from pydantic_ai import ui as ai_ui
 from sqlalchemy.ext import asyncio as sqla_asyncio
+
+from soliplex.config import sse_delivery as config_sse_delivery
 
 AGUI_Events = list[agui_core.Event]
 AGUI_EventStream = collections.abc.AsyncIterator[agui_core.Event]
@@ -639,6 +644,190 @@ async def compact_event_stream(stream: AGUI_EventStream):
                 compacting_id = getattr(event, compacting_attr, None)
             else:
                 yield event
+
+
+_hold_clock = time.monotonic
+_wait = asyncio.wait
+_TIMEOUT = object()
+_BACKGROUND_PUMPS: set[asyncio.Task] = set()
+
+
+class _PumpEnd:
+    def __init__(self, error: Exception | None = None):
+        self.error = error
+
+
+async def _pump(stream: AGUI_EventStream, queue: asyncio.Queue):
+    """Iterate and close 'stream' in this one task, then queue a '_PumpEnd'
+
+    If the task is cancelled, nothing more is queued, and an error from
+    iterating or closing the stream is logged, as nobody will read it.
+    """
+    cancelled = False
+    error = None
+
+    try:
+        async for event in stream:
+            await queue.put(event)
+    except asyncio.CancelledError:
+        cancelled = True
+    except Exception as exc:
+        error = exc
+
+    aclose = getattr(stream, "aclose", None)
+    if aclose is not None:
+        try:
+            await aclose()
+        except Exception as close_exc:
+            if error is None:
+                error = close_exc
+            else:
+                error.add_note(
+                    f"Closing the stream also failed: {close_exc!r}"
+                )
+
+    if cancelled or asyncio.current_task().cancelling():
+        if error is not None:
+            logfire.error(
+                "AG-UI event stream failed after cancellation: {error!r}",
+                error=error,
+            )
+        raise asyncio.CancelledError
+
+    await queue.put(_PumpEnd(error))
+
+
+async def _next_item(queue: asyncio.Queue, pump: asyncio.Future, timeout):
+    """Return the next queued item, or '_TIMEOUT' after 'timeout' seconds
+
+    Raises if 'pump' ends without queueing a '_PumpEnd'.
+    """
+    if queue.empty() and not pump.done():
+        getter = asyncio.ensure_future(queue.get())
+        try:
+            await _wait(
+                {getter, pump},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not getter.done():
+                getter.cancel()
+                await asyncio.wait({getter})
+
+        if not getter.cancelled():
+            return getter.result()
+
+    if not queue.empty():
+        return queue.get_nowait()
+
+    if pump.done():
+        if pump.cancelled():
+            raise asyncio.CancelledError
+        raise pump.exception()
+
+    return _TIMEOUT
+
+
+async def coalesce_event_stream(
+    stream: AGUI_EventStream,
+    *,
+    max_deltas: int,
+    max_bytes: int,
+    max_ms: int,
+) -> AGUI_EventStream:
+    """Merge deltas as 'compact_event_stream' does, within bounds
+
+    The merged event is yielded once it holds 'max_deltas' deltas, or
+    'max_bytes' bytes of UTF-8 text, or has been held 'max_ms'
+    milliseconds, or when any other event arrives.  The upstream is
+    iterated and closed in a separate task, so the time bound applies
+    while the upstream is quiet.
+    """
+    queue = asyncio.Queue(maxsize=1)
+    pump = asyncio.create_task(_pump(stream, queue))
+    held = held_attr = held_id = None
+    held_count = 0
+    deadline = 0.0
+
+    try:
+        while True:
+            timeout = None
+            if held is not None:
+                timeout = max(0.0, deadline - _hold_clock())
+
+            item = await _next_item(queue, pump, timeout)
+
+            if held is not None and _hold_clock() >= deadline:
+                to_yield, held = held, None
+                yield to_yield
+
+            if item is _TIMEOUT:
+                continue
+
+            if isinstance(item, _PumpEnd):
+                if held is not None:
+                    yield held
+                if item.error is not None:
+                    raise item.error
+                return
+
+            if (
+                held is not None
+                and item.type == held.type
+                and getattr(item, held_attr, None) == held_id
+            ):
+                held.delta += item.delta
+                held_count += 1
+            else:
+                if held is not None:
+                    to_yield, held = held, None
+                    yield to_yield
+
+                held_attr = _COMPACTIBLE_TYPES.get(item.type)
+                if held_attr is None:
+                    yield item
+                    continue
+
+                held = item.model_copy()
+                held_id = getattr(item, held_attr, None)
+                held_count = 1
+                deadline = _hold_clock() + max_ms / 1000
+
+            if (
+                held_count >= max_deltas
+                or len(held.delta.encode("utf-8")) >= max_bytes
+            ):
+                to_yield, held = held, None
+                yield to_yield
+
+    finally:
+        pump.cancel()
+        try:
+            await asyncio.shield(pump)
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                _BACKGROUND_PUMPS.add(pump)
+                pump.add_done_callback(_BACKGROUND_PUMPS.discard)
+                raise
+
+
+def apply_delivery_strategy(
+    stream: AGUI_EventStream,
+    delivery: config_sse_delivery.AGUI_SSEDeliveryConfig,
+) -> AGUI_EventStream:
+    if (
+        delivery.strategy
+        == config_sse_delivery.AGUI_SSEDeliveryStrategy.BOUNDED
+    ):
+        return coalesce_event_stream(
+            stream,
+            max_deltas=delivery.max_deltas,
+            max_bytes=delivery.max_bytes,
+            max_ms=delivery.max_ms,
+        )
+
+    return compact_event_stream(stream)
 
 
 async def with_final_state(

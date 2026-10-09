@@ -1,3 +1,5 @@
+import asyncio
+import contextvars
 from unittest import mock
 
 import fastapi
@@ -5,6 +7,7 @@ import pytest
 from ag_ui import core as agui_core
 
 from soliplex import agui
+from soliplex.config import sse_delivery as config_sse_delivery
 
 MESSAGE_ID_1 = "message-id-1"
 MESSAGE_ID_2 = "message-id-2"
@@ -296,3 +299,645 @@ async def test_get_the_threads(ts_klass, fake_async_session):
     ts_klass.assert_called_once_with(fake_async_session.session)
 
     fake_async_session.cls.assert_called_once_with(bind=engine)
+
+
+BIG_MS = 60_000
+HANG_GUARD_SECS = 5
+BOUNDED_KW = {"max_deltas": 1_000, "max_bytes": 1_000_000, "max_ms": BIG_MS}
+TEST_VAR = contextvars.ContextVar("test_var")
+FAILED_WHILE_CANCELLED = "failed while cancelled"
+
+
+def _text(delta, message_id=MESSAGE_ID_1, **kw):
+    return agui_core.TextMessageContentEvent(
+        message_id=message_id,
+        delta=delta,
+        **kw,
+    )
+
+
+def _summary(events):
+    return [getattr(event, "delta", event.type) for event in events]
+
+
+async def _aiter(events):
+    for event in events:
+        yield event
+
+
+async def _drain(stream, found=None):
+    found = [] if found is None else found
+    async for event in stream:
+        found.append(event)
+    return found
+
+
+async def _until(predicate):
+    async with asyncio.timeout(HANG_GUARD_SECS):
+        while not predicate():
+            await asyncio.sleep(0)
+
+
+def _coalesce(events, **kw):
+    return agui.coalesce_event_stream(_aiter(events), **(BOUNDED_KW | kw))
+
+
+class FakeTime:
+    """Hold clock and wait seam driven by the test
+
+    A timed wait returns when an awaited future completes, or when the
+    test calls 'expire', which advances the clock by that wait's timeout.
+    """
+
+    def __init__(self):
+        self.now = 0.0
+        self.timeouts = []
+        self._expired = None
+
+    def clock(self):
+        return self.now
+
+    async def wait(self, fs, *, timeout, return_when):
+        if timeout is None:
+            await asyncio.wait(fs, return_when=return_when)
+            return
+
+        self.timeouts.append(timeout)
+        self._expired = asyncio.get_running_loop().create_future()
+        await asyncio.wait({*fs, self._expired}, return_when=return_when)
+
+    def expire(self):
+        self.now += self.timeouts[-1]
+        self._expired.set_result(None)
+
+
+@pytest.fixture
+def fake_time(monkeypatch):
+    fake = FakeTime()
+    monkeypatch.setattr(agui, "_hold_clock", fake.clock)
+    monkeypatch.setattr(agui, "_wait", fake.wait)
+    return fake
+
+
+class Channel:
+    """Upstream fed by the test; 'None' ends it"""
+
+    def __init__(self):
+        self.queue = asyncio.Queue()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        event = await self.queue.get()
+        if event is None:
+            raise StopAsyncIteration
+        return event
+
+    def send(self, *events):
+        for event in events:
+            self.queue.put_nowait(event)
+
+
+class Upstream:
+    """Async iterator with an 'aclose' which can fail or be gated"""
+
+    def __init__(self, events, *, fail=None, close_fail=None):
+        self.events = list(events)
+        self.fail = fail
+        self.close_fail = close_fail
+        self.closed_in = []
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.events:
+            return self.events.pop(0)
+        if self.fail is not None:
+            raise self.fail
+        raise StopAsyncIteration
+
+    async def aclose(self):
+        self.closed_in.append(asyncio.current_task())
+        if self.close_fail is not None:
+            raise self.close_fail
+
+
+class NoCloseUpstream:
+    def __init__(self, events):
+        self.events = list(events)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.events:
+            return self.events.pop(0)
+        raise StopAsyncIteration
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "deltas, kw, expected",
+    [
+        ("abcdefghij", {"max_deltas": 4}, ["abcd", "efgh", "ij"]),
+        ("abc", {"max_deltas": 1}, ["a", "b", "c"]),
+        ("abc", {}, ["abc"]),
+        (["é", "é", "é"], {"max_bytes": 4}, ["éé", "é"]),
+        (["é", "é", "é"], {"max_bytes": 3}, ["éé", "é"]),
+        (["xxxxxxxxxx", "y", "z"], {"max_bytes": 4}, ["xxxxxxxxxx", "yz"]),
+        ("abcd", {"max_deltas": 3, "max_bytes": 2}, ["ab", "cd"]),
+        ("abcd", {"max_deltas": 2, "max_bytes": 3}, ["ab", "cd"]),
+    ],
+)
+async def test_coalesce_event_stream_count_and_byte_triggers(
+    deltas,
+    kw,
+    expected,
+):
+    events = [TEXT_START_1, *[_text(d) for d in deltas], TEXT_END_1]
+
+    found = [event async for event in _coalesce(events, **kw)]
+
+    assert _summary(found) == [
+        agui_core.EventType.TEXT_MESSAGE_START,
+        *expected,
+        agui_core.EventType.TEXT_MESSAGE_END,
+    ]
+    assert "".join(expected) == "".join(deltas)
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_no_merge_across_ids():
+    events = [
+        _text("a", MESSAGE_ID_1),
+        _text("b", MESSAGE_ID_2),
+        _text("c", MESSAGE_ID_2),
+        TEXT_END_1,
+    ]
+
+    found = [event async for event in _coalesce(events)]
+
+    assert _summary(found) == ["a", "bc", agui_core.EventType.TEXT_MESSAGE_END]
+    assert [event.message_id for event in found[:2]] == [
+        MESSAGE_ID_1,
+        MESSAGE_ID_2,
+    ]
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_no_merge_across_types():
+    events = [THINK_CONTENT_A, TEXT_CONTENT_1_A, TEXT_CONTENT_1_B]
+
+    found = [event async for event in _coalesce(events)]
+
+    assert found == [THINK_CONTENT_A, TEXT_CONTENT_1_AB]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "first, second, merged",
+    [
+        (TEXT_CONTENT_1_A, TEXT_CONTENT_1_B, TEXT_CONTENT_1_AB),
+        (THINK_CONTENT_A, THINK_CONTENT_B, THINK_CONTENT_AB),
+        (TOOL_CALL_ARGS_A, TOOL_CALL_ARGS_B, TOOL_CALL_ARGS_AB),
+        (
+            agui_core.ReasoningMessageContentEvent(
+                message_id=MESSAGE_ID_1,
+                delta="A ",
+            ),
+            agui_core.ReasoningMessageContentEvent(
+                message_id=MESSAGE_ID_1,
+                delta="B ",
+            ),
+            agui_core.ReasoningMessageContentEvent(
+                message_id=MESSAGE_ID_1,
+                delta="A B ",
+            ),
+        ),
+    ],
+)
+async def test_coalesce_event_stream_merges_each_eligible_type(
+    first,
+    second,
+    merged,
+):
+    found = [event async for event in _coalesce([first, second, OTHER])]
+
+    assert found == [merged, OTHER]
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_passes_other_events_after_flush():
+    events = [
+        RUN_STARTED,
+        TEXT_START_1,
+        TEXT_CONTENT_1_A,
+        TOOL_CALL_START,
+        TEXT_CONTENT_1_B,
+        TEXT_CONTENT_1_C,
+        TEXT_END_1,
+        RUN_FINISHED,
+    ]
+
+    found = [event async for event in _coalesce(events)]
+
+    assert found == [
+        RUN_STARTED,
+        TEXT_START_1,
+        TEXT_CONTENT_1_A,
+        TOOL_CALL_START,
+        agui_core.TextMessageContentEvent(
+            message_id=MESSAGE_ID_1,
+            delta="B C",
+        ),
+        TEXT_END_1,
+        RUN_FINISHED,
+    ]
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_keeps_first_timestamp():
+    events = [_text("a", timestamp=1), _text("b", timestamp=2)]
+
+    (found,) = [event async for event in _coalesce(events)]
+
+    assert found.delta == "ab"
+    assert found.timestamp == 1
+    assert events[0].delta == "a"
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_flushes_at_end_of_stream():
+    found = [event async for event in _coalesce([_text("a"), _text("b")])]
+
+    assert _summary(found) == ["ab"]
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_empty_upstream():
+    assert [event async for event in _coalesce([])] == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "events, expected",
+    [
+        ([], []),
+        ([TEXT_CONTENT_1_A, TEXT_CONTENT_1_B], [TEXT_CONTENT_1_AB]),
+    ],
+)
+async def test_coalesce_event_stream_iteration_error(events, expected):
+    upstream = Upstream(events, fail=RuntimeError("boom"))
+    stream = agui.coalesce_event_stream(upstream, **BOUNDED_KW)
+    found = []
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await _drain(stream, found)
+
+    assert found == expected
+    (closed_in,) = upstream.closed_in
+    assert closed_in is not asyncio.current_task()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "events, expected",
+    [
+        ([], []),
+        ([TEXT_CONTENT_1_A, TEXT_CONTENT_1_B], [TEXT_CONTENT_1_AB]),
+    ],
+)
+async def test_coalesce_event_stream_close_error(events, expected):
+    upstream = Upstream(events, close_fail=RuntimeError("close failed"))
+    stream = agui.coalesce_event_stream(upstream, **BOUNDED_KW)
+    found = []
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        await _drain(stream, found)
+
+    assert found == expected
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_iteration_and_close_error():
+    upstream = Upstream(
+        [TEXT_CONTENT_1_A],
+        fail=RuntimeError("boom"),
+        close_fail=ValueError("close failed"),
+    )
+    stream = agui.coalesce_event_stream(upstream, **BOUNDED_KW)
+    found = []
+
+    with pytest.raises(RuntimeError, match="boom") as exc_info:
+        await _drain(stream, found)
+
+    assert found == [TEXT_CONTENT_1_A]
+    (note,) = exc_info.value.__notes__
+    assert "close failed" in note
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_upstream_without_aclose():
+    upstream = NoCloseUpstream([TEXT_CONTENT_1_A, TEXT_CONTENT_1_B])
+
+    found = [
+        event
+        async for event in agui.coalesce_event_stream(upstream, **BOUNDED_KW)
+    ]
+
+    assert found == [TEXT_CONTENT_1_AB]
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_pump_cancelled_does_not_flush():
+    async def upstream():
+        yield TEXT_CONTENT_1_A
+        asyncio.current_task().cancel()
+        await asyncio.sleep(0)
+
+    found = []
+
+    with pytest.raises(asyncio.CancelledError):
+        await _drain(
+            agui.coalesce_event_stream(upstream(), **BOUNDED_KW),
+            found,
+        )
+
+    assert found == []
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_upstream_raises_cancelled_error():
+    upstream = Upstream([TEXT_CONTENT_1_A], fail=asyncio.CancelledError())
+    found = []
+
+    with pytest.raises(asyncio.CancelledError):
+        await _drain(
+            agui.coalesce_event_stream(upstream, **BOUNDED_KW),
+            found,
+        )
+
+    assert found == []
+    assert len(upstream.closed_in) == 1
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_early_aclose_closes_upstream_in_pump():
+    gate = asyncio.Event()
+    closed_in = []
+
+    async def upstream():
+        token = TEST_VAR.set("set-in-upstream")
+        try:
+            yield TEXT_START_1
+            await gate.wait()
+        finally:
+            TEST_VAR.reset(token)
+            closed_in.append(asyncio.current_task())
+
+    stream = agui.coalesce_event_stream(upstream(), **BOUNDED_KW)
+
+    assert await anext(stream) == TEXT_START_1
+    await stream.aclose()
+
+    (closed_task,) = closed_in
+    assert closed_task is not asyncio.current_task()
+    assert closed_task.cancelled()
+    assert closed_task not in agui._BACKGROUND_PUMPS
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_consumer_cancelled_while_waiting():
+    gate = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def upstream():
+        try:
+            yield TEXT_CONTENT_1_A
+            await gate.wait()
+        finally:
+            closed.set()
+
+    stream = agui.coalesce_event_stream(upstream(), **BOUNDED_KW)
+    consumer = asyncio.create_task(_drain(stream))
+    await asyncio.sleep(0)
+
+    consumer.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+    assert closed.is_set()
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_consumer_cancelled_during_close():
+    gate = asyncio.Event()
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def upstream():
+        try:
+            yield TEXT_CONTENT_1_A
+            await gate.wait()
+        finally:
+            close_started.set()
+            await release_close.wait()
+            closed.set()
+
+    consumer = asyncio.create_task(
+        _drain(agui.coalesce_event_stream(upstream(), **BOUNDED_KW)),
+    )
+    await asyncio.sleep(0)
+    consumer.cancel()
+    async with asyncio.timeout(HANG_GUARD_SECS):
+        await close_started.wait()
+
+    (pump,) = (
+        task
+        for task in asyncio.all_tasks()
+        if task.get_coro().__name__ == "_pump"
+    )
+
+    consumer.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+    assert not closed.is_set()
+    assert pump in agui._BACKGROUND_PUMPS
+
+    release_close.set()
+    async with asyncio.timeout(HANG_GUARD_SECS):
+        await asyncio.wait({pump})
+    await asyncio.sleep(0)
+
+    assert closed.is_set()
+    assert pump not in agui._BACKGROUND_PUMPS
+
+
+@pytest.mark.anyio
+@mock.patch("soliplex.agui.logfire")
+async def test_coalesce_event_stream_logs_close_error_after_cancel(logfire):
+    gate = asyncio.Event()
+
+    class Blocked(Upstream):
+        async def __anext__(self):
+            await gate.wait()
+
+    upstream = Blocked([], close_fail=RuntimeError("close failed"))
+    consumer = asyncio.create_task(
+        _drain(agui.coalesce_event_stream(upstream, **BOUNDED_KW)),
+    )
+    await asyncio.sleep(0)
+
+    consumer.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+    logfire.error.assert_called_once()
+    assert isinstance(logfire.error.call_args.kwargs["error"], RuntimeError)
+
+
+@pytest.mark.anyio
+@mock.patch("soliplex.agui.logfire")
+async def test_coalesce_event_stream_logs_error_raised_on_cancel(logfire):
+    gate = asyncio.Event()
+
+    class FailsOnCancel(Upstream):
+        async def __anext__(self):
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                raise RuntimeError(FAILED_WHILE_CANCELLED) from None
+
+    upstream = FailsOnCancel([])
+    consumer = asyncio.create_task(
+        _drain(agui.coalesce_event_stream(upstream, **BOUNDED_KW)),
+    )
+    await asyncio.sleep(0)
+
+    consumer.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+    logfire.error.assert_called_once()
+    error = logfire.error.call_args.kwargs["error"]
+    assert str(error) == FAILED_WHILE_CANCELLED
+
+
+@pytest.mark.anyio
+async def test_coalesce_event_stream_hold_age_while_upstream_quiet(fake_time):
+    channel = Channel()
+    stream = agui.coalesce_event_stream(
+        channel,
+        max_deltas=1_000,
+        max_bytes=1_000_000,
+        max_ms=250,
+    )
+    found = []
+    consumer = asyncio.create_task(_drain(stream, found))
+
+    channel.send(TEXT_CONTENT_1_A)
+    await _until(lambda: fake_time.timeouts)
+
+    assert fake_time.timeouts == [0.25]
+    assert found == []
+
+    fake_time.expire()
+    await _until(lambda: found)
+
+    assert found == [TEXT_CONTENT_1_A]
+
+    channel.send(TEXT_CONTENT_1_B, TEXT_END_1, None)
+    async with asyncio.timeout(HANG_GUARD_SECS):
+        await consumer
+
+    assert found == [TEXT_CONTENT_1_A, TEXT_CONTENT_1_B, TEXT_END_1]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "advance, expected",
+    [
+        (0.25, [TEXT_CONTENT_1_A, TEXT_CONTENT_1_B]),
+        (0.249, [TEXT_CONTENT_1_AB]),
+    ],
+)
+async def test_coalesce_event_stream_event_received_after_deadline(
+    fake_time,
+    advance,
+    expected,
+):
+    channel = Channel()
+    stream = agui.coalesce_event_stream(
+        channel,
+        max_deltas=1_000,
+        max_bytes=1_000_000,
+        max_ms=250,
+    )
+    found = []
+    consumer = asyncio.create_task(_drain(stream, found))
+
+    channel.send(TEXT_CONTENT_1_A)
+    await _until(lambda: fake_time.timeouts)
+    fake_time.now += advance
+    channel.send(TEXT_CONTENT_1_B, None)
+
+    async with asyncio.timeout(HANG_GUARD_SECS):
+        await consumer
+
+    assert found == expected
+
+
+@pytest.mark.anyio
+async def test_next_item_reraises_pump_exception():
+    queue = asyncio.Queue(maxsize=1)
+    pump = asyncio.get_running_loop().create_future()
+    pump.set_exception(KeyboardInterrupt())
+
+    with pytest.raises(KeyboardInterrupt):
+        await agui._next_item(queue, pump, None)
+
+
+@pytest.mark.anyio
+async def test_next_item_timeout():
+    queue = asyncio.Queue(maxsize=1)
+    pump = asyncio.get_running_loop().create_future()
+
+    found = await agui._next_item(queue, pump, 0)
+
+    assert found is agui._TIMEOUT
+    assert queue.empty()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "strategy, expected",
+    [
+        ("message", ["a", "b", "c", agui_core.EventType.TEXT_MESSAGE_END]),
+        ("bounded", ["a", "bc", agui_core.EventType.TEXT_MESSAGE_END]),
+    ],
+)
+async def test_apply_delivery_strategy(strategy, expected):
+    delivery = config_sse_delivery.AGUI_SSEDeliveryConfig.from_yaml(
+        None,
+        {"strategy": strategy} | ({} if strategy == "message" else BOUNDED_KW),
+    )
+    events = [
+        _text("a", MESSAGE_ID_1),
+        _text("b", MESSAGE_ID_2),
+        _text("c", MESSAGE_ID_2),
+        TEXT_END_1,
+    ]
+
+    found = [
+        event
+        async for event in agui.apply_delivery_strategy(
+            _aiter(events),
+            delivery,
+        )
+    ]
+
+    assert _summary(found) == expected

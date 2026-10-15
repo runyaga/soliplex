@@ -3502,6 +3502,40 @@ def test_installationconfig_room_configs_wo_existing_w_conflict(temp_dir):
     assert found[test_rooms.ROOM_ID].name == "foo"
 
 
+def test_installationconfig__load_room_configs_w_report_shadowed_room(
+    temp_dir,
+):
+    ROOM_PATHS = ["./local", "./shared"]
+    kw = BARE_INSTALLATION_CONFIG_KW.copy()
+    kw["_config_path"] = temp_dir / "installation.yaml"
+    kw["environment"] = BARE_INSTALLATION_CONFIG_ENVIRONMENT
+    kw["room_paths"] = ROOM_PATHS
+    for room_path in ROOM_PATHS:
+        (temp_dir / room_path).mkdir()
+        _write_room_config(
+            temp_dir / room_path, "foo", _room_config_yaml("foo")
+        )
+    _write_room_config(temp_dir / "shared", "bar", _room_config_yaml("bar"))
+    i_config = config_installation.InstallationConfig(**kw)
+    reported = []
+
+    def _report_shadowed_room(room_id, kept_path, skipped_path):
+        reported.append((room_id, kept_path, skipped_path))
+
+    found = i_config._load_room_configs(
+        _report_shadowed_room=_report_shadowed_room,
+    )
+
+    assert sorted(found) == ["bar", "foo"]
+    assert reported == [
+        (
+            "foo",
+            temp_dir / "local" / "foo" / "room_config.yaml",
+            temp_dir / "shared" / "foo" / "room_config.yaml",
+        ),
+    ]
+
+
 def test_installationconfig_room_configs_w_existing():
     RC_1, RC_2 = object(), object()
     existing = {"room_1": RC_1, "room_2": RC_2}
@@ -4003,6 +4037,68 @@ def test_installationconfig_reload_configurations(temp_dir):
     # Stale resolved-skills cache must be invalidated so the next access
     # recomputes against the reloaded availability maps.
     assert i_config._resolved_skill_configs is None
+
+
+def _write_room_config(rooms_path, dir_name, room_config_yaml):
+    room_path = rooms_path / dir_name
+    room_path.mkdir()
+    (room_path / "room_config.yaml").write_text(room_config_yaml)
+
+
+def _room_config_yaml(room_id):
+    return test_rooms.BARE_ROOM_CONFIG_YAML.replace(
+        f'id: "{test_rooms.ROOM_ID}"',
+        f'id: "{room_id}"',
+        1,
+    )
+
+
+@pytest.fixture
+def loaded_rooms_config(temp_dir):
+    """An installation config whose one room is already loaded
+
+    Yields the config and its 'rooms' directory, for a test to change.
+    """
+    kw = BARE_INSTALLATION_CONFIG_KW.copy()
+    kw["_config_path"] = temp_dir / "installation.yaml"
+    kw["environment"] = BARE_INSTALLATION_CONFIG_ENVIRONMENT
+    kw["_completion_configs"] = {}
+    rooms = temp_dir / "rooms"
+    rooms.mkdir()
+    _write_room_config(rooms, "foo", _room_config_yaml("foo"))
+    i_config = config_installation.InstallationConfig(**kw)
+    _ = i_config.room_configs  # load the rooms before the test changes them
+
+    return i_config, rooms
+
+
+def test_installationconfig_reload_room_configs(loaded_rooms_config):
+    i_config, rooms = loaded_rooms_config
+    existing = i_config._room_configs
+    completion_configs = i_config._completion_configs
+    _write_room_config(rooms, "bar", _room_config_yaml("bar"))
+
+    found = i_config.reload_room_configs()
+
+    assert sorted(found) == ["bar", "foo"]
+    assert i_config._room_configs is not existing
+    assert found == i_config._room_configs
+    assert found is not i_config._room_configs  # a copy, as 'room_configs'
+    assert i_config._completion_configs is completion_configs  # untouched
+
+
+def test_installationconfig_reload_room_configs_w_broken_room(
+    loaded_rooms_config,
+):
+    i_config, rooms = loaded_rooms_config
+    existing = i_config._room_configs
+    _write_room_config(rooms, "broken", 'id: ["unclosed')
+
+    with pytest.raises(config_exc.FromYamlException):
+        i_config.reload_room_configs()
+
+    assert i_config._room_configs is existing
+    assert list(existing) == ["foo"]
 
 
 @pytest.fixture

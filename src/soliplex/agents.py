@@ -48,6 +48,10 @@ class AgentDependencies:
     run_id: str | None = None
     user: models.UserProfile = None  # TBD make required
     tool_configs: ToolConfigMap = None
+    agui_tool_metadata: dict[str, typing.Any] = dataclasses.field(
+        default_factory=dict,
+    )
+    """AG-UI 'Tool.metadata' (or None) of each client tool, by tool name"""
 
 
 SoliplexAgent = ai_agent.AbstractAgent[AgentDependencies, typing.Any]

@@ -4,6 +4,7 @@ import dataclasses
 import typing
 
 import pydantic_ai
+from ag_ui import core as agui_core
 from haiku.rag.capabilities import rag as hr_caps_rag
 from pydantic_ai import agent as ai_agent
 from pydantic_ai import capabilities as ai_capabilities
@@ -48,6 +49,10 @@ class AgentDependencies:
     run_id: str | None = None
     user: models.UserProfile = None  # TBD make required
     tool_configs: ToolConfigMap = None
+    agui_context: list[agui_core.Context] = dataclasses.field(
+        default_factory=list,
+    )
+    """Client-supplied context entries from the AG-UI run input"""
 
 
 SoliplexAgent = ai_agent.AbstractAgent[AgentDependencies, typing.Any]

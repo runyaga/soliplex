@@ -129,6 +129,13 @@ for configuring an agent.
   Each tool mapping can contain additional elements, which are used to
   configure the tool's behavior.
 
+- The AG-UI run input's `context` entries reach Soliplex code as
+  `AgentDependencies.agui_context`. Soliplex sends them to the model only
+  through the `soliplex.tools.agui_context` tool, in a room which lists it.
+  That tool returns the entries as tool output, never as instructions. The
+  client writes every entry, so code which acts on an entry must check it
+  against state held by the server.
+
 ### MCP Client Toolsets
 
 - `mcp_client_toolsets` should be a mapping of toolset name to a toolset

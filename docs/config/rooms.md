@@ -129,6 +129,11 @@ for configuring an agent.
   Each tool mapping can contain additional elements, which are used to
   configure the tool's behavior.
 
+- The AG-UI run input's `forwardedProps` reach Soliplex code as
+  `AgentDependencies.agui_forwarded_props`, for the current run only.
+  Soliplex does not send them to the model. The client writes them, so code
+  which acts on them must check them against state held by the server.
+
 ### MCP Client Toolsets
 
 - `mcp_client_toolsets` should be a mapping of toolset name to a toolset

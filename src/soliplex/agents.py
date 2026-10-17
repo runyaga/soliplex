@@ -48,6 +48,8 @@ class AgentDependencies:
     run_id: str | None = None
     user: models.UserProfile = None  # TBD make required
     tool_configs: ToolConfigMap = None
+    agui_forwarded_props: typing.Any = None
+    """AG-UI 'forwardedProps' from the run input, not sent to the model"""
 
 
 SoliplexAgent = ai_agent.AbstractAgent[AgentDependencies, typing.Any]

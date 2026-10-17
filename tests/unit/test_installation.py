@@ -51,10 +51,12 @@ ROOM_ID = "test-room"
 THREAD_ID = "test-agui-thread"
 RUN_ID = "test-agui-run"
 
+FORWARDED_PROPS = {"batch": {"id": "nightly", "run": 17}}
 RUN_AGENT_INPUT = mock.create_autospec(
     agui_core.RunAgentInput,
     thread_id=THREAD_ID,
     run_id=RUN_ID,
+    forwarded_props=FORWARDED_PROPS,
 )
 
 NoSuchSecret = pytest.raises(KeyError)
@@ -1324,6 +1326,14 @@ async def test_installation_get_agent_deps_for_room(
             if w_run_agent_input:
                 assert found.thread_id == RUN_AGENT_INPUT.thread_id
                 assert found.run_id == RUN_AGENT_INPUT.run_id
+                assert found.agui_forwarded_props == FORWARDED_PROPS
+                assert found.agui_forwarded_props is not FORWARDED_PROPS
+                assert (
+                    found.agui_forwarded_props["batch"]
+                    is not FORWARDED_PROPS["batch"]
+                )
+            else:
+                assert found.agui_forwarded_props is None
 
             if w_tp_engine:
                 assert found.thread_persistence_engine is tp_engine

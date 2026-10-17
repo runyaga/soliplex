@@ -143,6 +143,11 @@ for configuring an agent.
   does not send it to the model. The client writes the metadata, so code
   which acts on it must check it against state held by the server.
 
+- The AG-UI run input's `forwardedProps` reach Soliplex code as
+  `AgentDependencies.agui_forwarded_props`, for the current run only.
+  Soliplex does not send them to the model. The client writes them, so code
+  which acts on them must check them against state held by the server.
+
 ### MCP Client Toolsets
 
 - `mcp_client_toolsets` should be a mapping of toolset name to a toolset

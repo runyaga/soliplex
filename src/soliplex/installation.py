@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import dataclasses
 import enum
 import pathlib
@@ -626,6 +627,9 @@ class Installation:
                 tool.name: getattr(tool, "metadata", None)
                 for tool in run_agent_input.tools
             }
+            kwargs["agui_forwarded_props"] = copy.deepcopy(
+                run_agent_input.forwarded_props,
+            )
 
         if thread_persistence_engine is not None:
             kwargs["thread_persistence_engine"] = thread_persistence_engine

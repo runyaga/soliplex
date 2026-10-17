@@ -57,6 +57,8 @@ class AgentDependencies:
         default_factory=dict,
     )
     """AG-UI 'Tool.metadata' (or None) of each client tool, by tool name"""
+    agui_forwarded_props: typing.Any = None
+    """AG-UI 'forwardedProps' from the run input, not sent to the model"""
 
 
 SoliplexAgent = ai_agent.AbstractAgent[AgentDependencies, typing.Any]

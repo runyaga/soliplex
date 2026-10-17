@@ -57,6 +57,7 @@ AGUI_CONTEXT = [
     agui_core.Context(description="Client", value="Test client"),
 ]
 TOOL_METADATA = {"skill": "shop-search", "version": 2}
+FORWARDED_PROPS = {"batch": {"id": "nightly", "run": 17}}
 RUN_AGENT_INPUT = mock.create_autospec(
     agui_core.RunAgentInput,
     thread_id=THREAD_ID,
@@ -70,6 +71,7 @@ RUN_AGENT_INPUT = mock.create_autospec(
         ),
         agui_core.Tool(name="take_photo", description="Take a photo"),
     ],
+    forwarded_props=FORWARDED_PROPS,
 )
 
 NoSuchSecret = pytest.raises(KeyError)
@@ -1345,9 +1347,16 @@ async def test_installation_get_agent_deps_for_room(
                     "search_products": TOOL_METADATA,
                     "take_photo": None,
                 }
+                assert found.agui_forwarded_props == FORWARDED_PROPS
+                assert found.agui_forwarded_props is not FORWARDED_PROPS
+                assert (
+                    found.agui_forwarded_props["batch"]
+                    is not FORWARDED_PROPS["batch"]
+                )
             else:
                 assert found.agui_context == []
                 assert found.agui_tool_metadata == {}
+                assert found.agui_forwarded_props is None
 
             if w_tp_engine:
                 assert found.thread_persistence_engine is tp_engine

@@ -2,11 +2,13 @@ import asyncio
 import contextlib
 import datetime
 import functools
+import json
 import uuid
 from unittest import mock
 
 import _test_features as agui_features
 import fastapi
+import pydantic
 import pytest
 from ag_ui import core as agui_core
 from sqlalchemy import exc as sqla_exc
@@ -70,6 +72,37 @@ EMPTY_FEATURE = config_agui.AGUI_Feature(
     name=EMPTY_FEATURE_NAME,
     model_klass=agui_features.EmptyFeatureModel,
     source=config_agui.AGUI_FeatureSource.SERVER,
+)
+CLIENT_FEATURE = config_agui.AGUI_Feature(
+    name=EMPTY_FEATURE_NAME,
+    model_klass=agui_features.EmptyFeatureModel,
+    source=config_agui.AGUI_FeatureSource.CLIENT,
+)
+
+VALIDATOR_ERROR = "unlucky value"
+
+
+class NestedClientFeatureModel(pydantic.BaseModel):
+    count: int
+
+
+class ClientFeatureModel(pydantic.BaseModel):
+    value: int
+    label: str = "default"
+    nested: NestedClientFeatureModel
+
+    @pydantic.field_validator("value")
+    @classmethod
+    def reject_thirteen(cls, value):
+        if value == 13:
+            raise ValueError(VALIDATOR_ERROR)
+        return value
+
+
+VALIDATED_CLIENT_FEATURE = config_agui.AGUI_Feature(
+    name=EMPTY_FEATURE_NAME,
+    model_klass=ClientFeatureModel,
+    source=config_agui.AGUI_FeatureSource.CLIENT,
 )
 
 EMPTY_RUN_INPUT = agui_core.RunAgentInput(
@@ -802,10 +835,11 @@ async def test_get_room_agui_thread_id_run_id(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "w_agui_feature_names",
+    "w_agui_feature_names, feature, exp_inital_state_keys",
     [
-        [],
-        [EMPTY_FEATURE_NAME],
+        ([], EMPTY_FEATURE, set()),
+        ([EMPTY_FEATURE_NAME], EMPTY_FEATURE, {EMPTY_FEATURE_NAME}),
+        ([EMPTY_FEATURE_NAME], CLIENT_FEATURE, set()),
     ],
 )
 @pytest.mark.parametrize(
@@ -825,12 +859,12 @@ async def test_post_room_agui_only(
     test_run,
     w_thread_meta,
     w_agui_feature_names,
+    feature,
+    exp_inital_state_keys,
 ):
     room_config = mock.create_autospec(config_rooms.RoomConfig)
     room_config.agui_feature_names = w_agui_feature_names
     cuir.return_value = room_config
-
-    exp_inital_state_keys = set(w_agui_feature_names)
 
     test_thread.list_runs.return_value = [test_run]
 
@@ -870,7 +904,7 @@ async def test_post_room_agui_only(
         test_thread,
     )
 
-    patched_agui_features[EMPTY_FEATURE_NAME] = EMPTY_FEATURE
+    patched_agui_features[EMPTY_FEATURE_NAME] = feature
 
     found = await agui_views.post_room_agui(
         room_id=TEST_ROOM_ID,
@@ -1482,6 +1516,190 @@ async def test_init_agent_stream_adds_final_state(ces, dls):
         agui_core.EventType.RUN_FINISHED,
     ]
     assert found[1].snapshot == deps.state
+
+
+def test_validate_client_feature_state(patched_agui_features):
+    patched_agui_features[EMPTY_FEATURE_NAME] = CLIENT_FEATURE
+
+    agui_views._validate_client_feature_state(None)
+    agui_views._validate_client_feature_state(
+        {EMPTY_FEATURE_NAME: {}},
+    )
+
+    with raises_httpexc(code=422, match="valid dictionary"):
+        agui_views._validate_client_feature_state(
+            {EMPTY_FEATURE_NAME: "invalid"},
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state, detail_is_json_serializable",
+    [
+        ({EMPTY_FEATURE_NAME: "invalid"}, False),
+        ({EMPTY_FEATURE_NAME: None}, False),
+        (
+            {
+                EMPTY_FEATURE_NAME: {
+                    "value": 1,
+                    "nested": {"count": "invalid"},
+                },
+            },
+            False,
+        ),
+        (
+            {
+                EMPTY_FEATURE_NAME: {
+                    "value": 13,
+                    "nested": {"count": 1},
+                },
+            },
+            True,
+        ),
+        ([EMPTY_FEATURE_NAME], False),
+    ],
+)
+@mock.patch("soliplex.views.agui.agui_persistence.ThreadStorage")
+@mock.patch("soliplex.views.agui.init_agent_stream")
+@mock.patch("pydantic_ai.ui.ag_ui.AGUIAdapter")
+@mock.patch("soliplex.views.agui._check_user_room_agent")
+async def test_run_rejects_invalid_client_feature_state(
+    cura,
+    aga,
+    init_stream,
+    thread_storage,
+    state,
+    detail_is_json_serializable,
+    run_input,
+    patched_agui_features,
+):
+    patched_agui_features[EMPTY_FEATURE_NAME] = VALIDATED_CLIENT_FEATURE
+    cura.return_value = (models.UserProfile(**AUTH_USER), object())
+    run_input.state = state
+    aga.from_request = mock.AsyncMock()
+    aga.from_request.return_value.run_input = run_input
+
+    app_state = mock.Mock(agui_background_tasks=set())
+    app = mock.create_autospec(fastapi.FastAPI, state=app_state)
+    request = fastapi.Request(
+        scope={"type": "http", "app": app, "headers": []},
+    )
+    request.state.threads_engine = object()
+    the_installation = mock.create_autospec(installation.Installation)
+
+    with pytest.raises(fastapi.HTTPException) as exc_info:
+        await agui_views.post_room_agui_thread_id_run_id(
+            request,
+            room_id=TEST_ROOM_ID,
+            thread_id=TEST_THREAD_ID_UUID,
+            run_id=TEST_RUN_ID_UUID,
+            the_installation=the_installation,
+            the_room_authz=mock.create_autospec(
+                authz.RoomAuthorizationPolicy,
+            ),
+            the_user_claims=THE_USER_CLAIMS,
+            the_logger=mock.create_autospec(loggers.LogWrapper),
+        )
+
+    assert exc_info.value.status_code == 422
+    if detail_is_json_serializable:
+        json.dumps(exc_info.value.detail)
+    thread_storage.assert_not_called()
+    the_installation.get_agent_deps_for_room.assert_not_awaited()
+    init_stream.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state, expected_state",
+    [
+        (
+            {
+                EMPTY_FEATURE_NAME: {
+                    "value": "2",
+                    "nested": {"count": "3", "extra": True},
+                    "extra": True,
+                },
+            },
+            {
+                EMPTY_FEATURE_NAME: {
+                    "value": 2,
+                    "label": "default",
+                    "nested": {"count": 3},
+                },
+            },
+        ),
+        ({}, {}),
+        (None, None),
+    ],
+)
+@mock.patch("fastapi.responses.StreamingResponse")
+@mock.patch("soliplex.views.streaming.stream_sse_with_keepalive")
+@mock.patch("soliplex.views.streaming.add_sse_event_ids")
+@mock.patch("soliplex.views.agui.stream_llm_events")
+@mock.patch("soliplex.views.agui.init_agent_stream")
+@mock.patch("pydantic_ai.ui.ag_ui.AGUIAdapter")
+@mock.patch("soliplex.views.agui._check_user_room_agent")
+async def test_run_persists_validated_client_feature_state(
+    cura,
+    aga,
+    init_stream,
+    _stream_events,
+    _add_ids,
+    _keepalive,
+    _response,
+    state,
+    expected_state,
+    run_input,
+    patched_agui_features,
+    fake_async_session,
+    mock_thread_storage,
+):
+    patched_agui_features[EMPTY_FEATURE_NAME] = VALIDATED_CLIENT_FEATURE
+    cura.return_value = (models.UserProfile(**AUTH_USER), object())
+    run_input.state = state
+    aga.from_request = mock.AsyncMock()
+    adapter = aga.from_request.return_value
+    adapter.run_input = run_input
+    adapter.encode_stream = mock.MagicMock()
+
+    app_state = mock.Mock(agui_background_tasks=set())
+    app = mock.create_autospec(fastapi.FastAPI, state=app_state)
+    request = fastapi.Request(
+        scope={"type": "http", "app": app, "headers": []},
+    )
+    request.state.threads_engine = object()
+    the_installation = mock.create_autospec(installation.Installation)
+
+    with (
+        mock.patch(
+            "soliplex.views.agui.sqla_asyncio.AsyncSession",
+            new=fake_async_session.cls,
+        ),
+        mock.patch(
+            "soliplex.views.agui.agui_persistence.ThreadStorage",
+            return_value=mock_thread_storage,
+        ),
+    ):
+        await agui_views.post_room_agui_thread_id_run_id(
+            request,
+            room_id=TEST_ROOM_ID,
+            thread_id=TEST_THREAD_ID_UUID,
+            run_id=TEST_RUN_ID_UUID,
+            the_installation=the_installation,
+            the_room_authz=mock.create_autospec(
+                authz.RoomAuthorizationPolicy,
+            ),
+            the_user_claims=THE_USER_CLAIMS,
+            the_logger=mock.create_autospec(loggers.LogWrapper),
+        )
+
+    assert run_input.state == expected_state
+    persisted_input = mock_thread_storage.add_run_input.await_args.kwargs[
+        "run_input"
+    ]
+    assert persisted_input.state == expected_state
+    await asyncio.gather(*app_state.agui_background_tasks)
 
 
 @pytest.mark.asyncio

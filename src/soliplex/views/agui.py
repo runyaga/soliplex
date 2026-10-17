@@ -373,9 +373,10 @@ async def post_room_agui(
     agui_state = {}
 
     for feature_name in room_config.agui_feature_names:
-        feature_klass = config_agui.AGUI_FEATURES_BY_NAME[
-            feature_name
-        ].model_klass
+        feature = config_agui.AGUI_FEATURES_BY_NAME[feature_name]
+        if feature.source == config_agui.AGUI_FeatureSource.CLIENT:
+            continue
+        feature_klass = feature.model_klass
         agui_state[feature_name] = feature_klass().model_dump(mode="python")
 
     run_input = agui_core.RunAgentInput(
@@ -725,6 +726,33 @@ async def init_agent_stream(
     await drive_llm_stream(llm_stream=compacted, **drive_kwargs)
 
 
+def _validate_client_feature_state(state: object | None) -> None:
+    if state is None:
+        return
+    if not isinstance(state, dict):
+        raise fastapi.HTTPException(
+            status_code=422,
+            detail="State must be a dictionary",
+        )
+
+    for name, feature in config_agui.AGUI_FEATURES_BY_NAME.items():
+        if (
+            feature.source == config_agui.AGUI_FeatureSource.CLIENT
+            and name in state
+        ):
+            try:
+                validated = feature.model_klass.model_validate(state[name])
+            except pydantic.ValidationError as exc:
+                raise fastapi.HTTPException(
+                    status_code=422,
+                    detail=exc.errors(
+                        include_url=False,
+                        include_context=False,
+                    ),
+                ) from None
+            state[name] = validated.model_dump(mode="python")
+
+
 def parse_last_event_id(header_value: str | None):
     """Parse a ``Last-Event-ID`` header value.
 
@@ -849,6 +877,8 @@ async def post_room_agui_thread_id_run_id(
             status_code=400,
             detail="Invalid run input",
         )
+
+    _validate_client_feature_state(run_input.state)
 
     try:
         async with sqla_asyncio.AsyncSession(

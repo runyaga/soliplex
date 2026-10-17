@@ -89,9 +89,14 @@ arguments and dumping it to a dict. The TUI client
 (`soliplex.tui.main`) does the same thing on its side when
 opening a new room.
 
-This means every model class registered in the registry must be
-constructible with no arguments -- typically by giving every
-field a default value.
+Models for `server` and `either` features must be constructible with no
+arguments, typically by giving every field a default value.
+
+The server leaves a `client` feature out of the initial state. When a client
+supplies that key, the server validates its value against the registered model
+before persistence. The validated model dump becomes the feature value used by
+the run. Final state snapshots include client features like any other state
+key.
 
 ### Schema Export
 

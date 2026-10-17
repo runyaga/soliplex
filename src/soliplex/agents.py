@@ -53,6 +53,10 @@ class AgentDependencies:
         default_factory=list,
     )
     """Client-supplied context entries from the AG-UI run input"""
+    agui_tool_metadata: dict[str, typing.Any] = dataclasses.field(
+        default_factory=dict,
+    )
+    """AG-UI 'Tool.metadata' (or None) of each client tool, by tool name"""
 
 
 SoliplexAgent = ai_agent.AbstractAgent[AgentDependencies, typing.Any]

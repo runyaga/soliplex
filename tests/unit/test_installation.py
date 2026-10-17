@@ -1,5 +1,6 @@
 import contextlib
 import dataclasses
+import json
 import logging
 import sqlite3
 import threading
@@ -10,6 +11,7 @@ import fastapi
 import pytest
 import sqlalchemy
 from ag_ui import core as agui_core
+from pydantic_ai.ui import ag_ui as ai_ag_ui
 from sqlalchemy import pool as sqla_pool  # NullPool
 from sqlalchemy.ext import asyncio as sqla_asyncio
 
@@ -54,11 +56,20 @@ RUN_ID = "test-agui-run"
 AGUI_CONTEXT = [
     agui_core.Context(description="Client", value="Test client"),
 ]
+TOOL_METADATA = {"skill": "shop-search", "version": 2}
 RUN_AGENT_INPUT = mock.create_autospec(
     agui_core.RunAgentInput,
     thread_id=THREAD_ID,
     run_id=RUN_ID,
     context=AGUI_CONTEXT,
+    tools=[
+        agui_core.Tool(
+            name="search_products",
+            description="Search the shop",
+            metadata=TOOL_METADATA,
+        ),
+        agui_core.Tool(name="take_photo", description="Take a photo"),
+    ],
 )
 
 NoSuchSecret = pytest.raises(KeyError)
@@ -1330,13 +1341,106 @@ async def test_installation_get_agent_deps_for_room(
                 assert found.run_id == RUN_AGENT_INPUT.run_id
                 assert found.agui_context == AGUI_CONTEXT
                 assert found.agui_context is not AGUI_CONTEXT
+                assert found.agui_tool_metadata == {
+                    "search_products": TOOL_METADATA,
+                    "take_photo": None,
+                }
             else:
                 assert found.agui_context == []
+                assert found.agui_tool_metadata == {}
 
             if w_tp_engine:
                 assert found.thread_persistence_engine is tp_engine
             else:
                 assert found.thread_persistence_engine is None
+
+
+@pytest.mark.anyio
+async def test_installation_get_agent_deps_for_room_w_request_tool_metadata(
+    test_user,
+):
+    body = json.dumps(
+        {
+            "threadId": str(THREAD_ID),
+            "runId": str(RUN_ID),
+            "state": {},
+            "messages": [],
+            "context": [],
+            "forwardedProps": None,
+            "tools": [
+                {
+                    "name": "search_products",
+                    "description": "Search the shop",
+                    "parameters": {},
+                    "metadata": TOOL_METADATA,
+                },
+                {
+                    "name": "take_photo",
+                    "description": "Take a photo",
+                },
+            ],
+        }
+    ).encode()
+    run_input = ai_ag_ui.AGUIAdapter.build_run_input(body)
+
+    r_config = mock.create_autospec(config_rooms.RoomConfig)
+    r_config.tool_configs = {}
+    i_config = mock.create_autospec(config_installation.InstallationConfig)
+    i_config.room_configs = {"room_id": r_config}
+    the_installation = installation.Installation(i_config)
+
+    found = await the_installation.get_agent_deps_for_room(
+        room_id="room_id",
+        user=test_user,
+        run_agent_input=run_input,
+    )
+
+    assert found.agui_tool_metadata == {
+        "search_products": TOOL_METADATA,
+        "take_photo": None,
+    }
+
+
+@pytest.mark.anyio
+async def test_installation_get_agent_deps_for_room_w_duplicate_tool_names(
+    test_user,
+):
+    body = json.dumps(
+        {
+            "threadId": str(THREAD_ID),
+            "runId": str(RUN_ID),
+            "state": {},
+            "messages": [],
+            "context": [],
+            "forwardedProps": None,
+            "tools": [
+                {
+                    "name": "x",
+                    "description": "first",
+                    "metadata": {"skill": "a"},
+                },
+                {
+                    "name": "x",
+                    "description": "second",
+                },
+            ],
+        }
+    ).encode()
+    run_input = ai_ag_ui.AGUIAdapter.build_run_input(body)
+
+    r_config = mock.create_autospec(config_rooms.RoomConfig)
+    r_config.tool_configs = {}
+    i_config = mock.create_autospec(config_installation.InstallationConfig)
+    i_config.room_configs = {"room_id": r_config}
+    the_installation = installation.Installation(i_config)
+
+    found = await the_installation.get_agent_deps_for_room(
+        room_id="room_id",
+        user=test_user,
+        run_agent_input=run_input,
+    )
+
+    assert found.agui_tool_metadata == {"x": None}
 
 
 @pytest.mark.anyio

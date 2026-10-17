@@ -136,6 +136,13 @@ for configuring an agent.
   client writes every entry, so code which acts on an entry must check it
   against state held by the server.
 
+- Client tools arrive in the AG-UI run input's `tools`. Pydantic AI hands
+  the model each tool's name, description and parameters. The `metadata` of
+  each client tool reaches Soliplex code as
+  `AgentDependencies.agui_tool_metadata`, keyed by tool name, and Soliplex
+  does not send it to the model. The client writes the metadata, so code
+  which acts on it must check it against state held by the server.
+
 ### MCP Client Toolsets
 
 - `mcp_client_toolsets` should be a mapping of toolset name to a toolset

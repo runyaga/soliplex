@@ -3,6 +3,7 @@ import uuid
 from unittest import mock
 
 import pytest
+from ag_ui import core as agui_core
 
 from soliplex import agents
 from soliplex import installation
@@ -100,3 +101,28 @@ async def test_current_run_info():
     assert found.room_id == ROOM_ID
     assert found.thread_id == THREAD_ID
     assert found.run_id == RUN_ID
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("w_context", [False, True])
+async def test_agui_context(the_installation, w_context):
+    kw = {}
+    expected = []
+
+    if w_context:
+        expected = kw["agui_context"] = [
+            agui_core.Context(description="Client", value="Test client"),
+        ]
+
+    deps = agents.AgentDependencies(
+        the_installation=the_installation,
+        user=USER,
+        tool_configs={},
+        **kw,
+    )
+
+    ctx = mock.Mock(spec_set=(["deps"]), deps=deps)
+
+    found = await tools.agui_context(ctx=ctx)
+
+    assert found == expected

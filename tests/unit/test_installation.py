@@ -51,10 +51,14 @@ ROOM_ID = "test-room"
 THREAD_ID = "test-agui-thread"
 RUN_ID = "test-agui-run"
 
+AGUI_CONTEXT = [
+    agui_core.Context(description="Client", value="Test client"),
+]
 RUN_AGENT_INPUT = mock.create_autospec(
     agui_core.RunAgentInput,
     thread_id=THREAD_ID,
     run_id=RUN_ID,
+    context=AGUI_CONTEXT,
 )
 
 NoSuchSecret = pytest.raises(KeyError)
@@ -1324,6 +1328,10 @@ async def test_installation_get_agent_deps_for_room(
             if w_run_agent_input:
                 assert found.thread_id == RUN_AGENT_INPUT.thread_id
                 assert found.run_id == RUN_AGENT_INPUT.run_id
+                assert found.agui_context == AGUI_CONTEXT
+                assert found.agui_context is not AGUI_CONTEXT
+            else:
+                assert found.agui_context == []
 
             if w_tp_engine:
                 assert found.thread_persistence_engine is tp_engine

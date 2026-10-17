@@ -621,6 +621,7 @@ class Installation:
         if run_agent_input is not None:
             thread_id = run_agent_input.thread_id
             run_id = run_agent_input.run_id
+            kwargs["agui_context"] = list(run_agent_input.context)
 
         if thread_persistence_engine is not None:
             kwargs["thread_persistence_engine"] = thread_persistence_engine

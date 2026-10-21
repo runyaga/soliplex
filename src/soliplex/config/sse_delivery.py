@@ -74,11 +74,12 @@ class AGUI_SSEDeliveryStrategy(enum.StrEnum):
 class AGUI_SSEDeliveryConfig:
     """How the AG-UI run endpoint groups streamed deltas into SSE events
 
-    'message' applies 'soliplex.agui.compact_event_stream', which merges a
-    message's deltas until any other event arrives (normally the message's
-    end).  'bounded' applies 'soliplex.agui.coalesce_event_stream', which
-    also sends the merged deltas once they hold 'max_deltas' deltas or
-    'max_bytes' bytes, or have been held about 'max_ms' milliseconds.
+    'message' applies 'soliplex.agui.sse_delivery.compact_event_stream',
+    which merges a message's deltas until any other event arrives
+    (normally the message's end).  'bounded' applies
+    'soliplex.agui.sse_delivery.coalesce_event_stream', which also sends
+    the merged deltas once they hold 'max_deltas' deltas or 'max_bytes'
+    bytes, or have been held about 'max_ms' milliseconds.
     """
 
     strategy: AGUI_SSEDeliveryStrategy

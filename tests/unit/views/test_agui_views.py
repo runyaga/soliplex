@@ -1449,13 +1449,13 @@ IAS_DRIVE_KWARGS = {
 }
 
 
-# 'agui.with_final_state' owns which events get a snapshot (see
+# 'agui_sse_delivery.with_final_state' owns which events get a snapshot (see
 # 'test_agui_package.test_with_final_state'):  here we check only that
 # 'init_agent_stream' wires it up, ahead of the delivery strategy, with the
 # run's deps.
 @pytest.mark.asyncio
 @mock.patch("soliplex.views.agui.drive_llm_stream")
-@mock.patch("soliplex.agui.apply_delivery_strategy")
+@mock.patch("soliplex.agui.sse_delivery.apply_delivery_strategy")
 async def test_init_agent_stream_adds_final_state(ads, dls):
     adapter = mock.MagicMock()
     deps = mock.Mock(state={"rag": {"citations": ["c1"]}})
@@ -1499,7 +1499,7 @@ async def test_init_agent_stream_adds_final_state(ads, dls):
     [None, RuntimeError("driver failed"), asyncio.CancelledError()],
 )
 @mock.patch("soliplex.views.agui.drive_llm_stream")
-@mock.patch("soliplex.agui.apply_delivery_strategy")
+@mock.patch("soliplex.agui.sse_delivery.apply_delivery_strategy")
 async def test_init_agent_stream_closes_delivered_stream(
     ads,
     dls,

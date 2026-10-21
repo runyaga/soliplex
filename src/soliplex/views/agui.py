@@ -24,6 +24,7 @@ from soliplex import titles
 from soliplex import util
 from soliplex import views
 from soliplex.agui import persistence as agui_persistence
+from soliplex.agui import sse_delivery as agui_sse_delivery
 from soliplex.config import agents as config_agents
 from soliplex.config import agui as config_agui
 from soliplex.config import rooms as config_rooms
@@ -720,11 +721,13 @@ async def init_agent_stream(
     delivery: config_sse_delivery.AGUI_SSEDeliveryConfig,
     **drive_kwargs,
 ):
-    w_final_state = agui.with_final_state(
+    w_final_state = agui_sse_delivery.with_final_state(
         stream=agui_adapter.run_stream(**run_stream_kwargs),
         deps=run_stream_kwargs.get("deps"),
     )
-    delivered = agui.apply_delivery_strategy(w_final_state, delivery)
+    delivered = agui_sse_delivery.apply_delivery_strategy(
+        w_final_state, delivery
+    )
     async with contextlib.aclosing(delivered):
         await drive_llm_stream(llm_stream=delivered, **drive_kwargs)
 

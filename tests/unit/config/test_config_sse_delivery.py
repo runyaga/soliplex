@@ -66,34 +66,75 @@ def test_sse_delivery_config_from_yaml_does_not_mutate_input():
 
 
 @pytest.mark.parametrize(
-    "config_yaml, match",
+    "config_yaml, expected_exc, match",
     [
-        ("bounded", "must be a mapping"),
-        (["bounded"], "must be a mapping"),
-        (True, "must be a mapping"),
-        ({}, "'strategy' is required"),
-        ({"max_ms": 1}, "'strategy' is required"),
-        ({"strategy": "per-delta"}, "unknown strategy"),
-        ({"strategy": None}, "unknown strategy"),
-        ({"strategy": "message", "colour": "blue"}, "unknown key"),
-        ({"strategy": "message", "max_ms": 250}, "takes no bounds"),
+        (
+            "bounded",
+            config_sse_delivery.SSEDeliveryNotAMapping,
+            "must be a mapping",
+        ),
+        (
+            ["bounded"],
+            config_sse_delivery.SSEDeliveryNotAMapping,
+            "must be a mapping",
+        ),
+        (
+            True,
+            config_sse_delivery.SSEDeliveryNotAMapping,
+            "must be a mapping",
+        ),
+        (
+            {},
+            config_sse_delivery.SSEDeliveryMissingStrategy,
+            "'strategy' is required",
+        ),
+        (
+            {"max_ms": 1},
+            config_sse_delivery.SSEDeliveryMissingStrategy,
+            "'strategy' is required",
+        ),
+        (
+            {"strategy": "per-delta"},
+            config_sse_delivery.SSEDeliveryUnknownStrategy,
+            "unknown strategy: 'per-delta'",
+        ),
+        (
+            {"strategy": None},
+            config_sse_delivery.SSEDeliveryUnknownStrategy,
+            "unknown strategy: None",
+        ),
+        (
+            {"strategy": "message", "colour": "blue"},
+            config_sse_delivery.SSEDeliveryUnknownKeys,
+            "unknown key",
+        ),
+        (
+            {"strategy": "message", "max_ms": 250},
+            config_sse_delivery.SSEDeliveryTakesNoBounds,
+            "takes no bounds",
+        ),
         (
             {"strategy": "bounded", "max_bytes": 256, "max_ms": 250},
+            config_sse_delivery.SSEDeliveryMissingBound,
             "'max_deltas' is required",
         ),
         (
             {"strategy": "bounded", "max_deltas": 8, "max_ms": 250},
+            config_sse_delivery.SSEDeliveryMissingBound,
             "'max_bytes' is required",
         ),
         (
             {"strategy": "bounded", "max_deltas": 8, "max_bytes": 256},
+            config_sse_delivery.SSEDeliveryMissingBound,
             "'max_ms' is required",
         ),
     ],
 )
-def test_sse_delivery_config_from_yaml_invalid(config_yaml, match):
+def test_sse_delivery_config_from_yaml_invalid(
+    config_yaml, expected_exc, match
+):
     with pytest.raises(
-        config_sse_delivery.InvalidSSEDeliveryConfig,
+        expected_exc,
         match=match,
     ) as exc_info:
         config_sse_delivery.AGUI_SSEDeliveryConfig.from_yaml(
@@ -108,7 +149,7 @@ def test_sse_delivery_config_from_yaml_invalid(config_yaml, match):
 @pytest.mark.parametrize("value", [0, -1, True, False, 2.5, "8", None, [8]])
 def test_sse_delivery_config_from_yaml_invalid_bound(key, value):
     with pytest.raises(
-        config_sse_delivery.InvalidSSEDeliveryConfig,
+        config_sse_delivery.SSEDeliveryInvalidBound,
         match=f"'{key}' must be a positive integer",
     ):
         config_sse_delivery.AGUI_SSEDeliveryConfig.from_yaml(

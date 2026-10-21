@@ -1011,7 +1011,7 @@ async def test_coalesce_event_stream_reraises_fatal_upstream_error():
     ],
 )
 async def test_apply_delivery_strategy(strategy, expected):
-    delivery = config_sse_delivery.AGUI_SSEDeliveryConfig.from_yaml(
+    delivery = config_sse_delivery.SSEDeliveryConfig.from_yaml(
         None,
         {"strategy": strategy} | ({} if strategy == "message" else BOUNDED_KW),
     )

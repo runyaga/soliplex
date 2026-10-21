@@ -435,25 +435,40 @@ sandbox_config:
 
 W_SSE_DELIVERY_INSTALLATION_CONFIG_KW = {
     "id": INSTALLATION_ID,
-    "agui_sse_delivery": config_sse_delivery.AGUI_SSEDeliveryConfig(
-        strategy=config_sse_delivery.AGUI_SSEDeliveryStrategy.BOUNDED,
-        max_deltas=8,
-        max_bytes=256,
-        max_ms=250,
+    "sse_delivery": config_sse_delivery.SSEDeliveryProfilesConfig(
+        default="plain",
+        configs={
+            "plain": config_sse_delivery.SSEDeliveryConfig(
+                strategy=config_sse_delivery.SSEDeliveryStrategy.MESSAGE,
+                description="Whole assistant messages",
+            ),
+            "faster": config_sse_delivery.SSEDeliveryConfig(
+                strategy=config_sse_delivery.SSEDeliveryStrategy.BOUNDED,
+                max_deltas=8,
+                max_bytes=256,
+                max_ms=250,
+            ),
+        },
     ),
 }
 W_SSE_DELIVERY_INSTALLATION_CONFIG_YAML = f"""\
 id: "{INSTALLATION_ID}"
-agui_sse_delivery:
-    strategy: "bounded"
-    max_deltas: 8
-    max_bytes: 256
-    max_ms: 250
+sse_delivery:
+    default: "plain"
+    configs:
+        "plain":
+            strategy: "message"
+            description: "Whole assistant messages"
+        "faster":
+            strategy: "bounded"
+            max_deltas: 8
+            max_bytes: 256
+            max_ms: 250
 """
 
 W_NULL_SSE_DELIVERY_INSTALLATION_CONFIG_YAML = f"""\
 id: "{INSTALLATION_ID}"
-agui_sse_delivery: null
+sse_delivery: null
 """
 
 W_SANDBOX_TRANSCRIPTS_INSTALLATION_CONFIG_KW = {
@@ -2861,14 +2876,12 @@ def _as_yaml_only_w_sandbox_config(config_path):
     )
 
 
-def _as_yaml_only_w_agui_sse_delivery(config_path):
-    agui_sse_delivery = W_SSE_DELIVERY_INSTALLATION_CONFIG_KW[
-        "agui_sse_delivery"
-    ]
+def _as_yaml_only_w_sse_delivery(config_path):
+    sse_delivery = W_SSE_DELIVERY_INSTALLATION_CONFIG_KW["sse_delivery"]
 
     return (
-        {"agui_sse_delivery": agui_sse_delivery},
-        {"agui_sse_delivery": agui_sse_delivery.as_yaml},
+        {"sse_delivery": sse_delivery},
+        {"sse_delivery": sse_delivery.as_yaml},
     )
 
 
@@ -2986,7 +2999,7 @@ AS_YAML_ONLY_STANZA_CASES = (
     _as_yaml_only_w_skill_configs,
     _as_yaml_only_w_upload_paths,
     _as_yaml_only_w_sandbox_config,
-    _as_yaml_only_w_agui_sse_delivery,
+    _as_yaml_only_w_sse_delivery,
     _as_yaml_only_w_title_agent_config_id,
     _as_yaml_only_w_logfire_config,
     _as_yaml_only_w_app_router_operations,
@@ -3164,24 +3177,51 @@ def test_installationconfig_as_yaml_round_trips_sandbox_config(temp_dir):
     assert found.transcripts_path == expected.transcripts_path
 
 
-def test_installationconfig_as_yaml_round_trips_agui_sse_delivery(temp_dir):
+def test_installationconfig_as_yaml_round_trips_sse_delivery(temp_dir):
     original, reloaded = _round_trip_installation_config(
         temp_dir / "installation.yaml",
         yaml.safe_load(W_SSE_DELIVERY_INSTALLATION_CONFIG_YAML),
     )
 
-    assert reloaded.agui_sse_delivery == original.agui_sse_delivery
+    assert reloaded.sse_delivery == original.sse_delivery
     assert (
-        original.agui_sse_delivery
-        == (W_SSE_DELIVERY_INSTALLATION_CONFIG_KW["agui_sse_delivery"])
+        original.sse_delivery
+        == W_SSE_DELIVERY_INSTALLATION_CONFIG_KW["sse_delivery"]
     )
 
 
-def test_installationconfig_from_yaml_w_invalid_agui_sse_delivery(temp_dir):
+@pytest.mark.parametrize(
+    "sse_delivery_block",
+    [
+        "bounded",
+        {
+            "default": "nope",
+            "configs": {"plain": {"strategy": "message"}},
+        },
+        {
+            "configs": {"plain": {"strategy": "message"}},
+        },
+        {"default": "plain"},
+        {"default": "plain", "configs": []},
+        {"default": "plain", "configs": {}},
+        {
+            "default": "plain",
+            "configs": {"plain": {"strategy": "message", "max_ms": 250}},
+        },
+        {
+            "default": "plain",
+            "configs": {"plain": {"strategy": "message", "colour": "blue"}},
+        },
+    ],
+)
+def test_installationconfig_from_yaml_w_invalid_sse_delivery(
+    temp_dir,
+    sse_delivery_block,
+):
     config_path = temp_dir / "installation.yaml"
     config_dict = {
         "id": INSTALLATION_ID,
-        "agui_sse_delivery": {"strategy": "message", "max_ms": 250},
+        "sse_delivery": sse_delivery_block,
     }
 
     with pytest.raises(config_exc.FromYamlException) as exc_info:

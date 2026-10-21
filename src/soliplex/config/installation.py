@@ -689,9 +689,9 @@ class InstallationConfig:
     sandbox_config: SandboxConfig | None = None
 
     #
-    # AG-UI SSE delivery
+    # AG-UI SSE delivery profiles
     #
-    agui_sse_delivery: config_sse_delivery.AGUI_SSEDeliveryConfig | None = None
+    sse_delivery: config_sse_delivery.SSEDeliveryProfilesConfig | None = None
 
     @property
     def sandbox_workdirs_path(self) -> pathlib.Path | None:
@@ -1080,12 +1080,12 @@ class InstallationConfig:
                     sandbox_config,
                 )
 
-            agui_sse_delivery = config_dict.pop("agui_sse_delivery", None)
-            if agui_sse_delivery is not None:
-                config_dict["agui_sse_delivery"] = (
-                    config_sse_delivery.AGUI_SSEDeliveryConfig.from_yaml(
+            sse_delivery = config_dict.pop("sse_delivery", None)
+            if sse_delivery is not None:
+                config_dict["sse_delivery"] = (
+                    config_sse_delivery.SSEDeliveryProfilesConfig.from_yaml(
                         config_path,
-                        agui_sse_delivery,
+                        sse_delivery,
                     )
                 )
 
@@ -1342,8 +1342,8 @@ class InstallationConfig:
         if self.sandbox_config:
             result["sandbox_config"] = self.sandbox_config.as_yaml
 
-        if self.agui_sse_delivery is not None:
-            result["agui_sse_delivery"] = self.agui_sse_delivery.as_yaml
+        if self.sse_delivery is not None:
+            result["sse_delivery"] = self.sse_delivery.as_yaml
 
         if self.title_agent_config_id is not None:
             result["title_agent_config_id"] = self.title_agent_config_id

@@ -25,6 +25,32 @@ _default_dict_field = _utils._default_dict_field
 # ============================================================================
 
 
+def _check_sse_delivery_name(
+    config_path: pathlib.Path,
+    installation_config,
+    sse_delivery_name: str,
+) -> str:
+    """Room-level SSE delivery profile names resolve at config-load time
+
+    A room without an installation config (a detached room yaml) is not
+    validated here: its name stays latent, resolving only when the room
+    is bound to an installation.
+    """
+    profiles = (
+        installation_config.sse_delivery
+        if installation_config is not None
+        else None
+    )
+
+    if profiles is None or sse_delivery_name not in profiles.configs:
+        raise config_sse_delivery.SSEDeliveryUnknownProfileName(
+            config_path,
+            sse_delivery_name,
+        )
+
+    return sse_delivery_name
+
+
 @dataclasses.dataclass(kw_only=True)
 class RoomConfig:
     """Configuration for a chat room"""
@@ -65,7 +91,7 @@ class RoomConfig:
     #
     # AG-UI SSE delivery
     #
-    agui_sse_delivery: config_sse_delivery.AGUI_SSEDeliveryConfig | None = None
+    sse_delivery_config_name: str | None = None
 
     #
     # Quiz-specific options
@@ -133,14 +159,19 @@ class RoomConfig:
                     )
                 )
 
-            agui_sse_delivery = config_dict.pop("agui_sse_delivery", None)
-            if agui_sse_delivery is not None:
-                config_dict["agui_sse_delivery"] = (
-                    config_sse_delivery.AGUI_SSEDeliveryConfig.from_yaml(
-                        config_path,
-                        agui_sse_delivery,
-                    )
+            sse_delivery_name = config_dict.pop(
+                "sse_delivery_config_name",
+                None,
+            )
+
+            if sse_delivery_name is not None:
+                _check_sse_delivery_name(
+                    config_path,
+                    installation_config,
+                    sse_delivery_name,
                 )
+
+                config_dict["sse_delivery_config_name"] = sse_delivery_name
 
             quizzes_config_yaml = config_dict.pop("quizzes", None)
             if quizzes_config_yaml is not None:
@@ -212,23 +243,26 @@ class RoomConfig:
         if self.skills:
             result["skills"] = self.skills.as_yaml
 
-        if self.agui_sse_delivery is not None:
-            result["agui_sse_delivery"] = self.agui_sse_delivery.as_yaml
+        if self.sse_delivery_config_name is not None:
+            result["sse_delivery_config_name"] = self.sse_delivery_config_name
 
         return result
 
     @property
     def effective_agui_sse_delivery(
         self,
-    ) -> config_sse_delivery.AGUI_SSEDeliveryConfig:
-        """The room's own block, else the installation's, else 'message'"""
-        if self.agui_sse_delivery is not None:
-            return self.agui_sse_delivery
-
+    ) -> config_sse_delivery.SSEDeliveryConfig:
+        """The room's named profile, else the installation's, else 'message'"""
         if self._installation_config is not None:
-            installation_block = self._installation_config.agui_sse_delivery
-            if installation_block is not None:
-                return installation_block
+            profiles = self._installation_config.sse_delivery
+
+            if profiles is not None:
+                return (
+                    profiles.get(
+                        self.sse_delivery_config_name,
+                    )
+                    or profiles.default_config
+                )
 
         return config_sse_delivery.DEFAULT_SSE_DELIVERY
 

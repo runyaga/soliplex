@@ -256,12 +256,9 @@ async def coalesce_event_stream(
 
 def apply_delivery_strategy(
     stream: AGUI_EventStream,
-    delivery: config_sse_delivery.AGUI_SSEDeliveryConfig,
+    delivery: config_sse_delivery.SSEDeliveryConfig,
 ) -> AGUI_EventStream:
-    if (
-        delivery.strategy
-        == config_sse_delivery.AGUI_SSEDeliveryStrategy.BOUNDED
-    ):
+    if delivery.strategy == config_sse_delivery.SSEDeliveryStrategy.BOUNDED:
         return coalesce_event_stream(
             stream,
             max_deltas=delivery.max_deltas,

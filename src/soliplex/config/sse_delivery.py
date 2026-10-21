@@ -10,6 +10,7 @@ import typing
 # ============================================================================
 
 _BOUND_KEYS = ("max_deltas", "max_bytes", "max_ms")
+_KNOWN_KEYS = {"strategy", "description", *_BOUND_KEYS}
 
 
 class InvalidSSEDeliveryConfig(ValueError):
@@ -65,13 +66,21 @@ class SSEDeliveryInvalidBound(InvalidSSEDeliveryConfig):
         super().__init__(_config_path, f"'{key}' must be a positive integer")
 
 
-class AGUI_SSEDeliveryStrategy(enum.StrEnum):
+class SSEDeliveryInvalidDescription(InvalidSSEDeliveryConfig):
+    def __init__(self, _config_path):
+        super().__init__(
+            _config_path,
+            "'description' must be a non-empty string",
+        )
+
+
+class SSEDeliveryStrategy(enum.StrEnum):
     MESSAGE = "message"
     BOUNDED = "bounded"
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class AGUI_SSEDeliveryConfig:
+class SSEDeliveryConfig:
     """How the AG-UI run endpoint groups streamed deltas into SSE events
 
     'message' applies 'soliplex.agui.sse_delivery.compact_event_stream',
@@ -82,43 +91,51 @@ class AGUI_SSEDeliveryConfig:
     bytes, or have been held about 'max_ms' milliseconds.
     """
 
-    strategy: AGUI_SSEDeliveryStrategy
+    strategy: SSEDeliveryStrategy
     max_deltas: int | None = None
     max_bytes: int | None = None
     max_ms: int | None = None
+    description: str | None = None
 
     @classmethod
     def from_yaml(
         cls,
         config_path: pathlib.Path,
         config_dict: typing.Any,
-    ) -> AGUI_SSEDeliveryConfig:
+    ) -> SSEDeliveryConfig:
         if not isinstance(config_dict, dict):
             raise SSEDeliveryNotAMapping(config_path)
 
         if "strategy" not in config_dict:
             raise SSEDeliveryMissingStrategy(config_path)
 
-        unknown = set(config_dict) - {"strategy", *_BOUND_KEYS}
+        unknown = set(config_dict) - _KNOWN_KEYS
         if unknown:
             raise SSEDeliveryUnknownKeys(config_path, sorted(unknown))
 
+        description = config_dict.get("description")
+        if description is not None and (
+            type(description) is not str or not description.strip()
+        ):
+            raise SSEDeliveryInvalidDescription(config_path)
+
         try:
-            strategy = AGUI_SSEDeliveryStrategy(config_dict["strategy"])
+            strategy = SSEDeliveryStrategy(config_dict["strategy"])
         except ValueError:
             raise SSEDeliveryUnknownStrategy(
                 config_path,
                 config_dict["strategy"],
             ) from None
 
+        description = config_dict.get("description")
         bounds = {
             key: config_dict[key] for key in _BOUND_KEYS if key in config_dict
         }
 
-        if strategy == AGUI_SSEDeliveryStrategy.MESSAGE:
+        if strategy == SSEDeliveryStrategy.MESSAGE:
             if bounds:
                 raise SSEDeliveryTakesNoBounds(config_path)
-            return cls(strategy=strategy)
+            return cls(strategy=strategy, description=description)
 
         for key in _BOUND_KEYS:
             if key not in bounds:
@@ -127,18 +144,118 @@ class AGUI_SSEDeliveryConfig:
             if type(value) is not int or value < 1:
                 raise SSEDeliveryInvalidBound(config_path, key)
 
-        return cls(strategy=strategy, **bounds)
+        return cls(strategy=strategy, description=description, **bounds)
 
     @property
     def as_yaml(self) -> dict[str, typing.Any]:
         result = {"strategy": str(self.strategy)}
-        if self.strategy == AGUI_SSEDeliveryStrategy.BOUNDED:
+        if self.strategy == SSEDeliveryStrategy.BOUNDED:
             result["max_deltas"] = self.max_deltas
             result["max_bytes"] = self.max_bytes
             result["max_ms"] = self.max_ms
+
+        if self.description is not None:
+            result["description"] = self.description
+
         return result
 
 
-DEFAULT_SSE_DELIVERY = AGUI_SSEDeliveryConfig(
-    strategy=AGUI_SSEDeliveryStrategy.MESSAGE,
+SSEDeliveryConfigMap = dict[str, SSEDeliveryConfig]
+
+_PROFILE_STANZA_KEYS = frozenset(["default", "configs"])
+
+
+class SSEDeliveryMissingKey(InvalidSSEDeliveryConfig):
+    def __init__(self, _config_path, key):
+        super().__init__(_config_path, f"'{key}' is required")
+
+
+class SSEDeliveryUnknownProfileName(InvalidSSEDeliveryConfig):
+    def __init__(self, _config_path, name):
+        super().__init__(_config_path, f"unknown profile name: {name!r}")
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class SSEDeliveryProfilesConfig:
+    """Named 'agui_sse_delivery' profiles, plus the installation's default
+
+    Declared at the installation level, in the stanza 'sse_delivery'::
+
+        sse_delivery:
+          default: "fast"
+          configs:
+            "fast":
+              strategy: "bounded"
+              description: "Fine-grained deltas"
+              max_deltas: 8
+              max_bytes: 256
+              max_ms: 250
+            "plain":
+              strategy: "message"
+              description: "Whole messages"
+
+    Rooms name one of these profiles as the default for their threads;
+    AG-UI requests name one in 'forwardedProps'.  In both cases, an
+    absent or unknown name falls back to the next level's default.
+    """
+
+    default: str
+    configs: SSEDeliveryConfigMap
+
+    @classmethod
+    def from_yaml(
+        cls,
+        config_path: pathlib.Path,
+        config_dict: typing.Any,
+    ) -> SSEDeliveryProfilesConfig:
+        if not isinstance(config_dict, dict):
+            raise SSEDeliveryNotAMapping(config_path)
+
+        unknown = set(config_dict) - _PROFILE_STANZA_KEYS
+        if unknown:
+            raise SSEDeliveryUnknownKeys(config_path, sorted(unknown))
+
+        default = config_dict.get("default")
+        if default is None:
+            raise SSEDeliveryMissingKey(config_path, "default")
+
+        configs = config_dict.get("configs")
+        if configs is None:
+            raise SSEDeliveryMissingKey(config_path, "configs")
+
+        if not isinstance(configs, dict):
+            raise SSEDeliveryNotAMapping(config_path)
+
+        validated = {
+            name: SSEDeliveryConfig.from_yaml(config_path, block)
+            for name, block in configs.items()
+        }
+
+        if default not in validated:
+            raise SSEDeliveryUnknownProfileName(config_path, default)
+
+        return cls(default=default, configs=validated)
+
+    def get(self, name: str) -> SSEDeliveryConfig | None:
+        return self.configs.get(name)
+
+    @property
+    def default_config(self) -> SSEDeliveryConfig:
+        return self.configs[self.default]
+
+    @property
+    def as_yaml(self) -> dict[str, typing.Any]:
+        return {
+            "default": self.default,
+            "configs": {
+                name: profiles_config.as_yaml
+                for name, profiles_config in self.configs.items()
+            },
+        }
+
+
+DEFAULT_SSE_DELIVERY_DESC = "code default (message)"
+DEFAULT_SSE_DELIVERY = SSEDeliveryConfig(
+    strategy=SSEDeliveryStrategy.MESSAGE,
+    description=DEFAULT_SSE_DELIVERY_DESC,
 )

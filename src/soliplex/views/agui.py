@@ -718,7 +718,7 @@ async def init_agent_stream(
     *,
     agui_adapter: ai_ag_ui.AGUIAdapter,
     run_stream_kwargs: dict,
-    delivery: config_sse_delivery.AGUI_SSEDeliveryConfig,
+    delivery: config_sse_delivery.SSEDeliveryConfig,
     **drive_kwargs,
 ):
     w_final_state = agui_sse_delivery.with_final_state(

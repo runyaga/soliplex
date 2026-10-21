@@ -87,6 +87,8 @@ AUTHZ_DELETE_ROOM_POLICY = "delete room policy"
 AUTHZ_GET_INSTALLATION_AUTHZ = "get installation authz"
 AUTHZ_GET_USER_AUTHZ = "get user authz"
 
+INST_GET_INSTALLATION_INFO = "get installation info"
+
 INST_GET_INSTALLATION = "get installation"
 INST_GET_INSTALLATION_VERSIONS = "get installation versions"
 INST_SUBPROCESS_PIP = "subprocess pip failed"

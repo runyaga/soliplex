@@ -29,8 +29,26 @@ BOUNDED_BY_COUNT = {
     "max_ms": 600_000,
 }
 
+MESSAGE_ONLY = {"strategy": "message"}
 
-def _write_installation(root, *, installation_block=None, room_block=None):
+# Installation-level profiles: the stanza the new config model uses
+BOUNDED_STANZA = {
+    "default": "bounded",
+    "configs": {"bounded": BOUNDED_BY_COUNT},
+}
+
+MIXED_STANZA = {
+    "default": "message",
+    "configs": {"message": MESSAGE_ONLY, "bounded": BOUNDED_BY_COUNT},
+}
+
+MIXED_BOUNDED_DEFAULT = {
+    "default": "bounded",
+    "configs": {"message": MESSAGE_ONLY, "bounded": BOUNDED_BY_COUNT},
+}
+
+
+def _write_installation(root, *, installation_stanza=None, room_profile=None):
     room_dir = root / "rooms" / ROOM_ID
     room_dir.mkdir(parents=True)
 
@@ -58,8 +76,8 @@ def _write_installation(root, *, installation_block=None, room_block=None):
         },
         "room_paths": [f"./rooms/{ROOM_ID}"],
     }
-    if installation_block is not None:
-        installation["agui_sse_delivery"] = installation_block
+    if installation_stanza is not None:
+        installation["sse_delivery"] = installation_stanza
 
     room = {
         "id": ROOM_ID,
@@ -70,8 +88,8 @@ def _write_installation(root, *, installation_block=None, room_block=None):
             "factory_name": "sse_delivery_agent.agent_factory",
         },
     }
-    if room_block is not None:
-        room["agui_sse_delivery"] = room_block
+    if room_profile is not None:
+        room["sse_delivery_config_name"] = room_profile
 
     (root / "installation.yaml").write_text(yaml.safe_dump(installation))
     (room_dir / "room_config.yaml").write_text(yaml.safe_dump(room))
@@ -264,18 +282,17 @@ async def test_default_body_unchanged(tmp_path, monkeypatch):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "installation_block, room_block",
+    "installation_stanza, room_profile",
     [
-        (BOUNDED_BY_COUNT, None),
-        (None, BOUNDED_BY_COUNT),
-        ({"strategy": "message"}, BOUNDED_BY_COUNT),
+        pytest.param(BOUNDED_STANZA, None, id="installation_default"),
+        pytest.param(MIXED_STANZA, "bounded", id="room_selects"),
     ],
 )
 async def test_bounded_delivers_while_model_paused(
     tmp_path,
     monkeypatch,
-    installation_block,
-    room_block,
+    installation_stanza,
+    room_profile,
 ):
     script = _set_script(
         monkeypatch,
@@ -284,8 +301,8 @@ async def test_bounded_delivers_while_model_paused(
     )
     installation_path = _write_installation(
         tmp_path,
-        installation_block=installation_block,
-        room_block=room_block,
+        installation_stanza=installation_stanza,
+        room_profile=room_profile,
     )
     received = []
 
@@ -322,17 +339,21 @@ async def test_bounded_delivers_while_model_paused(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "installation_block, room_block",
+    "installation_stanza, room_profile",
     [
-        (None, None),
-        (BOUNDED_BY_COUNT, {"strategy": "message"}),
+        pytest.param(None, None, id="bare_installation"),
+        pytest.param(
+            MIXED_BOUNDED_DEFAULT,
+            "message",
+            id="room_selects",
+        ),
     ],
 )
 async def test_message_holds_text_until_message_end(
     tmp_path,
     monkeypatch,
-    installation_block,
-    room_block,
+    installation_stanza,
+    room_profile,
 ):
     script = _set_script(
         monkeypatch,
@@ -341,8 +362,8 @@ async def test_message_holds_text_until_message_end(
     )
     installation_path = _write_installation(
         tmp_path,
-        installation_block=installation_block,
-        room_block=room_block,
+        installation_stanza=installation_stanza,
+        room_profile=room_profile,
     )
     received = []
 
@@ -370,25 +391,34 @@ async def test_message_holds_text_until_message_end(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    "room_block",
+    "installation_stanza, room_profile",
     [
-        None,
-        BOUNDED_BY_COUNT | {"max_deltas": 1},
+        pytest.param(None, None, id="message"),
+        pytest.param(BOUNDED_STANZA, "bounded", id="bounded"),
     ],
-    ids=["message", "bounded"],
 )
 @pytest.mark.parametrize(
     "boundary",
     ["RUN_STARTED", "TEXT_MESSAGE_START", CONTENT, "TEXT_MESSAGE_END"],
 )
-async def test_reconnect_mid_run(tmp_path, monkeypatch, room_block, boundary):
+async def test_reconnect_mid_run(
+    tmp_path,
+    monkeypatch,
+    installation_stanza,
+    room_profile,
+    boundary,
+):
     script = _set_script(
         monkeypatch,
         deltas=["a", "b", "c", "d"],
         hold=asyncio.Event(),
         final_deltas=["Done"],
     )
-    installation_path = _write_installation(tmp_path, room_block=room_block)
+    installation_path = _write_installation(
+        tmp_path,
+        installation_stanza=installation_stanza,
+        room_profile=room_profile,
+    )
     first = []
 
     async with _serve(installation_path) as server:
@@ -466,12 +496,8 @@ async def test_bounded_loopback_timing(tmp_path, monkeypatch):
     script = _set_script(monkeypatch, deltas=["word "] * 60, interval=0.05)
     installation_path = _write_installation(
         tmp_path,
-        room_block={
-            "strategy": "bounded",
-            "max_deltas": 8,
-            "max_bytes": 256,
-            "max_ms": 250,
-        },
+        installation_stanza=BOUNDED_STANZA,
+        room_profile="bounded",
     )
     arrivals = []
     loop = asyncio.get_running_loop()

@@ -18,6 +18,7 @@ from soliplex import loggers
 from soliplex import models
 from soliplex.config import agui as config_agui
 from soliplex.config import rooms as config_rooms
+from soliplex.config import sse_delivery as config_sse_delivery
 from soliplex.views import agui as agui_views
 from soliplex.views import streaming as streaming_views
 
@@ -1538,6 +1539,102 @@ async def test_init_agent_stream_closes_delivered_stream(
     assert closed == [True]
 
 
+DELIVERY_PROFILES = config_sse_delivery.SSEDeliveryProfilesConfig(
+    default="plain",
+    configs={
+        "plain": config_sse_delivery.SSEDeliveryConfig(
+            strategy=config_sse_delivery.SSEDeliveryStrategy.MESSAGE,
+        ),
+        "fast": config_sse_delivery.SSEDeliveryConfig(
+            strategy=config_sse_delivery.SSEDeliveryStrategy.BOUNDED,
+            max_deltas=8,
+            max_bytes=256,
+            max_ms=250,
+        ),
+    },
+)
+FAST_DELIVERY = DELIVERY_PROFILES.configs["fast"]
+ROOM_DELIVERY = object()
+
+
+def _fp_map(name):
+    return {agui_views._DELIVERY_PROP: name}
+
+
+@pytest.mark.parametrize(
+    "forwarded_props, profiles, expected",
+    [
+        # Happy paths: use client's selected profile
+        pytest.param("fast", DELIVERY_PROFILES, FAST_DELIVERY, id="bare_name"),
+        pytest.param(
+            _fp_map("fast"),
+            DELIVERY_PROFILES,
+            FAST_DELIVERY,
+            id="mapped_name",
+        ),
+        # Misses:  fall back to room's effective profile
+        pytest.param(None, DELIVERY_PROFILES, ROOM_DELIVERY, id="absent"),
+        pytest.param({}, DELIVERY_PROFILES, ROOM_DELIVERY, id="no_key"),
+        pytest.param(
+            {"other": "fast"},
+            DELIVERY_PROFILES,
+            ROOM_DELIVERY,
+            id="other_key",
+        ),
+        pytest.param(
+            "nope",
+            DELIVERY_PROFILES,
+            ROOM_DELIVERY,
+            id="unknown_bare_name",
+        ),
+        pytest.param(
+            _fp_map("nope"),
+            DELIVERY_PROFILES,
+            ROOM_DELIVERY,
+            id="unknown_map_key",
+        ),
+        pytest.param(
+            _fp_map(None),
+            DELIVERY_PROFILES,
+            ROOM_DELIVERY,
+            id="null_value",
+        ),
+        pytest.param(
+            _fp_map(42),
+            DELIVERY_PROFILES,
+            ROOM_DELIVERY,
+            id="non_str_value",
+        ),
+        pytest.param(
+            # the full-config-in-request shape the client once tried:
+            # never honored, never an error
+            _fp_map({"strategy": "bounded"}),
+            DELIVERY_PROFILES,
+            ROOM_DELIVERY,
+            id="full_config",
+        ),
+        pytest.param(42, DELIVERY_PROFILES, ROOM_DELIVERY, id="bare_nonstr"),
+        pytest.param(
+            _fp_map("fast"),
+            None,
+            ROOM_DELIVERY,
+            id="no_stanza",
+        ),
+        pytest.param("fast", None, ROOM_DELIVERY, id="bare_no_stanza"),
+    ],
+)
+def test_resolve_delivery(forwarded_props, profiles, expected):
+    room_config = mock.Mock(effective_agui_sse_delivery=ROOM_DELIVERY)
+
+    found = agui_views._resolve_delivery(
+        forwarded_props,
+        profiles,
+        room_config,
+    )
+
+    assert found is expected
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "w_bogus_thread_id, w_bogus_run_id",
@@ -1657,6 +1754,11 @@ async def test_post_room_agui_thread_id_run_id_streaming(
     the_logger = mock.create_autospec(loggers.LogWrapper)
 
     exp_deps = the_installation.get_agent_deps_for_room.return_value
+
+    # Instance-private config: the class-spec autospec hides '_config'
+    # until the test seeds it; 'sse_delivery=None' means no stanza, so
+    # the run falls back to the room's effective delivery.
+    the_installation._config = mock.Mock(sse_delivery=None)
 
     test_run.run_input = None
 

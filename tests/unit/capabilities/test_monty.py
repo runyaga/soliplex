@@ -481,3 +481,44 @@ async def test_host_names_match_the_models_prefixed_names(tmp_path):
 
     output = await _run(cap, toolsets=[tools.prefixed("remote-client")])
     assert output == '{"found": "test"}'
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def main(): return second_task()",
+        "def main():\n"
+        "    try:\n        second_task()\n"
+        "    except Exception:\n        return 'caught'\n",
+    ],
+)
+@pytest.mark.anyio
+async def test_nested_script_failure_returns_callers_error(tmp_path, source):
+    first = _skill(tmp_path, source, allowed=("second_task",), name="first")
+    second = _skill(tmp_path, "def main(): return 1 / 0", name="second")
+    output = await _run(first, capabilities=[second])
+    assert output.startswith("SCRIPT ERROR:")
+    assert "SCRIPT ERROR:" in output.removeprefix("SCRIPT ERROR:")
+    assert "ZeroDivisionError" in output
+    assert "caught" not in output
+    direct = await _run(second)
+    assert direct.startswith("SCRIPT ERROR:")
+    assert "ZeroDivisionError" in direct
+
+
+@pytest.mark.anyio
+async def test_regular_host_error_text_remains_a_value(tmp_path):
+    cap = _skill(
+        tmp_path,
+        "def main(): return host()",
+        allowed=("host",),
+    )
+    tools = FunctionToolset()
+
+    @tools.tool_plain
+    def host() -> str:
+        return "SCRIPT ERROR: ordinary host text"
+
+    assert await _run(cap, toolsets=[tools]) == (
+        '"SCRIPT ERROR: ordinary host text"'
+    )

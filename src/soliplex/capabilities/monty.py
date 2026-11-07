@@ -223,6 +223,14 @@ async def _execute(tool: ScriptTool, arguments: dict, ctx: RunContext) -> str:
             if outcome.error is not None:
                 failure = outcome.error
                 _raise_failure(failure)
+            host = hosts[original_names.get(name, name)]
+            while hasattr(host, "source_tool"):
+                host = host.source_tool
+            if isinstance(host, ScriptTool) and outcome.content.startswith(
+                "SCRIPT ERROR:"
+            ):
+                failure = RuntimeError(outcome.content)
+                _raise_failure(failure)
             return outcome.content
 
         session = await state.get_session(

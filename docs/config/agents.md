@@ -119,6 +119,28 @@ agent:
 - `retries` (an integer, default `3`):  number of retries for LLM calls
   on recoverable errors.
 
+- `usage_limits` (a mapping, default None): limits for each room AG-UI
+  run. Accepted keys are `request_limit`, `tool_calls_limit`,
+  `input_tokens_limit`, `output_tokens_limit`, and `total_tokens_limit`.
+  Every value must be a positive integer. Soliplex passes these to
+  Pydantic AI's `UsageLimits`, which checks request and tool-call counts
+  before execution and token counts from model responses.
+
+- `run_timeout_seconds` (a positive number, default None): maximum
+  wall-clock duration of a room AG-UI run, including model and tool calls.
+  Exceeding this timeout or a usage limit ends the stream with a
+  `RUN_ERROR` event naming the limit. Both fields can be set on an
+  installation-level agent template and overridden in a room. Leaving
+  both absent keeps Pydantic AI's default usage limits and no run timeout.
+
+  ```yaml
+  usage_limits:
+    request_limit: 10
+    tool_calls_limit: 20
+    total_tokens_limit: 50000
+  run_timeout_seconds: 120
+  ```
+
 - `context_window` (an integer, default None):  the model's context
   window, in tokens.  Pydantic AI already knows the window of hosted
   models it recognises, so this is only needed for a model it cannot

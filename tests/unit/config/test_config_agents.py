@@ -10,6 +10,7 @@ import pytest
 import yaml
 from pydantic_ai import capabilities as ai_capabilities
 from pydantic_ai import settings as ai_settings
+from pydantic_ai import usage as ai_usage
 from pydantic_ai.models import openai as openai_models
 from pydantic_ai.providers import vllm as vllm_providers
 
@@ -1229,6 +1230,8 @@ def test_agentconfig_as_yaml(
         "model_settings": agent_config_kw.get("model_settings"),
         "context_window": agent_config_kw.get("context_window"),
         "retries": agent_config_kw.get("retries", 3),
+        "usage_limits": None,
+        "run_timeout_seconds": None,
         "multimodal": agent_config_kw.get("multimodal", False),
         "provider_type": agent_config_kw.get("provider_type", "ollama"),
         "provider_base_url": agent_config_kw.get("provider_base_url"),
@@ -1870,3 +1873,112 @@ def test_vllm_model_profile(
     else:
         assert model.provider.client.api_key
         installation_config.get_secret.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        {},
+        {"tool_calls_limit": 4},
+        {
+            "request_limit": 2,
+            "tool_calls_limit": 3,
+            "input_tokens_limit": 100,
+            "output_tokens_limit": 50,
+            "total_tokens_limit": 150,
+        },
+    ],
+)
+@pytest.mark.parametrize("timeout", [1, 0.25])
+def test_agent_run_limits_round_trip_and_template(
+    installation_config, tmp_path, limits, timeout
+):
+    path = tmp_path / "agent.yaml"
+    template = config_agents.AgentConfig.from_yaml(
+        installation_config,
+        path,
+        {
+            "id": TEMPLATE_AGENT_ID,
+            "usage_limits": limits,
+            "run_timeout_seconds": timeout,
+        },
+    )
+    assert template.usage_limits == ai_usage.UsageLimits(**limits)
+    assert template.run_timeout_seconds == timeout
+    installation_config.agent_configs = [template]
+    inherited = config_agents.AgentConfig.from_yaml(
+        installation_config,
+        path,
+        {"id": AGENT_ID, "template_id": TEMPLATE_AGENT_ID},
+    )
+    assert inherited.usage_limits == template.usage_limits
+    assert inherited.run_timeout_seconds == timeout
+    reloaded = config_agents.AgentConfig.from_yaml(
+        installation_config,
+        path,
+        yaml.safe_load(yaml.safe_dump(template.as_yaml)),
+    )
+    assert reloaded == template
+    overridden = config_agents.AgentConfig.from_yaml(
+        installation_config,
+        path,
+        {
+            "id": AGENT_ID,
+            "template_id": TEMPLATE_AGENT_ID,
+            "usage_limits": {"request_limit": 1},
+            "run_timeout_seconds": 0.5,
+        },
+    )
+    assert overridden.usage_limits == ai_usage.UsageLimits(request_limit=1)
+    assert overridden.run_timeout_seconds == 0.5
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "request_limit",
+        "tool_calls_limit",
+        "input_tokens_limit",
+        "output_tokens_limit",
+        "total_tokens_limit",
+    ],
+)
+@pytest.mark.parametrize("value", [0, -1, 1.5, True, "2", None])
+def test_agent_usage_limits_reject_invalid_values(
+    installation_config, tmp_path, name, value
+):
+    with pytest.raises(config_exc.FromYamlException) as exc:
+        config_agents.AgentConfig.from_yaml(
+            installation_config,
+            tmp_path / "agent.yaml",
+            {"id": AGENT_ID, "usage_limits": {name: value}},
+        )
+    assert f"{name} must be a positive integer" in str(exc.value.__cause__)
+
+
+@pytest.mark.parametrize("limits", [{"unknown_limit": 1}, {"cost_limit": 1}])
+def test_agent_usage_limits_reject_unknown_keys(
+    installation_config, tmp_path, limits
+):
+    with pytest.raises(config_exc.FromYamlException) as exc:
+        config_agents.AgentConfig.from_yaml(
+            installation_config,
+            tmp_path / "agent.yaml",
+            {"id": AGENT_ID, "usage_limits": limits},
+        )
+    assert "Unknown usage limit" in str(exc.value.__cause__)
+
+
+@pytest.mark.parametrize(
+    "timeout", [0, -1, True, "2", float("inf"), float("nan")]
+)
+def test_agent_run_timeout_rejects_invalid_values(
+    installation_config, tmp_path, timeout
+):
+    with pytest.raises(config_exc.FromYamlException) as exc:
+        config_agents.AgentConfig.from_yaml(
+            installation_config,
+            tmp_path / "agent.yaml",
+            {"id": AGENT_ID, "run_timeout_seconds": timeout},
+        )
+    assert "run_timeout_seconds" in str(exc.value.__cause__)

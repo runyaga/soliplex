@@ -3,6 +3,7 @@ from __future__ import annotations  # forward refs in typing decls
 import dataclasses
 import enum
 import functools
+import math
 import pathlib
 import re
 import typing
@@ -12,6 +13,7 @@ from pydantic_ai import capabilities as ai_capabilities
 from pydantic_ai import exceptions as ai_exceptions
 from pydantic_ai import models as ai_models
 from pydantic_ai import settings as ai_settings
+from pydantic_ai import usage as ai_usage
 from pydantic_ai.agent import abstract as ai_ag_abstract
 from pydantic_ai.models import google as google_models
 from pydantic_ai.models import openai as openai_models
@@ -36,6 +38,14 @@ _secret_whole_field = config_interp.secret_whole_field
 
 HAS_V_NUMBER_SUFFIX = r".*/v\d+"
 has_v_number_suffix = re.compile(HAS_V_NUMBER_SUFFIX)
+
+_USAGE_LIMIT_NAMES = (
+    "request_limit",
+    "tool_calls_limit",
+    "input_tokens_limit",
+    "output_tokens_limit",
+    "total_tokens_limit",
+)
 
 
 #
@@ -93,6 +103,29 @@ class LLMProviderType(enum.StrEnum):
     OLLAMA = "ollama"
     GOOGLE = "google"
     VLLM = "vllm"
+
+
+def _load_run_limits(config_dict):
+    """Validate and build the agent run limits from YAML values."""
+    limits = config_dict.get("usage_limits")
+    if limits is not None:
+        for name, value in limits.items():
+            if name not in _USAGE_LIMIT_NAMES:
+                message = f"Unknown usage limit: {name}"
+                raise ValueError(message)
+            if type(value) is not int or value <= 0:
+                message = f"{name} must be a positive integer"
+                raise ValueError(message)
+        config_dict["usage_limits"] = ai_usage.UsageLimits(**limits)
+
+    timeout = config_dict.get("run_timeout_seconds")
+    if timeout is not None and (
+        type(timeout) not in (int, float)
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        message = "run_timeout_seconds must be a finite positive number"
+        raise ValueError(message)
 
 
 def _apply_agent_config_template(
@@ -175,6 +208,8 @@ class AgentConfig:
     kind: typing.ClassVar[str] = "default"
     model_name: str = _env_embedded_field(default=None)
     retries: int = 3
+    usage_limits: ai_usage.UsageLimits | None = None
+    run_timeout_seconds: float | None = None
 
     system_prompt: dataclasses.InitVar[str] = None
     _system_prompt_text: str = _no_interpolation_field(default=None)
@@ -255,6 +290,8 @@ class AgentConfig:
                 config_dict["model_settings"] = ai_settings.ModelSettings(
                     **pm_settings
                 )
+
+            _load_run_limits(config_dict)
 
             capabilities = config_dict.pop("capabilities", None)
             if capabilities is not None:
@@ -350,6 +387,16 @@ class AgentConfig:
             "kind": self.kind,
             "model_name": self.model_name,  # not interpolated
             "retries": self.retries,
+            "usage_limits": (
+                None
+                if self.usage_limits is None
+                else {
+                    name: getattr(self.usage_limits, name)
+                    for name in _USAGE_LIMIT_NAMES
+                    if getattr(self.usage_limits, name) is not None
+                }
+            ),
+            "run_timeout_seconds": self.run_timeout_seconds,
             "system_prompt": prompt,
             "model_settings": self.model_settings,
             "context_window": self.context_window,

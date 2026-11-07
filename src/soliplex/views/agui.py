@@ -13,6 +13,7 @@ import pydantic
 import pydantic_ai
 from ag_ui import core as agui_core
 from fastapi import responses
+from pydantic_ai import exceptions as ai_exceptions
 from pydantic_ai.ui import ag_ui as ai_ag_ui
 from sqlalchemy import exc as sqla_exc
 from sqlalchemy.ext import asyncio as sqla_asyncio
@@ -824,15 +825,45 @@ async def stream_llm_events(event_queue: asyncio.Queue):
         yield event
 
 
+async def _run_agent_with_timeout(adapter, run_stream_kwargs, timeout):
+    """Report a whole-run timeout through the adapter's error path."""
+    kwargs = run_stream_kwargs.copy()
+    on_complete = kwargs.pop("on_complete", None)
+
+    async def native_stream():
+        try:
+            async for event in adapter.run_stream_native(
+                **kwargs, timeout=timeout
+            ):
+                yield event
+        except ai_exceptions.RunTimedOut as exc:
+            message = (
+                f"run_timeout_seconds limit of {timeout} seconds exceeded"
+            )
+            raise TimeoutError(message) from exc
+
+    async for event in adapter.transform_stream(
+        native_stream(), on_complete=on_complete
+    ):
+        yield event
+
+
 async def init_agent_stream(
     *,
     agui_adapter: ai_ag_ui.AGUIAdapter,
     run_stream_kwargs: dict,
     delivery: config_sse_delivery.SSEDeliveryConfig,
+    run_timeout_seconds: float | None = None,
     **drive_kwargs,
 ):
+    if run_timeout_seconds is None:
+        stream = agui_adapter.run_stream(**run_stream_kwargs)
+    else:
+        stream = _run_agent_with_timeout(
+            agui_adapter, run_stream_kwargs, run_timeout_seconds
+        )
     w_final_state = agui_sse_delivery.with_final_state(
-        stream=agui_adapter.run_stream(**run_stream_kwargs),
+        stream=stream,
         deps=run_stream_kwargs.get("deps"),
     )
     delivered = agui_sse_delivery.apply_delivery_strategy(
@@ -1051,6 +1082,13 @@ async def post_room_agui_thread_id_run_id(
     title_agent_config = the_installation.get_title_agent_config()
 
     bg_tasks = request.app.state.agui_background_tasks
+    agent_config = room_config.agent_config
+    limits_kwargs = {}
+    run_timeout_seconds = None
+    if isinstance(agent_config, config_agents.AgentConfig):
+        if agent_config.usage_limits is not None:
+            limits_kwargs["usage_limits"] = agent_config.usage_limits
+        run_timeout_seconds = agent_config.run_timeout_seconds
     task = asyncio.create_task(
         init_agent_stream(
             agui_adapter=agui_adapter,
@@ -1065,6 +1103,7 @@ async def post_room_agui_thread_id_run_id(
                     thread_id=thread_id,
                     run_id=run_id,
                 ),
+                **limits_kwargs,
             ),
             sqla_engine=request.state.threads_engine,
             event_queue=event_queue,
@@ -1075,6 +1114,7 @@ async def post_room_agui_thread_id_run_id(
             title_agent_config=title_agent_config,
             messages=agui_adapter.run_input.messages,
             delivery=delivery,
+            run_timeout_seconds=run_timeout_seconds,
         )
     )
     bg_tasks.add(task)

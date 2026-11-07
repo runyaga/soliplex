@@ -10,6 +10,11 @@ import _test_features as agui_features
 import fastapi
 import pytest
 from ag_ui import core as agui_core
+from pydantic_ai import Agent
+from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.ui.ag_ui import AGUIAdapter
+from pydantic_ai.usage import UsageLimits
 from sqlalchemy import exc as sqla_exc
 
 from soliplex import agui
@@ -17,6 +22,7 @@ from soliplex import authz
 from soliplex import installation
 from soliplex import loggers
 from soliplex import models
+from soliplex.config import agents as config_agents
 from soliplex.config import agui as config_agui
 from soliplex.config import rooms as config_rooms
 from soliplex.config import sse_delivery as config_sse_delivery
@@ -1703,6 +1709,18 @@ async def test_post_room_agui_thread_id_run_id_w_bogus_ids(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "agent_config",
+    [
+        config_agents.FactoryAgentConfig(id="factory", factory_name="unused"),
+        config_agents.AgentConfig(id="default"),
+        config_agents.AgentConfig(
+            id="bounded",
+            usage_limits=UsageLimits(request_limit=2),
+            run_timeout_seconds=0.5,
+        ),
+    ],
+)
+@pytest.mark.parametrize(
     "ari_side_effect, expectation",
     [
         (None, no_error()),
@@ -1738,6 +1756,7 @@ async def test_post_room_agui_thread_id_run_id_streaming(
     expectation,
     fake_async_session,
     mock_thread_storage,
+    agent_config,
 ):
     USER_PROFILE = models.UserProfile(**AUTH_USER)
     agent = object()
@@ -1757,6 +1776,7 @@ async def test_post_room_agui_thread_id_run_id_streaming(
 
     the_installation = mock.create_autospec(installation.Installation)
     the_installation.get_agent_for_room.return_value = agent
+    the_installation.get_room_config.return_value.agent_config = agent_config
     the_room_authz = mock.create_autospec(authz.RoomAuthorizationPolicy)
     the_logger = mock.create_autospec(loggers.LogWrapper)
 
@@ -1861,6 +1881,12 @@ async def test_post_room_agui_thread_id_run_id_streaming(
         rsk = ias_kwargs["run_stream_kwargs"]
         assert rsk["deps"] is exp_deps
         assert rsk["conversation_id"] == TEST_THREAD_ID_STR
+        assert rsk.get("usage_limits") == getattr(
+            agent_config, "usage_limits", None
+        )
+        assert ias_kwargs["run_timeout_seconds"] == getattr(
+            agent_config, "run_timeout_seconds", None
+        )
         capture = rsk["on_complete"]
         assert isinstance(capture, functools.partial)
         assert capture.func is cuas
@@ -2841,3 +2867,135 @@ async def test_get_agui_threads_restricts_to_authorized_rooms(the_threads):
     )
     _args, kwargs = the_threads.list_user_threads_page.call_args
     assert kwargs["room_ids"] == [TEST_ROOM_ID]
+
+
+async def _collect_bounded_run(agent, run_kwargs, timeout):
+    """Collect persisted and live events from a real adapter run."""
+    queue = asyncio.Queue()
+    callback = mock.AsyncMock()
+    adapter = AGUIAdapter(
+        agent=agent,
+        run_input=agui_core.RunAgentInput(
+            thread_id=TEST_THREAD_ID_STR,
+            run_id=TEST_RUN_ID_STR,
+            messages=[agui_core.UserMessage(id="user", content="Run tools")],
+            state={},
+            tools=[],
+            context=[],
+            forwarded_props=None,
+        ),
+    )
+    with (
+        mock.patch(
+            "soliplex.agui.persistence.save_single_event"
+        ) as save_event,
+        mock.patch("soliplex.agui.persistence.finish_run") as finish,
+    ):
+        await asyncio.wait_for(
+            agui_views.init_agent_stream(
+                agui_adapter=adapter,
+                run_stream_kwargs={"on_complete": callback, **run_kwargs},
+                run_timeout_seconds=timeout,
+                delivery=config_sse_delivery.SSEDeliveryConfig(
+                    strategy=config_sse_delivery.SSEDeliveryStrategy.MESSAGE,
+                ),
+                **IAS_DRIVE_KWARGS,
+                event_queue=queue,
+            ),
+            timeout=5,
+        )
+        events = [event async for event in agui_views.stream_llm_events(queue)]
+        assert [
+            call.kwargs["event"] for call in save_event.await_args_list
+        ] == (events)
+        finish.assert_awaited_once()
+    terminals = [
+        event
+        for event in events
+        if event.type
+        in (agui_core.EventType.RUN_ERROR, agui_core.EventType.RUN_FINISHED)
+    ]
+    assert terminals == [events[-1]]
+    return events, callback
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout", [None, 1])
+@pytest.mark.parametrize(
+    "limit",
+    [
+        "request_limit",
+        "tool_calls_limit",
+        "input_tokens_limit",
+        "output_tokens_limit",
+        "total_tokens_limit",
+    ],
+)
+async def test_usage_limits_end_real_run_with_error(limit, timeout):
+    def first() -> str:
+        return "first"
+
+    def second() -> str:
+        return "second"
+
+    agent = Agent(TestModel(), tools=[first, second])
+    events, callback = await _collect_bounded_run(
+        agent, {"usage_limits": UsageLimits(**{limit: 1})}, timeout
+    )
+    assert events[-1].type == agui_core.EventType.RUN_ERROR
+    assert limit in events[-1].message
+    callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("waiting_on", ["model", "tool"])
+async def test_run_timeout_ends_real_run_with_error(waiting_on):
+    closed = []
+
+    async def stream(messages, info):
+        try:
+            yield "starting"
+            await asyncio.Event().wait()
+        finally:
+            closed.append("model")
+
+    async def slow() -> str:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            closed.append("tool")
+
+    model = FunctionModel(stream_function=stream)
+    if waiting_on == "tool":
+        model = TestModel()
+    agent = Agent(model, tools=[slow])
+    events, callback = await _collect_bounded_run(agent, {}, 0.1)
+    assert events[-1].type == agui_core.EventType.RUN_ERROR
+    assert "run_timeout_seconds limit of 0.1" in events[-1].message
+    assert closed == [waiting_on]
+    callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout", [None, 1])
+async def test_run_limits_absent_or_unreached_finish_normally(timeout):
+    events, callback = await _collect_bounded_run(
+        Agent(TestModel()), {}, timeout
+    )
+    assert events[-1].type == agui_core.EventType.RUN_FINISHED
+    callback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_timeout_preserves_other_agent_errors():
+    async def stream(messages, info):
+        yield "starting"
+        message = "model failed"
+        raise ValueError(message)
+
+    events, callback = await _collect_bounded_run(
+        Agent(FunctionModel(stream_function=stream)), {}, 1
+    )
+    assert events[-1].type == agui_core.EventType.RUN_ERROR
+    assert events[-1].message == "model failed"
+    callback.assert_not_awaited()

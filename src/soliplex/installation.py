@@ -203,6 +203,16 @@ class RoomConfigsReloaded:
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class SkillAndRoomConfigsReloaded:
+    """Report room changes and sorted skill names changed by a reload."""
+
+    rooms: RoomConfigsReloaded
+    skills_added: tuple[str, ...]
+    skills_removed: tuple[str, ...]
+    skills_changed: tuple[str, ...]
+
+
 @dataclasses.dataclass
 class Installation:
     _config: config_installation.InstallationConfig
@@ -473,6 +483,34 @@ class Installation:
         )
 
         return RoomConfigsReloaded.between(before, after)
+
+    async def reload_skill_and_room_configs(
+        self,
+    ) -> SkillAndRoomConfigsReloaded:
+        """Reload skills and rooms in a worker thread and report changes."""
+        before_rooms = self._config.room_configs
+        before_skills = self._config.skill_configs
+        after_rooms = await anyio.to_thread.run_sync(
+            self._config.reload_skill_and_room_configs,
+        )
+        after_skills = self._config.skill_configs
+        kept = before_skills.keys() & after_skills.keys()
+        return SkillAndRoomConfigsReloaded(
+            rooms=RoomConfigsReloaded.between(before_rooms, after_rooms),
+            skills_added=tuple(
+                sorted(after_skills.keys() - before_skills.keys())
+            ),
+            skills_removed=tuple(
+                sorted(before_skills.keys() - after_skills.keys())
+            ),
+            skills_changed=tuple(
+                sorted(
+                    name
+                    for name in kept
+                    if before_skills[name] != after_skills[name]
+                )
+            ),
+        )
 
     async def get_completion_configs(
         self,

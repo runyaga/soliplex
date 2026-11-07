@@ -974,6 +974,101 @@ async def test_installation_reload_room_configs_w_failure():
 
 
 @pytest.mark.anyio
+async def test_installation_reload_skill_and_room_configs():
+    before_rooms = {"kept": object(), "removed": object()}
+    after_rooms = {"kept": before_rooms["kept"], "added": object()}
+    before_skills = {
+        "kept": object(),
+        "changed": object(),
+        "removed": object(),
+        "also-removed": object(),
+    }
+    after_skills = {
+        "kept": before_skills["kept"],
+        "changed": object(),
+        "added": object(),
+        "also-added": object(),
+    }
+    reloaded_in_threads = []
+    i_config = mock.create_autospec(config_installation.InstallationConfig)
+    i_config.room_configs = before_rooms
+    i_config.skill_configs = before_skills
+
+    def _reload_skill_and_room_configs():
+        reloaded_in_threads.append(threading.get_ident())
+        i_config.skill_configs = after_skills
+        return after_rooms
+
+    i_config.reload_skill_and_room_configs.side_effect = (
+        _reload_skill_and_room_configs
+    )
+    the_installation = installation.Installation(i_config)
+
+    found = await the_installation.reload_skill_and_room_configs()
+
+    assert found == installation.SkillAndRoomConfigsReloaded(
+        rooms=installation.RoomConfigsReloaded(
+            added=("added",), removed=("removed",), changed=()
+        ),
+        skills_added=("added", "also-added"),
+        skills_removed=("also-removed", "removed"),
+        skills_changed=("changed",),
+    )
+    assert reloaded_in_threads != [threading.get_ident()]
+    assert len(reloaded_in_threads) == 1
+    i_config.reload_skill_and_room_configs.assert_called_once_with()
+
+
+@pytest.mark.anyio
+async def test_installation_reload_skill_and_room_configs_edited_skill(
+    tmp_path,
+):
+    skill_path = tmp_path / "skills" / "sample"
+    skill_path.mkdir(parents=True)
+    skill_file = skill_path / "SKILL.md"
+    metadata = "---\nname: sample\ndescription: Test skill.\n---\n"
+    skill_file.write_text(metadata + "First instructions.\n", encoding="utf-8")
+    i_config = config_installation.InstallationConfig(
+        id="testing", _config_path=tmp_path / "installation.yaml"
+    )
+    previous = i_config.skill_configs["sample"]
+    skill_file.write_text(
+        metadata + "Edited instructions.\n", encoding="utf-8"
+    )
+    the_installation = installation.Installation(i_config)
+
+    found = await the_installation.reload_skill_and_room_configs()
+
+    assert found == installation.SkillAndRoomConfigsReloaded(
+        rooms=installation.RoomConfigsReloaded(
+            added=(), removed=(), changed=()
+        ),
+        skills_added=(),
+        skills_removed=(),
+        skills_changed=("sample",),
+    )
+    assert previous.capability.instructions == "First instructions."
+    assert (
+        i_config.skill_configs["sample"].capability.instructions
+        == "Edited instructions."
+    )
+
+
+@pytest.mark.anyio
+async def test_installation_reload_skill_and_room_configs_w_failure():
+    i_config = mock.create_autospec(config_installation.InstallationConfig)
+    i_config.room_configs = {"kept": object()}
+    i_config.skill_configs = {"sample": object()}
+    i_config.reload_skill_and_room_configs.side_effect = ValueError(
+        "broken room"
+    )
+    the_installation = installation.Installation(i_config)
+
+    with pytest.raises(ValueError, match="broken room"):
+        await the_installation.reload_skill_and_room_configs()
+
+
+@pytest.mark.anyio
 async def test_installation_get_completion_configs(test_user):
     c_config = mock.create_autospec(config_completions.CompletionConfig)
     c_configs = {"completion_id": c_config}

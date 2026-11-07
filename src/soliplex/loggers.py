@@ -121,6 +121,11 @@ INST_RELOAD_ROOMS_MULTI_WRITER = (
     "room configs reload unsupported with multiple workers: restart"
     " the server to reload"
 )
+INST_POST_RELOAD_SKILLS = "installation reload skills"
+INST_RELOAD_SKILLS_MULTI_WRITER = (
+    "skill and room configs reload unsupported with multiple workers: restart"
+    " the server to reload"
+)
 
 LOG_INGEST_INGEST_LOGS = "ingest logs"
 LOG_INGEST_PAYLOAD_TOO_BIG = "payload too big"
@@ -178,6 +183,7 @@ AUDIT_RESOURCE_INSTALLATION_VERSIONS = "installation-versions"
 AUDIT_RESOURCE_INSTALLATION_PROVIDERS = "installation-providers"
 AUDIT_RESOURCE_INSTALLATION_GIT_METADATA = "installation-git-metadata"
 AUDIT_RESOURCE_INSTALLATION_ROOMS = "installation-rooms"
+AUDIT_RESOURCE_INSTALLATION_SKILLS = "installation-skills"
 AUDIT_RESOURCE_ROOM_UPLOAD = "room-upload"
 
 # room-authz audit events
@@ -196,6 +202,7 @@ AUDIT_INSTALLATION_VERSIONS_READ = "installation versions read"
 AUDIT_INSTALLATION_PROVIDERS_READ = "installation providers read"
 AUDIT_INSTALLATION_GIT_METADATA_READ = "installation git metadata read"
 AUDIT_INSTALLATION_ROOMS_RELOADED = "installation rooms reloaded"
+AUDIT_INSTALLATION_SKILLS_RELOADED = "installation skills and rooms reloaded"
 
 # server-lifecycle audit events
 AUDIT_SERVER_STARTING = "server starting"
@@ -570,6 +577,25 @@ class InstallationConfigAuditLog(AuditLogWrapper):
             rooms_added=added,
             rooms_removed=removed,
             rooms_changed=changed,
+        )
+
+    def skills_reloaded(
+        self,
+        rooms_added,
+        rooms_removed,
+        rooms_changed,
+        skills_added,
+        skills_removed,
+        skills_changed,
+    ):
+        self._succeeded(
+            AUDIT_INSTALLATION_SKILLS_RELOADED,
+            rooms_added=rooms_added,
+            rooms_removed=rooms_removed,
+            rooms_changed=rooms_changed,
+            skills_added=skills_added,
+            skills_removed=skills_removed,
+            skills_changed=skills_changed,
         )
 
 

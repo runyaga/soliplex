@@ -662,6 +662,29 @@ def test_installation_rooms_reloaded(audit_records):
     )
 
 
+def test_installation_skills_reloaded(audit_records):
+    wrapper = loggers.InstallationConfigAuditLog(claims=CLAIMS)
+    fields = {
+        "rooms_added": ["new-room"],
+        "rooms_removed": ["old-room"],
+        "rooms_changed": ["changed-room"],
+        "skills_added": ["new-skill"],
+        "skills_removed": ["old-skill"],
+        "skills_changed": ["changed-skill"],
+    }
+
+    wrapper.skills_reloaded(**fields)
+
+    _assert_audit_record(
+        audit_records[-1],
+        message=loggers.AUDIT_INSTALLATION_SKILLS_RELOADED,
+        levelno=logging.INFO,
+        outcome=loggers.AUDIT_OUTCOME_SUCCESS,
+        scope=SCOPE_INSTALLATION_CONFIG,
+        fields={"claims": CLAIMS, **fields},
+    )
+
+
 def test_installation_providers_read(audit_records):
     wrapper = loggers.InstallationConfigAuditLog(claims=CLAIMS)
 

@@ -496,6 +496,21 @@ class RoomConfigsReloaded(pydantic.BaseModel):
     changed: list[str] = []
 
 
+class SkillConfigsReloaded(pydantic.BaseModel):
+    """Report the skill names a reload adds, removes, or changes."""
+
+    added: list[str] = []
+    removed: list[str] = []
+    changed: list[str] = []
+
+
+class SkillAndRoomConfigsReloaded(pydantic.BaseModel):
+    """Report the room and skill deltas from a combined reload."""
+
+    rooms: RoomConfigsReloaded
+    skills: SkillConfigsReloaded
+
+
 class Installation(pydantic.BaseModel):
     """Configuration for a set of rooms, completions, etc."""
 

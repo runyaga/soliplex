@@ -3,6 +3,7 @@ from unittest import mock
 
 import fastapi
 import pytest
+from fastapi.testclient import TestClient
 
 from soliplex import authz
 from soliplex import installation
@@ -252,6 +253,126 @@ async def test_reload_rooms_configs_multi_writer(
     assert exc.value.detail == loggers.INST_RELOAD_ROOMS_MULTI_WRITER
     the_installation.reload_room_configs.assert_not_awaited()
     the_audit.rooms_reloaded.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "admin, writer, status",
+    [(False, None, 403), (True, "Y", 409), (True, "", 409)],
+)
+def test_reload_skills_configs_refused(monkeypatch, admin, writer, status):
+    monkeypatch.delenv("_SOLIPLEX_MULTIPLE_WRITERS", raising=False)
+    if writer is not None:
+        monkeypatch.setenv("_SOLIPLEX_MULTIPLE_WRITERS", writer)
+    the_installation = mock.create_autospec(installation.Installation)
+    the_admin_users = mock.create_autospec(authz.AdminUserPolicy)
+    the_admin_users.check_admin_access.return_value = admin
+    the_logger = mock.create_autospec(loggers.LogWrapper)
+    the_audit = mock.create_autospec(loggers.InstallationConfigAuditLog)
+    app = _skills_reload_app(
+        the_installation, the_admin_users, the_logger, the_audit
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/v1/installation/reload/skills")
+
+    assert response.status_code == status
+    assert response.json() == {
+        "detail": (
+            loggers.AUTHZ_ADMIN_ACCESS_REQUIRED
+            if status == 403
+            else loggers.INST_RELOAD_SKILLS_MULTI_WRITER
+        )
+    }
+    the_installation.reload_skill_and_room_configs.assert_not_awaited()
+    the_audit.skills_reloaded.assert_not_called()
+
+
+def _skills_reload_app(
+    the_installation, the_admin_users, the_logger, the_audit
+):
+    app = fastapi.FastAPI()
+    app.include_router(installation_views.router)
+    app.dependency_overrides = {
+        installation_views.depend_the_installation.dependency: (
+            lambda: the_installation
+        ),
+        installation_views.depend_the_admin_users.dependency: (
+            lambda: the_admin_users
+        ),
+        installation_views.depend_the_user_claims.dependency: (
+            lambda: THE_USER_CLAIMS
+        ),
+        installation_views.depend_the_logger.dependency: lambda: the_logger,
+        installation_views.get_the_config_audit_log: lambda: the_audit,
+    }
+    return app
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_reload_skills_configs(monkeypatch, audit_records, empty):
+    monkeypatch.delenv("_SOLIPLEX_MULTIPLE_WRITERS", raising=False)
+    added = () if empty else ("new-skill",)
+    removed = () if empty else ("old-skill",)
+    changed = () if empty else ("changed-skill",)
+    rooms_added = () if empty else ("new-room",)
+    rooms_removed = () if empty else ("old-room",)
+    rooms_changed = () if empty else ("changed-room",)
+    the_installation = mock.create_autospec(installation.Installation)
+    the_installation.reload_skill_and_room_configs.return_value = (
+        installation.SkillAndRoomConfigsReloaded(
+            rooms=installation.RoomConfigsReloaded(
+                added=rooms_added,
+                removed=rooms_removed,
+                changed=rooms_changed,
+            ),
+            skills_added=added,
+            skills_removed=removed,
+            skills_changed=changed,
+        )
+    )
+    the_admin_users = mock.create_autospec(authz.AdminUserPolicy)
+    the_admin_users.check_admin_access.return_value = True
+    the_logger = mock.create_autospec(loggers.LogWrapper)
+    the_audit = loggers.InstallationConfigAuditLog(claims=THE_USER_CLAIMS)
+    app = _skills_reload_app(
+        the_installation, the_admin_users, the_logger, the_audit
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/v1/installation/reload/skills")
+
+    skills_delta = {
+        "added": list(added),
+        "removed": list(removed),
+        "changed": list(changed),
+    }
+    rooms_delta = {
+        "added": list(rooms_added),
+        "removed": list(rooms_removed),
+        "changed": list(rooms_changed),
+    }
+    assert response.status_code == 200
+    assert response.json() == {"rooms": rooms_delta, "skills": skills_delta}
+    the_installation.reload_skill_and_room_configs.assert_awaited_once_with()
+    the_admin_users.check_admin_access.assert_awaited_once_with(
+        THE_USER_CLAIMS,
+        resource=loggers.AUDIT_RESOURCE_INSTALLATION_SKILLS,
+        action=loggers.AUDIT_ACTION_UPDATE,
+    )
+    the_logger.bind.assert_called_once_with(loggers.AUTHZ_LOGGER_NAME)
+    the_logger.bind.return_value.debug.assert_called_once_with(
+        loggers.INST_POST_RELOAD_SKILLS
+    )
+    record = audit_records[-1]
+    assert record.getMessage() == loggers.AUDIT_INSTALLATION_SKILLS_RELOADED
+    assert record.outcome == loggers.AUDIT_OUTCOME_SUCCESS
+    assert record.claims == THE_USER_CLAIMS
+    assert record.rooms_added == list(rooms_added)
+    assert record.rooms_removed == list(rooms_removed)
+    assert record.rooms_changed == list(rooms_changed)
+    assert record.skills_added == list(added)
+    assert record.skills_removed == list(removed)
+    assert record.skills_changed == list(changed)
 
 
 @pytest.mark.anyio

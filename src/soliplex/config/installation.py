@@ -1,11 +1,13 @@
 from __future__ import annotations  # forward refs in typing decls
 
+import copy
 import dataclasses
 import enum
 import functools
 import itertools
 import os
 import pathlib
+import threading
 import typing
 
 import dotenv
@@ -226,11 +228,13 @@ def resolve_environment_entry(
         raise MissingEnvVar(env_name) from None
 
 
-def _load_filesystem_skill_configs(i_config) -> config_skills.SkillConfigMap:
+def _load_filesystem_skill_configs(
+    i_config, *, paths=None
+) -> config_skills.SkillConfigMap:
     fs_skill_configs = {}
 
     capabilities, validation_errors = cap_fs.discover_filesystem_capabilities(
-        i_config.filesystem_skills_paths,
+        i_config.filesystem_skills_paths if paths is None else paths,
     )
     for capability in capabilities:
         skill_config = config_skills.FilesystemSkillConfig.from_capability(
@@ -645,6 +649,11 @@ class InstallationConfig:
     _available_filesystem_skill_configs: config_skills.SkillConfigMap = None
     _skill_configs: list[dict] | None = None
     _resolved_skill_configs: config_skills.SkillConfigMap = None
+    _reload_lock: threading.Lock = dataclasses.field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def available_filesystem_skill_configs(
@@ -1099,6 +1108,7 @@ class InstallationConfig:
             ) from exc
 
     def __post_init__(self):
+        self._reload_lock = threading.Lock()
         if self.meta is None:
             self.meta = config_meta.InstallationConfigMeta(tool_configs=[])
 
@@ -1419,10 +1429,38 @@ class InstallationConfig:
 
         Returns a copy of the new map, as 'room_configs' does.
         """
-        room_configs = self._load_room_configs()
-        self._room_configs = room_configs
+        with self._reload_lock:
+            room_configs = self._load_room_configs()
+            self._room_configs = room_configs
 
-        return room_configs.copy()
+            return room_configs.copy()
+
+    def reload_skill_and_room_configs(self) -> config_rooms.RoomConfigMap:
+        """Reload skills and rooms after loading both successfully."""
+        with self._reload_lock:
+            candidate = copy.copy(self)
+            candidate._available_filesystem_skill_configs = (
+                _load_filesystem_skill_configs(
+                    candidate,
+                    paths=[
+                        pathlib.Path(path).resolve()
+                        for path in self.filesystem_skills_paths
+                    ],
+                )
+            )
+            candidate._resolved_skill_configs = resolve_skill_configs(
+                candidate._skill_configs or [],
+                candidate._available_filesystem_skill_configs,
+            )
+            room_configs = candidate._load_room_configs()
+            candidate._room_configs = room_configs
+
+            self._room_configs = room_configs
+            self._available_filesystem_skill_configs = (
+                candidate._available_filesystem_skill_configs
+            )
+            self._resolved_skill_configs = candidate._resolved_skill_configs
+            return room_configs.copy()
 
 
 def load_installation(config_path: pathlib.Path) -> InstallationConfig:

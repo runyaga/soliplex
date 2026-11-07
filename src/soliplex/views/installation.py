@@ -127,6 +127,59 @@ async def reload_rooms_configs(
     return delta
 
 
+@util.logfire_span("POST /v1/installation/reload/skills")
+@router.post("/v1/installation/reload/skills")
+async def reload_skills_configs(
+    the_installation: installation.Installation = depend_the_installation,
+    the_admin_users: authz.AdminUserPolicy = depend_the_admin_users,
+    the_user_claims: authn.UserClaims = depend_the_user_claims,
+    the_logger: loggers.LogWrapper = depend_the_logger,
+    the_audit: ConfigAuditLog = depend_the_config_audit_log,
+) -> models.SkillAndRoomConfigsReloaded:
+    """Reload skills and rooms for an admin in a single worker."""
+    bound_logger = the_logger.bind(loggers.AUTHZ_LOGGER_NAME)
+    bound_logger.debug(loggers.INST_POST_RELOAD_SKILLS)
+
+    if not await the_admin_users.check_admin_access(
+        the_user_claims,
+        resource=loggers.AUDIT_RESOURCE_INSTALLATION_SKILLS,
+        action=loggers.AUDIT_ACTION_UPDATE,
+    ):
+        raise fastapi.HTTPException(
+            status_code=403,
+            detail=loggers.AUTHZ_ADMIN_ACCESS_REQUIRED,
+        ) from None
+
+    if "_SOLIPLEX_MULTIPLE_WRITERS" in os.environ:
+        raise fastapi.HTTPException(
+            status_code=409,
+            detail=loggers.INST_RELOAD_SKILLS_MULTI_WRITER,
+        ) from None
+
+    reloaded = await the_installation.reload_skill_and_room_configs()
+    delta = models.SkillAndRoomConfigsReloaded(
+        rooms=models.RoomConfigsReloaded(
+            added=list(reloaded.rooms.added),
+            removed=list(reloaded.rooms.removed),
+            changed=list(reloaded.rooms.changed),
+        ),
+        skills=models.SkillConfigsReloaded(
+            added=list(reloaded.skills_added),
+            removed=list(reloaded.skills_removed),
+            changed=list(reloaded.skills_changed),
+        ),
+    )
+    the_audit.skills_reloaded(
+        rooms_added=delta.rooms.added,
+        rooms_removed=delta.rooms.removed,
+        rooms_changed=delta.rooms.changed,
+        skills_added=delta.skills.added,
+        skills_removed=delta.skills.removed,
+        skills_changed=delta.skills.changed,
+    )
+    return delta
+
+
 @util.logfire_span("GET /v1/installation/versions")
 @router.get("/v1/installation/versions")
 async def get_installation_versions(

@@ -4,6 +4,8 @@ import dataclasses
 import operator
 import pathlib
 import re
+import threading
+from concurrent import futures
 from unittest import mock
 
 import _test_features as agui_features
@@ -26,6 +28,7 @@ from soliplex.config import secrets as config_secrets
 from soliplex.config import skills as config_skills
 from soliplex.config import sse_delivery as config_sse_delivery
 from soliplex.config import tools as config_tools
+from tests import _platform
 from tests.unit.config import test_config_agents as test_agents
 from tests.unit.config import test_config_authsystem as test_authsystem
 from tests.unit.config import test_config_completions as test_completions
@@ -4138,6 +4141,299 @@ def test_installationconfig_reload_room_configs_w_broken_room(
 
     assert i_config._room_configs is existing
     assert list(existing) == ["foo"]
+
+
+def _write_reload_skill(skills_path, name, instructions="First instructions."):
+    skill_path = skills_path / name
+    skill_path.mkdir(parents=True, exist_ok=True)
+    (skill_path / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: Test skill.\n---\n{instructions}\n",
+        encoding="utf-8",
+    )
+    return skill_path
+
+
+@pytest.fixture
+def loaded_skill_rooms_config(loaded_rooms_config):
+    i_config, rooms = loaded_rooms_config
+    skills_path = rooms.parent / "skills"
+    _write_reload_skill(skills_path, "sample")
+    i_config.filesystem_skills_paths = [skills_path]
+    room_file = rooms / "foo" / "room_config.yaml"
+    room_file.write_text(
+        _room_config_yaml("foo")
+        + "skills:\n    installation_skill_names: [sample]\n",
+        encoding="utf-8",
+    )
+    i_config.reload_room_configs()
+    return i_config, rooms, skills_path
+
+
+def test_installationconfig_reload_skill_and_room_configs(
+    loaded_skill_rooms_config,
+):
+    i_config, rooms, skills_path = loaded_skill_rooms_config
+    existing = i_config._room_configs
+    completions = i_config._completion_configs
+    _write_reload_skill(skills_path, "new-skill")
+    _write_room_config(
+        rooms,
+        "bar",
+        _room_config_yaml("bar")
+        + "skills:\n    installation_skill_names: [new-skill]\n",
+    )
+    assert set(i_config.skill_configs) == {"sample"}
+
+    found = i_config.reload_skill_and_room_configs()
+
+    assert set(i_config.available_filesystem_skill_configs) == {
+        "sample",
+        "new-skill",
+    }
+    assert set(i_config.skill_configs) == {"sample", "new-skill"}
+    assert set(found) == {"foo", "bar"}
+    assert set(found["bar"].skill_configs) == {"new-skill"}
+    assert found == i_config._room_configs
+    assert found is not i_config._room_configs
+    assert i_config._room_configs is not existing
+    assert i_config._completion_configs is completions
+    candidate = found["bar"]._installation_config
+    assert candidate.room_configs == found
+    assert candidate._room_configs is i_config._room_configs
+
+
+def test_installationconfig_reload_skills_replaces_candidate_room_map(
+    loaded_skill_rooms_config,
+):
+    i_config, rooms, _ = loaded_skill_rooms_config
+    first = i_config.reload_skill_and_room_configs()
+    first_candidate = first["foo"]._installation_config
+    _write_room_config(rooms, "bar", _room_config_yaml("bar"))
+
+    second = i_config.reload_skill_and_room_configs()
+
+    second_candidate = second["foo"]._installation_config
+    assert second_candidate is not first_candidate
+    assert second_candidate.room_configs == second
+    assert second_candidate._room_configs is i_config._room_configs
+    assert second_candidate._room_configs["foo"] is not first["foo"]
+    assert first_candidate.room_configs == first
+
+
+def test_installationconfig_reload_skills_publishes_rooms_before_skills(
+    loaded_skill_rooms_config,
+):
+    i_config, _, skills_path = loaded_skill_rooms_config
+    previous_available = i_config._available_filesystem_skill_configs
+    previous_resolved = i_config._resolved_skill_configs
+    _write_reload_skill(skills_path, "new-skill")
+    observed = []
+
+    def observe_room_publication(config, room_configs):
+        observed.append(
+            (
+                config,
+                i_config._available_filesystem_skill_configs,
+                i_config._resolved_skill_configs,
+            )
+        )
+        config.__dict__["_room_configs"] = room_configs
+
+    with mock.patch.object(
+        type(i_config),
+        "_room_configs",
+        property(
+            lambda config: config.__dict__["_room_configs"],
+            observe_room_publication,
+        ),
+    ):
+        found = i_config.reload_skill_and_room_configs()
+        assert i_config._room_configs == found
+
+    config, available, resolved = observed[-1]
+    assert config is i_config
+    assert available is previous_available
+    assert resolved is previous_resolved
+    assert set(i_config.skill_configs) == {"sample", "new-skill"}
+
+
+def test_installationconfig_reload_skill_and_room_configs_edited_skill(
+    loaded_skill_rooms_config,
+):
+    i_config, _, skills_path = loaded_skill_rooms_config
+    previous = i_config.skill_configs["sample"]
+    _write_reload_skill(skills_path, "sample", "Edited instructions.")
+    assert i_config.skill_configs["sample"] == previous
+
+    rooms = i_config.reload_skill_and_room_configs()
+
+    reloaded = i_config.skill_configs["sample"]
+    assert reloaded != previous
+    assert reloaded.capability.instructions == "Edited instructions."
+    assert rooms["foo"].skill_configs["sample"] == reloaded
+    assert previous.capability.instructions == "First instructions."
+
+
+def test_installationconfig_reload_skills_keeps_live_state_during_room_load(
+    loaded_skill_rooms_config,
+):
+    i_config, _, skills_path = loaded_skill_rooms_config
+    previous_rooms = i_config._room_configs
+    previous_available = i_config._available_filesystem_skill_configs
+    previous_resolved = i_config._resolved_skill_configs
+    _write_reload_skill(skills_path, "new-skill")
+    load_rooms = type(i_config)._load_room_configs
+    observed = []
+
+    def observe_room_load(candidate):
+        assert candidate is not i_config
+        assert candidate._reload_lock is i_config._reload_lock
+        assert set(candidate.skill_configs) == {"sample", "new-skill"}
+        assert set(i_config.skill_configs) == {"sample"}
+        assert set(i_config.available_filesystem_skill_configs) == {"sample"}
+        assert i_config._room_configs is previous_rooms
+        assert (
+            i_config._available_filesystem_skill_configs is previous_available
+        )
+        assert i_config._resolved_skill_configs is previous_resolved
+        observed.append(candidate)
+        return load_rooms(candidate)
+
+    with mock.patch.object(
+        type(i_config), "_load_room_configs", observe_room_load
+    ):
+        i_config.reload_skill_and_room_configs()
+
+    assert len(observed) == 1
+    assert set(i_config.skill_configs) == {"sample", "new-skill"}
+
+
+def test_installationconfig_reload_skills_rejects_removed_explicit_skill(
+    loaded_skill_rooms_config,
+):
+    i_config, rooms, skills_path = loaded_skill_rooms_config
+    i_config._skill_configs = [{"kind": "filesystem", "skill_name": "sample"}]
+    previous_rooms = i_config._room_configs
+    previous_available = i_config._available_filesystem_skill_configs
+    previous_resolved = i_config._resolved_skill_configs
+    (skills_path / "sample" / "SKILL.md").unlink()
+    (rooms / "foo" / "room_config.yaml").write_text(
+        _room_config_yaml("foo"), encoding="utf-8"
+    )
+
+    with pytest.raises(KeyError, match="sample"):
+        i_config.reload_skill_and_room_configs()
+
+    assert i_config._room_configs is previous_rooms
+    assert i_config._available_filesystem_skill_configs is previous_available
+    assert i_config._resolved_skill_configs is previous_resolved
+    assert set(i_config.skill_configs) == {"sample"}
+
+
+@pytest.mark.parametrize(
+    "first_method", ["reload_skill_and_room_configs", "reload_room_configs"]
+)
+@pytest.mark.parametrize(
+    "second_method", ["reload_skill_and_room_configs", "reload_room_configs"]
+)
+def test_installationconfig_concurrent_reloads_wait(
+    loaded_skill_rooms_config, first_method, second_method
+):
+    i_config, _, _ = loaded_skill_rooms_config
+    first_loading = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    second_loading = threading.Event()
+    load_rooms = type(i_config)._load_room_configs
+
+    def blocking_room_load(candidate):
+        if not first_loading.is_set():
+            first_loading.set()
+            assert release_first.wait(timeout=5)
+        else:
+            second_loading.set()
+        return load_rooms(candidate)
+
+    def second_reload():
+        second_started.set()
+        return getattr(i_config, second_method)()
+
+    with (
+        mock.patch.object(
+            type(i_config), "_load_room_configs", blocking_room_load
+        ),
+        futures.ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        first = executor.submit(getattr(i_config, first_method))
+        try:
+            assert first_loading.wait(timeout=5)
+            second = executor.submit(second_reload)
+            assert second_started.wait(timeout=5)
+            assert not second_loading.wait(timeout=0.1)
+            assert not second.done()
+        finally:
+            release_first.set()
+
+        assert set(first.result(timeout=5)) == {"foo"}
+        assert set(second.result(timeout=5)) == {"foo"}
+        assert second_loading.is_set()
+
+
+def test_installationconfig_reload_skill_and_room_configs_removed_binding(
+    loaded_skill_rooms_config,
+):
+    i_config, _, skills_path = loaded_skill_rooms_config
+    previous_rooms = i_config._room_configs
+    previous_available = i_config._available_filesystem_skill_configs
+    previous_resolved = i_config._resolved_skill_configs
+    (skills_path / "sample" / "SKILL.md").unlink()
+    (skills_path / "sample").rmdir()
+    _write_reload_skill(skills_path, "new-skill")
+
+    with pytest.raises(config_exc.FromYamlException):
+        i_config.reload_skill_and_room_configs()
+
+    assert i_config._room_configs is previous_rooms
+    assert i_config._available_filesystem_skill_configs is previous_available
+    assert i_config._resolved_skill_configs is previous_resolved
+    assert set(i_config.available_filesystem_skill_configs) == {"sample"}
+    assert set(i_config.skill_configs) == {"sample"}
+    assert (
+        i_config.room_configs["foo"].skill_configs["sample"]
+        == previous_resolved["sample"]
+    )
+
+
+@_platform.requires_posix_symlinks
+def test_installationconfig_reload_skill_and_room_configs_symlink(
+    loaded_skill_rooms_config,
+):
+    i_config, rooms, _ = loaded_skill_rooms_config
+    version_one = rooms.parent / "v1"
+    version_two = rooms.parent / "v2"
+    _write_reload_skill(version_one, "sample")
+    _write_reload_skill(version_two, "sample", "Second version.")
+    link = rooms.parent / "current"
+    link.symlink_to(version_one, target_is_directory=True)
+    i_config.filesystem_skills_paths = [link]
+
+    i_config.reload_skill_and_room_configs()
+
+    first = i_config.skill_configs["sample"]
+    assert first.path == (version_one / "sample").resolve()
+    link.unlink()
+    link.symlink_to(version_two, target_is_directory=True)
+    assert first.path == (version_one / "sample").resolve()
+    assert "First instructions." in (first.path / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+    i_config.reload_skill_and_room_configs()
+
+    second = i_config.skill_configs["sample"]
+    assert second.path == (version_two / "sample").resolve()
+    assert second.capability.instructions == "Second version."
+    assert i_config.filesystem_skills_paths == [link]
 
 
 @pytest.fixture

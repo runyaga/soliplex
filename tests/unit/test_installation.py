@@ -997,7 +997,7 @@ async def test_installation_reload_skill_and_room_configs():
     def _reload_skill_and_room_configs():
         reloaded_in_threads.append(threading.get_ident())
         i_config.skill_configs = after_skills
-        return after_rooms
+        return before_rooms, before_skills, after_rooms, after_skills
 
     i_config.reload_skill_and_room_configs.side_effect = (
         _reload_skill_and_room_configs

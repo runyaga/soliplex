@@ -309,7 +309,9 @@ class _HaikuRAGEvidenceSkillConfig:
     state_namespace: typing.ClassVar[str | None] = None
     state_type: typing.ClassVar[type[pydantic.BaseModel] | None] = None
 
-    _installation_config: config_installation.InstallationConfig = None
+    _installation_config: config_installation.InstallationConfig = (
+        dataclasses.field(default=None, compare=False)
+    )
     _config_path: pathlib.Path | None = None
 
     @classmethod
@@ -388,7 +390,9 @@ class BwrapSandboxSkillConfig:
     state_namespace: typing.ClassVar[None] = None
     agui_feature_names: typing.ClassVar[tuple[str, ...]] = ()
 
-    _installation_config: config_installation.InstallationConfig = None
+    _installation_config: config_installation.InstallationConfig = (
+        dataclasses.field(default=None, compare=False)
+    )
     _config_path: pathlib.Path | None = None
 
     id: str | None = None
@@ -508,7 +512,9 @@ class EntrypointCapabilityConfig:
     kind: typing.ClassVar[str] = "entrypoint"
     source: typing.ClassVar[SkillKind] = SkillKind.ENTRYPOINT
 
-    _installation_config: config_installation.InstallationConfig = None
+    _installation_config: config_installation.InstallationConfig = (
+        dataclasses.field(default=None, compare=False)
+    )
     _config_path: pathlib.Path | None = None
 
     name: str

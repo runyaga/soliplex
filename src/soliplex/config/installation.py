@@ -1435,9 +1435,18 @@ class InstallationConfig:
 
             return room_configs.copy()
 
-    def reload_skill_and_room_configs(self) -> config_rooms.RoomConfigMap:
+    def reload_skill_and_room_configs(
+        self,
+    ) -> tuple[
+        config_rooms.RoomConfigMap,
+        config_skills.SkillConfigMap,
+        config_rooms.RoomConfigMap,
+        config_skills.SkillConfigMap,
+    ]:
         """Reload skills and rooms after loading both successfully."""
         with self._reload_lock:
+            before_rooms = self.room_configs
+            before_skills = self.skill_configs
             candidate = copy.copy(self)
             candidate._available_filesystem_skill_configs = (
                 _load_filesystem_skill_configs(
@@ -1460,7 +1469,12 @@ class InstallationConfig:
                 candidate._available_filesystem_skill_configs
             )
             self._resolved_skill_configs = candidate._resolved_skill_configs
-            return room_configs.copy()
+            return (
+                before_rooms,
+                before_skills,
+                room_configs.copy(),
+                self.skill_configs,
+            )
 
 
 def load_installation(config_path: pathlib.Path) -> InstallationConfig:

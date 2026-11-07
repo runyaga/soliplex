@@ -1,8 +1,11 @@
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 import fastapi
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from soliplex import authz
@@ -306,6 +309,144 @@ def _skills_reload_app(
         installation_views.get_the_config_audit_log: lambda: the_audit,
     }
     return app
+
+
+def _write_skill(root, name, instructions="Original instructions."):
+    directory = root / "skills" / name
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "SKILL.md"
+    path.write_text(
+        f"---\nname: {name}\ndescription: A test skill.\n---\n"
+        f"{instructions}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_room(root, name="base-room", bindings=("base",), native=None):
+    directory = root / "rooms" / name
+    directory.mkdir(parents=True, exist_ok=True)
+    room = {
+        "id": name,
+        "name": name,
+        "description": "A test room.",
+        "agent": {"model_name": "test-model", "system_prompt": "Help."},
+        "skills": {"installation_skill_names": list(bindings)},
+    }
+    if native:
+        room["skills"]["skill_configs"] = [{"kind": native}]
+    path = directory / "room_config.yaml"
+    path.write_text(yaml.safe_dump(room), encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def loaded_config(tmp_path):
+    _write_skill(tmp_path, "base")
+    _write_room(tmp_path)
+    config = config_installation.InstallationConfig(
+        id="reload-defects", _config_path=tmp_path / "installation.yaml"
+    )
+    assert set(config.room_configs["base-room"].skill_configs) == {"base"}
+    return config
+
+
+def _loaded_skills_reload_app(config):
+    admin = mock.create_autospec(authz.AdminUserPolicy)
+    admin.check_admin_access.return_value = True
+    return _skills_reload_app(
+        installation.Installation(config),
+        admin,
+        mock.create_autospec(loggers.LogWrapper),
+        mock.create_autospec(loggers.InstallationConfigAuditLog),
+    )
+
+
+def test_endpoint_unchanged_native_skill_has_empty_delta(
+    loaded_config, tmp_path, monkeypatch
+):
+    """Comparing native skills avoids recursion through room snapshots."""
+    monkeypatch.delenv("_SOLIPLEX_MULTIPLE_WRITERS", raising=False)
+    _write_room(tmp_path, native="haiku.rag.skills.evidence_compaction")
+    loaded_config.reload_skill_and_room_configs()
+
+    with TestClient(_loaded_skills_reload_app(loaded_config)) as client:
+        response = client.post("/v1/installation/reload/skills")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "rooms": {"added": [], "removed": [], "changed": []},
+        "skills": {"added": [], "removed": [], "changed": []},
+    }
+
+
+def test_endpoint_ignores_room_quiz_cache_in_delta(loaded_config, monkeypatch):
+    """Reading a derived room cache preserves an empty reload delta."""
+    monkeypatch.delenv("_SOLIPLEX_MULTIPLE_WRITERS", raising=False)
+    assert loaded_config.room_configs["base-room"].quiz_map == {}
+
+    with TestClient(_loaded_skills_reload_app(loaded_config)) as client:
+        response = client.post("/v1/installation/reload/skills")
+
+    assert response.status_code == 200
+    assert response.json()["rooms"]["changed"] == []
+
+
+def test_concurrent_endpoint_deltas_use_their_own_skill_generation(
+    loaded_config, tmp_path, monkeypatch
+):
+    """Each concurrent reload reports its own skill generation."""
+    monkeypatch.delenv("_SOLIPLEX_MULTIPLE_WRITERS", raising=False)
+    _write_skill(tmp_path, "first")
+    _write_room(tmp_path, "first-room", ("first",))
+    both_started = threading.Barrier(2)
+    first_published = threading.Event()
+    second_published = threading.Event()
+    counter_lock = threading.Lock()
+    calls = 0
+    reload_configs = type(loaded_config).reload_skill_and_room_configs
+
+    def scheduled_reload(config):
+        nonlocal calls
+        with counter_lock:
+            calls += 1
+            number = calls
+        both_started.wait(timeout=10)
+        if number == 1:
+            snapshots = reload_configs(config)
+            first_published.set()
+            assert second_published.wait(timeout=10)
+        else:
+            assert first_published.wait(timeout=10)
+            (tmp_path / "skills" / "first" / "SKILL.md").unlink()
+            (tmp_path / "rooms" / "first-room" / "room_config.yaml").unlink()
+            _write_skill(tmp_path, "second")
+            _write_room(tmp_path, "second-room", ("second",))
+            try:
+                snapshots = reload_configs(config)
+            finally:
+                second_published.set()
+        return snapshots
+
+    monkeypatch.setattr(
+        type(loaded_config), "reload_skill_and_room_configs", scheduled_reload
+    )
+    with TestClient(_loaded_skills_reload_app(loaded_config)) as client:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            responses = [
+                executor.submit(client.post, "/v1/installation/reload/skills")
+                for _ in range(2)
+            ]
+            payloads = [
+                future.result(timeout=20).json() for future in responses
+            ]
+
+    (first_delta,) = [
+        delta
+        for delta in payloads
+        if delta["rooms"]["added"] == ["first-room"]
+    ]
+    assert first_delta["skills"]["added"] == ["first"]
 
 
 @pytest.mark.parametrize("empty", [False, True])

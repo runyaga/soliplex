@@ -488,12 +488,14 @@ class Installation:
         self,
     ) -> SkillAndRoomConfigsReloaded:
         """Reload skills and rooms in a worker thread and report changes."""
-        before_rooms = self._config.room_configs
-        before_skills = self._config.skill_configs
-        after_rooms = await anyio.to_thread.run_sync(
+        (
+            before_rooms,
+            before_skills,
+            after_rooms,
+            after_skills,
+        ) = await anyio.to_thread.run_sync(
             self._config.reload_skill_and_room_configs,
         )
-        after_skills = self._config.skill_configs
         kept = before_skills.keys() & after_skills.keys()
         return SkillAndRoomConfigsReloaded(
             rooms=RoomConfigsReloaded.between(before_rooms, after_rooms),

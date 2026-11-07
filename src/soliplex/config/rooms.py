@@ -108,7 +108,9 @@ class RoomConfig:
     # Quiz-specific options
     #
     quizzes: list[config_quizzes.QuizConfig] = _default_list_field()
-    _quiz_map: config_quizzes.QuizConfigMap = None
+    _quiz_map: config_quizzes.QuizConfigMap = dataclasses.field(
+        default=None, compare=False
+    )
 
     # Set by `from_yaml` factory
     _installation_config: config_installation.InstallationConfig = (

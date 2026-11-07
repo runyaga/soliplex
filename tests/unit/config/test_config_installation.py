@@ -4184,8 +4184,13 @@ def test_installationconfig_reload_skill_and_room_configs(
     )
     assert set(i_config.skill_configs) == {"sample"}
 
-    found = i_config.reload_skill_and_room_configs()
+    before_rooms, before_skills, found, after_skills = (
+        i_config.reload_skill_and_room_configs()
+    )
 
+    assert before_rooms == existing
+    assert set(before_skills) == {"sample"}
+    assert after_skills == i_config.skill_configs
     assert set(i_config.available_filesystem_skill_configs) == {
         "sample",
         "new-skill",
@@ -4206,11 +4211,11 @@ def test_installationconfig_reload_skills_replaces_candidate_room_map(
     loaded_skill_rooms_config,
 ):
     i_config, rooms, _ = loaded_skill_rooms_config
-    first = i_config.reload_skill_and_room_configs()
+    _, _, first, _ = i_config.reload_skill_and_room_configs()
     first_candidate = first["foo"]._installation_config
     _write_room_config(rooms, "bar", _room_config_yaml("bar"))
 
-    second = i_config.reload_skill_and_room_configs()
+    _, _, second, _ = i_config.reload_skill_and_room_configs()
 
     second_candidate = second["foo"]._installation_config
     assert second_candidate is not first_candidate
@@ -4247,7 +4252,7 @@ def test_installationconfig_reload_skills_publishes_rooms_before_skills(
             observe_room_publication,
         ),
     ):
-        found = i_config.reload_skill_and_room_configs()
+        _, _, found, _ = i_config.reload_skill_and_room_configs()
         assert i_config._room_configs == found
 
     config, available, resolved = observed[-1]
@@ -4265,7 +4270,7 @@ def test_installationconfig_reload_skill_and_room_configs_edited_skill(
     _write_reload_skill(skills_path, "sample", "Edited instructions.")
     assert i_config.skill_configs["sample"] == previous
 
-    rooms = i_config.reload_skill_and_room_configs()
+    _, _, rooms, _ = i_config.reload_skill_and_room_configs()
 
     reloaded = i_config.skill_configs["sample"]
     assert reloaded != previous
@@ -4374,8 +4379,18 @@ def test_installationconfig_concurrent_reloads_wait(
         finally:
             release_first.set()
 
-        assert set(first.result(timeout=5)) == {"foo"}
-        assert set(second.result(timeout=5)) == {"foo"}
+        first_result = first.result(timeout=5)
+        second_result = second.result(timeout=5)
+        assert set(
+            first_result[2]
+            if first_method == "reload_skill_and_room_configs"
+            else first_result
+        ) == {"foo"}
+        assert set(
+            second_result[2]
+            if second_method == "reload_skill_and_room_configs"
+            else second_result
+        ) == {"foo"}
         assert second_loading.is_set()
 
 

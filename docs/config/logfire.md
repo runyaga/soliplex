@@ -34,6 +34,21 @@ configuration).  See the Logfire
 
 ## Optional attributes
 
+- `scrubbing` (boolean or None, None by default) controls Logfire's
+  sensitive-data scrubbing. `false` passes `scrubbing=False` to
+  `logfire.configure`. `true` or an absent value keeps the default
+  scrubbing behavior.
+
+- `scrubbing_patterns` (a list of strings, None by default) supplies extra
+  scrubbing patterns to Logfire. It cannot be combined with
+  `scrubbing: false`, including an empty list.
+
+  ```yaml
+  logfire_config:
+      token: "secret:LOGFIRE_TOKEN"
+      scrubbing: false
+  ```
+
 - `service_name` defines the service name reported to Logfire
   for the appliction.  See
   [this page](https://logfire.pydantic.dev/docs/reference/api/logfire/#logfire.configure(service_name))

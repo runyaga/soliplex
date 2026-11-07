@@ -881,3 +881,50 @@ def test_logfireconfig_from_yaml(
         )
 
         assert found == expected
+
+
+@pytest.mark.parametrize(
+    "options, expected",
+    [
+        ({}, None),
+        ({"scrubbing": None}, None),
+        ({"scrubbing": True}, None),
+        ({"scrubbing": False}, False),
+        (
+            {"scrubbing": True, "scrubbing_patterns": ["private"]},
+            {"extra_patterns": ["private"]},
+        ),
+    ],
+)
+def test_scrubbing_switch_round_trips(
+    installation_config, tmp_path, options, expected
+):
+    original, reloaded = _round_trip_logfire_config(
+        installation_config,
+        tmp_path / "logfire.yaml",
+        {"token": "secret:LOGFIRE_TOKEN", **options},
+    )
+    assert reloaded == original
+    assert reloaded.scrubbing is options.get("scrubbing")
+    assert reloaded.logfire_config_kwargs.get("scrubbing") == expected
+    if expected is None:
+        assert "scrubbing" not in reloaded.logfire_config_kwargs
+    else:
+        assert "scrubbing" in reloaded.logfire_config_kwargs
+
+
+@pytest.mark.parametrize("patterns", [[], ["private"]])
+def test_disabled_scrubbing_rejects_patterns(
+    installation_config, tmp_path, patterns
+):
+    with pytest.raises(config_exc.FromYamlException) as exc:
+        config_logfire.LogfireConfig.from_yaml(
+            installation_config,
+            tmp_path / "logfire.yaml",
+            {
+                "token": "secret:LOGFIRE_TOKEN",
+                "scrubbing": False,
+                "scrubbing_patterns": patterns,
+            },
+        )
+    assert "scrubbing_patterns cannot be set" in str(exc.value.__cause__)

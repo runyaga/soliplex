@@ -129,6 +129,7 @@ class LogfireConfig:
     add_baggage_to_attributes: bool = True
     distributed_tracing: bool = None
     base_url: str = _env_whole_or_literal_field(default=None)
+    scrubbing: bool | None = None
     scrubbing_patterns: list[str] = None
 
     instrument_pydantic_ai: LogfireInstrumentPydanticAI = None
@@ -139,6 +140,13 @@ class LogfireConfig:
         _no_repr_no_compare_none()
     )
     _config_path: pathlib.Path = None
+
+    def __post_init__(self):
+        if self.scrubbing is False and self.scrubbing_patterns is not None:
+            message = (
+                "scrubbing_patterns cannot be set when scrubbing is false"
+            )
+            raise ValueError(message)
 
     @property
     def logfire_config_kwargs(self) -> dict[str, typing.Any]:
@@ -170,7 +178,9 @@ class LogfireConfig:
                 "base_url": config_interp.resolve_field(self, "base_url"),
             }
 
-        if self.scrubbing_patterns is not None:
+        if self.scrubbing is False:
+            kwargs["scrubbing"] = False
+        elif self.scrubbing_patterns is not None:
             kwargs["scrubbing"] = {
                 "extra_patterns": self.scrubbing_patterns,
             }
@@ -201,6 +211,9 @@ class LogfireConfig:
 
         if self.base_url is not None:
             result["base_url"] = self.base_url
+
+        if self.scrubbing is not None:
+            result["scrubbing"] = self.scrubbing
 
         if self.scrubbing_patterns is not None:
             result["scrubbing_patterns"] = self.scrubbing_patterns

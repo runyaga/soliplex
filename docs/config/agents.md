@@ -127,6 +127,13 @@ agent:
   context_window: 32768
   ```
 
+- `inline_system_prompts` (a boolean, default None): controls whether
+  Pydantic AI sends later instructions as system messages. Set it to
+  `false` for servers that accept only one system message at the beginning,
+  such as vLLM with a Qwen chat template. Later instructions are sent as
+  user messages wrapped in `<system>...</system>`. When unset, the model's
+  default profile applies.
+
 - `agui_feature_names` (a list of strings, default empty):  AG-UI feature
   names this agent contributes to the room's aggregate feature set.  Each
   name must be registered in the AG-UI feature registry; see

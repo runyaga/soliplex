@@ -192,6 +192,7 @@ class AgentConfig:
     # not report one, so a room served that way declares it here or
     # shows no context usage.
     context_window: int = None
+    inline_system_prompts: bool | None = None
 
     # Declares whether this agent's model accepts image input. Gates whether
     # the RAG capability attaches picture chunks to search results as
@@ -350,6 +351,7 @@ class AgentConfig:
             "system_prompt": prompt,
             "model_settings": self.model_settings,
             "context_window": self.context_window,
+            "inline_system_prompts": self.inline_system_prompts,
             "multimodal": self.multimodal,
             "provider_type": str(self.provider_type),
             "provider_base_url": self.provider_base_url,
@@ -504,6 +506,11 @@ def _profile_kw(agent_config: AgentConfig, *, openai_compat: bool) -> dict:
 
     if agent_config.context_window is not None:
         profile["context_window"] = agent_config.context_window
+
+    if agent_config.inline_system_prompts is not None:
+        profile["supports_inline_system_prompts"] = (
+            agent_config.inline_system_prompts
+        )
 
     return {"profile": profile} if profile else {}
 

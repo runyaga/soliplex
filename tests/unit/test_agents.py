@@ -65,24 +65,6 @@ _FAKE_TOOLSET_FACTORY_BY_KIND = {
 }
 
 
-def test_agent_model_disables_inline_system_prompts():
-    agent_config = config_agents.AgentConfig(
-        id="test-agent",
-        model_name="qwen3",
-        provider_type=config_agents.LLMProviderType.OLLAMA,
-        provider_base_url="http://localhost:11434",
-        inline_system_prompts=False,
-    )
-
-    agent = agents.get_agent_from_configs(
-        agent_config=agent_config,
-        tool_configs={},
-        mcp_client_toolset_configs={},
-    )
-
-    assert agent.model.profile["supports_inline_system_prompts"] is False
-
-
 def test_tool():
     """This is a test"""
 

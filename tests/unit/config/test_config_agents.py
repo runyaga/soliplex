@@ -1150,7 +1150,6 @@ def test_agentconfig_as_yaml(
         "model_name": agent_config_kw.get("model_name"),
         "model_settings": agent_config_kw.get("model_settings"),
         "context_window": agent_config_kw.get("context_window"),
-        "inline_system_prompts": agent_config_kw.get("inline_system_prompts"),
         "retries": agent_config_kw.get("retries", 3),
         "multimodal": agent_config_kw.get("multimodal", False),
         "provider_type": agent_config_kw.get("provider_type", "ollama"),
@@ -1167,27 +1166,6 @@ def test_agentconfig_as_yaml(
 
     installation_config.get_environment.assert_not_called()  # see #1183
     installation_config.get_secret.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "config_yaml, expected",
-    [
-        ("", None),
-        ("inline_system_prompts: true", True),
-        ("inline_system_prompts: false", False),
-    ],
-)
-def test_agentconfig_inline_system_prompts(
-    installation_config, tmp_path, config_yaml, expected
-):
-    agent_config = config_agents.AgentConfig.from_yaml(
-        installation_config,
-        tmp_path / "agent.yaml",
-        yaml.safe_load(f"id: test-agent\n{config_yaml}"),
-    )
-
-    assert agent_config.inline_system_prompts is expected
-    assert agent_config.as_yaml["inline_system_prompts"] is expected
 
 
 def _round_trip_agent_config(installation_config, config_path, config_dict):
@@ -1636,7 +1614,6 @@ def test_get_context_window_from_config_unbuildable(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("inline_system_prompts", [None, True, False])
 @pytest.mark.parametrize("w_context_window", [None, 32768])
 @pytest.mark.parametrize("w_model_settings", [None, MODEL_SETTINGS])
 @pytest.mark.parametrize(
@@ -1663,7 +1640,6 @@ def test_get_model_from_config(
     llm_provider_kw,
     w_model_settings,
     w_context_window,
-    inline_system_prompts,
 ):
     exp_model_name = f"interpolated-{MODEL}"
 
@@ -1675,7 +1651,6 @@ def test_get_model_from_config(
     agent_config.get_system_prompt.return_value = SYSTEM_PROMPT
     agent_config.model_settings = w_model_settings
     agent_config.context_window = w_context_window
-    agent_config.inline_system_prompts = inline_system_prompts
     agent_config.provider_type = provider_type
     # A copy, so the assertions below compare against what was
     # configured rather than against anything the code did to it.
@@ -1691,10 +1666,6 @@ def test_get_model_from_config(
         if w_context_window is not None
         else {}
     )
-    if inline_system_prompts is not None:
-        window_profile["supports_inline_system_prompts"] = (
-            inline_system_prompts
-        )
 
     def expected_profile_kw(openai_compat):
         profile = (

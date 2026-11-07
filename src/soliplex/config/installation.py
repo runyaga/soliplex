@@ -5,6 +5,8 @@ import dataclasses
 import enum
 import functools
 import itertools
+import json
+import logging
 import os
 import pathlib
 import threading
@@ -38,6 +40,8 @@ from . import sse_delivery as config_sse_delivery
 # from . import tools as config_tools
 
 FILE_PREFIX = "file:"
+
+logger = logging.getLogger(__name__)
 
 SYNC_MEMORY_ENGINE_URL = "sqlite://"
 ASYNC_MEMORY_ENGINE_URL = "sqlite+aiosqlite://"
@@ -254,9 +258,30 @@ def _load_filesystem_skill_configs(
     return fs_skill_configs
 
 
+def _load_skill_allow_list(path: pathlib.Path) -> list[str]:
+    """Read skill names from a JSON allow-list file."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        error_kind = type(error).__name__
+    else:
+        if (
+            isinstance(data, dict)
+            and isinstance(data.get("skills"), list)
+            and all(isinstance(name, str) for name in data["skills"])
+        ):
+            return data["skills"]
+        error_kind = "InvalidFormat"
+    logger.warning(
+        "Cannot read skill allow-list file %s: %s", path, error_kind
+    )
+    return []
+
+
 def resolve_skill_configs(
     explicit: typing.Iterable[dict],
     available: config_skills.SkillConfigMap,
+    allow_list_files: typing.Iterable[pathlib.Path] = (),
 ) -> config_skills.SkillConfigMap:
     """Resolve enabled filesystem skills from discovered availability."""
     selected = {}
@@ -267,7 +292,23 @@ def resolve_skill_configs(
         skill_name = entry["skill_name"]
         selected[skill_name] = available[skill_name]
 
-    return selected or dict(available)
+    allow_list_files = dict.fromkeys(allow_list_files)
+    seen = set(selected)
+    for path in allow_list_files:
+        for skill_name in _load_skill_allow_list(path):
+            if skill_name in seen:
+                continue
+            seen.add(skill_name)
+            if skill_name not in available:
+                logger.warning(
+                    "Skill allow-list file %s names undiscovered skill %r",
+                    path,
+                    skill_name,
+                )
+                continue
+            selected[skill_name] = available[skill_name]
+
+    return selected if selected or allow_list_files else dict(available)
 
 
 class EnvironmentSourceType(enum.StrEnum):
@@ -645,6 +686,7 @@ class InstallationConfig:
     # Defaults to one path: './skills' (set in '__post_init__').
     #
     filesystem_skills_paths: list[pathlib.Path] = None
+    skill_allow_list_files: list[pathlib.Path] = _default_list_field()
 
     _available_filesystem_skill_configs: config_skills.SkillConfigMap = None
     _skill_configs: list[dict] | None = None
@@ -672,6 +714,7 @@ class InstallationConfig:
             self._resolved_skill_configs = resolve_skill_configs(
                 self._skill_configs or [],
                 self.available_filesystem_skill_configs,
+                self.skill_allow_list_files,
             )
 
         return self._resolved_skill_configs.copy()
@@ -1199,6 +1242,9 @@ class InstallationConfig:
                 for skills_path in self.filesystem_skills_paths
                 if skills_path is not None
             ]
+            self.skill_allow_list_files = [
+                parent_dir / path for path in self.skill_allow_list_files
+            ]
 
     @property
     def as_yaml(self) -> dict:
@@ -1214,6 +1260,9 @@ class InstallationConfig:
             "agent_configs": [ac.as_yaml for ac in self.agent_configs],
             "filesystem_skills_paths": [
                 str(path) for path in self.filesystem_skills_paths
+            ],
+            "skill_allow_list_files": [
+                str(path) for path in self.skill_allow_list_files
             ],
             "oidc_paths": [str(path) for path in self.oidc_paths],
             "room_paths": [str(path) for path in self.room_paths],
@@ -1460,6 +1509,7 @@ class InstallationConfig:
             candidate._resolved_skill_configs = resolve_skill_configs(
                 candidate._skill_configs or [],
                 candidate._available_filesystem_skill_configs,
+                candidate.skill_allow_list_files,
             )
             room_configs = candidate._load_room_configs()
             candidate._room_configs = room_configs

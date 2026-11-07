@@ -1,6 +1,8 @@
 import contextlib
 import copy
 import dataclasses
+import json
+import logging
 import operator
 import pathlib
 import re
@@ -2689,6 +2691,7 @@ def _as_yaml_only_base_stanzas():
         "filesystem_skills_paths": [
             str(pathlib.Path(AS_YAML_ONLY_SKILLS_PATH))
         ],
+        "skill_allow_list_files": [],
         # Always emitted, even when unset.
         "thread_persistence_db": {
             "sync_dburi": None,
@@ -3005,6 +3008,7 @@ INSTALLATION_STATE_ATTRS = (
     "environment",
     "middleware_stack",
     "filesystem_skills_paths",
+    "skill_allow_list_files",
     "oidc_paths",
     "room_paths",
     "completion_paths",
@@ -3907,6 +3911,204 @@ def test_resolve_skill_configs_unknown_skill_raises():
         )
 
 
+def test_installationconfig_skill_allow_list_files_round_trip(tmp_path):
+    config_path = tmp_path / "installation.yaml"
+    absolute = tmp_path / "absolute.json"
+    config_dict = {
+        "id": INSTALLATION_ID,
+        "skill_allow_list_files": ["team/skills.json", str(absolute)],
+    }
+
+    original, reloaded = _round_trip_installation_config(
+        config_path, config_dict
+    )
+
+    expected = [tmp_path / "team/skills.json", absolute]
+    assert original.skill_allow_list_files == expected
+    assert original.as_yaml["skill_allow_list_files"] == [
+        str(path) for path in expected
+    ]
+    assert reloaded.skill_allow_list_files == expected
+    bare = config_installation.InstallationConfig(
+        **BARE_INSTALLATION_CONFIG_KW
+    )
+    assert bare.skill_allow_list_files == []
+
+
+@pytest.mark.parametrize(
+    "explicit, expected",
+    [
+        ([], ["second", "first", "manual", "third"]),
+        (
+            [
+                {"kind": "filesystem", "skill_name": "manual"},
+                {"kind": "filesystem", "skill_name": "manual"},
+            ],
+            ["manual", "second", "first", "third"],
+        ),
+    ],
+)
+def test_installationconfig_skill_allow_list_names(
+    tmp_path, explicit, expected
+):
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text(
+        json.dumps({"skills": ["second", "first", "second", "manual"]}),
+        encoding="utf-8",
+    )
+    second.write_text(
+        json.dumps({"skills": ["third", "first"]}), encoding="utf-8"
+    )
+    available = {
+        name: object()
+        for name in ["manual", "first", "second", "third", "all"]
+    }
+    i_config = config_installation.InstallationConfig(
+        **BARE_INSTALLATION_CONFIG_KW,
+        skill_allow_list_files=[first, second],
+        _skill_configs=explicit,
+        _available_filesystem_skill_configs=available,
+    )
+
+    assert list(i_config.skill_configs) == expected
+    assert i_config.skill_configs == {
+        name: available[name] for name in expected
+    }
+
+
+@pytest.mark.parametrize("explicit_names", [[], ["enabled"]])
+@pytest.mark.parametrize("missing_name", ["missing", "missing\n\r\t\x00\x1b"])
+@pytest.mark.parametrize(
+    "names, expected_names", [([], []), (["enabled"], ["enabled"])]
+)
+def test_resolve_skill_configs_undiscovered_file_name(
+    tmp_path, caplog, names, expected_names, missing_name, explicit_names
+):
+    path = tmp_path / "skills.json"
+    path.write_text(
+        json.dumps({"skills": [missing_name, *names, missing_name]}),
+        encoding="utf-8",
+    )
+    available = {"enabled": object(), "unlisted": object()}
+
+    resolved = config_installation.resolve_skill_configs(
+        [
+            {"kind": "filesystem", "skill_name": name}
+            for name in explicit_names
+        ],
+        available,
+        [path, path],
+    )
+
+    assert resolved == {
+        name: available[name] for name in explicit_names + expected_names
+    }
+    assert caplog.record_tuples == [
+        (
+            config_installation.__name__,
+            logging.WARNING,
+            f"Skill allow-list file {path} names undiscovered skill "
+            f"{missing_name!r}",
+        )
+    ]
+
+
+@pytest.mark.parametrize("explicit_names", [[], ["enabled"]])
+@pytest.mark.parametrize("path_name", ["missing.json", "."])
+def test_resolve_skill_configs_unreadable_allow_list(
+    tmp_path, caplog, path_name, explicit_names
+):
+    path = tmp_path / path_name
+    with pytest.raises(OSError, match=re.escape(path.name)) as caught:
+        path.read_text(encoding="utf-8")
+    available = {"enabled": object(), "unlisted": object()}
+
+    assert config_installation.resolve_skill_configs(
+        [
+            {"kind": "filesystem", "skill_name": name}
+            for name in explicit_names
+        ],
+        available,
+        iter([path, path]),
+    ) == {name: available[name] for name in explicit_names}
+    assert caplog.record_tuples == [
+        (
+            config_installation.__name__,
+            logging.WARNING,
+            f"Cannot read skill allow-list file {path}: "
+            f"{type(caught.value).__name__}",
+        )
+    ]
+
+
+@pytest.mark.parametrize("explicit_names", [[], ["enabled"]])
+@pytest.mark.parametrize(
+    "content, error_kind",
+    [
+        (b"private-invalid-json", "JSONDecodeError"),
+        (b"\xffprivate", "UnicodeDecodeError"),
+        (b'"private"', "InvalidFormat"),
+        (b'{"private": []}', "InvalidFormat"),
+        (b'{"skills": "private"}', "InvalidFormat"),
+        (b'{"skills": ["enabled", {"private": 1}]}', "InvalidFormat"),
+    ],
+)
+def test_resolve_skill_configs_malformed_allow_list(
+    tmp_path, caplog, content, error_kind, explicit_names
+):
+    path = tmp_path / "skills.json"
+    path.write_bytes(content)
+    available = {"enabled": object(), "unlisted": object()}
+
+    assert config_installation.resolve_skill_configs(
+        [
+            {"kind": "filesystem", "skill_name": name}
+            for name in explicit_names
+        ],
+        available,
+        [path],
+    ) == {name: available[name] for name in explicit_names}
+    assert caplog.record_tuples == [
+        (
+            config_installation.__name__,
+            logging.WARNING,
+            f"Cannot read skill allow-list file {path}: {error_kind}",
+        )
+    ]
+
+
+@pytest.mark.parametrize("explicit_names", [[], ["enabled"]])
+def test_resolve_skill_configs_empty_allow_list(
+    tmp_path, caplog, explicit_names
+):
+    path = tmp_path / "skills.json"
+    path.write_text('{"skills": []}', encoding="utf-8")
+    available = {"enabled": object(), "unlisted": object()}
+
+    assert config_installation.resolve_skill_configs(
+        [
+            {"kind": "filesystem", "skill_name": name}
+            for name in explicit_names
+        ],
+        available,
+        [path],
+    ) == {name: available[name] for name in explicit_names}
+    assert caplog.records == []
+
+
+def test_resolve_skill_configs_explicit_unknown_with_allow_list(tmp_path):
+    path = tmp_path / "skills.json"
+    path.write_text('{"skills": ["enabled"]}', encoding="utf-8")
+
+    with pytest.raises(KeyError, match="missing"):
+        config_installation.resolve_skill_configs(
+            [{"kind": "filesystem", "skill_name": "missing"}],
+            {"enabled": object(), "unlisted": object()},
+            [path],
+        )
+
+
 @pytest.mark.parametrize(
     "w_kwargs, expected",
     [
@@ -4167,6 +4369,48 @@ def loaded_skill_rooms_config(loaded_rooms_config):
     )
     i_config.reload_room_configs()
     return i_config, rooms, skills_path
+
+
+@pytest.mark.parametrize("explicit_names", [[], ["second"]])
+@pytest.mark.parametrize(
+    "path_name, content, expected_names",
+    [
+        ("skills.json", b'{"skills": ["second"]}', ["second"]),
+        ("missing.json", None, []),
+        (".", None, []),
+        ("skills.json", b"invalid-json", []),
+        ("skills.json", b"\xff", []),
+        ("skills.json", b'{"skills": "second"}', []),
+        ("skills.json", b'{"skills": []}', []),
+        ("skills.json", b'{"skills": ["missing"]}', []),
+    ],
+)
+def test_installationconfig_reload_skill_allow_list(
+    loaded_rooms_config, path_name, content, expected_names, explicit_names
+):
+    i_config, rooms = loaded_rooms_config
+    skills_path = rooms.parent / "skills"
+    _write_reload_skill(skills_path, "first")
+    _write_reload_skill(skills_path, "second")
+    path = rooms.parent / "skills.json"
+    path.write_text('{"skills": ["first"]}', encoding="utf-8")
+    i_config.filesystem_skills_paths = [skills_path]
+    i_config.skill_allow_list_files = [path]
+    i_config._skill_configs = [
+        {"kind": "filesystem", "skill_name": name} for name in explicit_names
+    ]
+    assert set(i_config.skill_configs) == {"first", *explicit_names}
+
+    path = rooms.parent / path_name
+    i_config.skill_allow_list_files = [path]
+    if content is not None:
+        path.write_bytes(content)
+    assert set(i_config.skill_configs) == {"first", *explicit_names}
+    _, before, _, after = i_config.reload_skill_and_room_configs()
+
+    assert set(before) == {"first", *explicit_names}
+    assert set(after) == set(explicit_names + expected_names)
+    assert i_config.skill_configs == after
 
 
 def test_installationconfig_reload_skill_and_room_configs(

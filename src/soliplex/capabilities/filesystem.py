@@ -13,6 +13,8 @@ from pydantic_ai import capabilities as ai_capabilities
 from pydantic_ai import exceptions as ai_exc
 from pydantic_ai import toolsets as ai_toolsets
 
+from soliplex.capabilities import monty
+
 _SKILL_FILENAME = "SKILL.md"
 _FRONTMATTER_DELIMITER = "---"
 _NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -104,6 +106,14 @@ class _CapabilityMetadata(pydantic.BaseModel):
         str,
         pydantic.Field(min_length=1, max_length=1024),
     ]
+    allowed_tools: tuple[str, ...] = pydantic.Field(
+        default=(), alias="allowed-tools"
+    )
+
+    @pydantic.field_validator("allowed_tools", mode="before")
+    @classmethod
+    def parse_allowed_tools(cls, value):
+        return value.split() if isinstance(value, str) else value
 
     @pydantic.field_validator("name")
     @classmethod
@@ -125,6 +135,7 @@ class FilesystemCapability(ai_capabilities.AbstractCapability[typing.Any]):
 
     instructions: str
     path: pathlib.Path
+    allowed_tools: tuple[str, ...] = ()
 
     def get_instructions(self) -> str:
         return self.instructions
@@ -135,7 +146,8 @@ class FilesystemCapability(ai_capabilities.AbstractCapability[typing.Any]):
             tools.append(self.read_resource)
         if (self.path / _SCRIPTS_DIRNAME).is_dir():
             tools.append(self.run_script)
-        if not tools:
+        scripts = monty.MontyToolset(self.path / "monty", self.allowed_tools)
+        if not tools and not scripts.tools:
             return None
         prefix = self.id or self.path.name
         if (
@@ -145,7 +157,13 @@ class FilesystemCapability(ai_capabilities.AbstractCapability[typing.Any]):
             prefix = (
                 "skill_" + hashlib.sha256(prefix.encode()).hexdigest()[:12]
             )
-        return ai_toolsets.FunctionToolset(tools).prefixed(prefix)
+        return ai_toolsets.CombinedToolset(
+            [ai_toolsets.FunctionToolset(tools), scripts]
+        ).prefixed(prefix)
+
+    def get_wrapper_toolset(self, toolset):
+        """Give Monty scripts access to the assembled room tools."""
+        return monty.MontyHostToolset(toolset)
 
     def _confined(self, dirname: str, value: str) -> pathlib.Path:
         root = (self.path / dirname).resolve()
@@ -248,6 +266,7 @@ def _parse_skill_file(
         defer_loading=True,
         instructions=instructions,
         path=skill_path,
+        allowed_tools=metadata.allowed_tools,
     )
 
 
